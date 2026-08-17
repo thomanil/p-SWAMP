@@ -1,10 +1,10 @@
 services:
   # Just "server": Compose prefixes containers with the project name, which is
-  # already the repo directory (pswamp-client-server-poc), so this comes up as
-  # pswamp-client-server-poc-server-1 rather than repeating the name twice.
+  # already the repo directory (p-SWAMP), so this comes up as p-swamp-server-1
+  # rather than repeating the name twice.
   server:
     build: .
-    image: pswamp-client-server-poc:latest
+    image: p-swamp:latest
     ports:
       - "8000:8000"
     environment:

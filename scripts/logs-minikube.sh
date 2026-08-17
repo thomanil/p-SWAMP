@@ -10,7 +10,7 @@
 # start-pswamp-in-local-minikube-cluster.sh does a rollout that replaces the
 # pod (Recreate strategy), which ends the stream —
 # just run this again once the new pod is ready. The old pod's logs are gone
-# with it; use `kubectl logs deployment/pswamp-client-server-poc --previous` to see the
+# with it; use `kubectl logs deployment/p-swamp --previous` to see the
 # last terminated pod's output.
 set -euo pipefail
 
@@ -20,5 +20,5 @@ cd "$(dirname "$0")/.."
 # Stream the logs, dropping the noisy healthcheck request lines. --line-buffered
 # keeps output flowing line-by-line for the follow; grep -v's exit status is
 # masked so a (transient) all-filtered chunk can't trip pipefail and kill the tail.
-kubectl logs -f deployment/pswamp-client-server-poc --timestamps \
+kubectl logs -f deployment/p-swamp --timestamps \
   | { grep -v --line-buffered "GET /healthz HTTP/1.1" || true; }

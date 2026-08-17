@@ -35,29 +35,29 @@ fi
 # --- Build the image into minikube -----------------------------------------
 # Build inside minikube's own runtime so the image lands exactly where the
 # kubelet looks for it (and the arch always matches the node — matters on arm64).
-echo "Building pswamp-client-server-poc:latest into minikube..."
-minikube image build -t pswamp-client-server-poc:latest .
+echo "Building p-swamp:latest into minikube..."
+minikube image build -t p-swamp:latest .
 
 # --- Apply manifests and roll out ------------------------------------------
 echo "Applying manifests..."
-kubectl apply -f k8s/pswamp-client-server-poc-local.yaml
+kubectl apply -f k8s/p-swamp-local.yaml
 
 # `kubectl apply` won't restart pods if the manifest text is unchanged, even
 # though we just rebuilt the :latest image. Force a new pod so the fresh image
 # is actually used.
 echo "Rolling out..."
-kubectl rollout restart deployment/pswamp-client-server-poc
-kubectl rollout status deployment/pswamp-client-server-poc --timeout=120s
+kubectl rollout restart deployment/p-swamp
+kubectl rollout status deployment/p-swamp --timeout=120s
 
 # --- Report the client URL -------------------------------------------------
 # 30081, not the usual 30080: an older timeline-server sandbox still lives in the
 # same local cluster, and two Services can't share a nodePort. Keep it in sync
-# with k8s/pswamp-client-server-poc-local.yaml.
+# with k8s/p-swamp-local.yaml.
 MINIKUBE_IP="$(minikube ip)"
 NODE_PORT=30081
 BASE_URL="http://${MINIKUBE_IP}:${NODE_PORT}"
 echo
-echo "pswamp-client-server-poc is up. Point the client's 'Local minikube' entry at:"
+echo "p-swamp is up. Point the client's 'Local minikube' entry at:"
 echo "    ws://${MINIKUBE_IP}:${NODE_PORT}/api/timeline/ws"
 echo
 echo "Web client:    ${BASE_URL}/"

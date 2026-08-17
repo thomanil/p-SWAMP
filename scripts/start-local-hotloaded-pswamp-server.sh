@@ -16,7 +16,7 @@
 # detaching and leaving the container bound to port 8000.
 #
 # `--build` is not optional: without it Compose reuses whatever
-# pswamp-client-server-poc:latest already exists and only *builds* when the image
+# p-swamp:latest already exists and only *builds* when the image
 # is missing entirely. `watch` then syncs edits made while it runs — but every
 # change made while the stack was DOWN (a new file, a rename, a deleted module) is
 # absent from that stale image, and the server starts from code that no longer

@@ -164,15 +164,15 @@ Build pipeline (CI)
 ==
 
 One pipeline, `.github/workflows/build-and-publish-image.yml`, publishing to
-**GHCR** — `ghcr.io/<owner>/pswamp-client-server-poc`. 
+**GHCR** — `ghcr.io/<owner>/p-swamp`. 
 
 Pull the current build with:
 
 ```
-docker pull ghcr.io/<owner>/pswamp-client-server-poc:latest
+docker pull ghcr.io/<owner>/p-swamp:latest
 ```
 
-This poc publishes a public container build, so this will in turn be directly mirrored in Harbor so RNDP can pull and deploy that container.
+This repo publishes a public container build, so this will in turn be directly mirrored in Harbor so RNDP can pull and deploy that container.
 
 For a proper private pipeline for pswamp, we may need to push directly to harbor, which needs credentials secret in the gh actions pipeline.
 

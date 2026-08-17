@@ -289,7 +289,7 @@ failure to a slower place.
 Deploy / test the real artifact:
 
 ```
-./scripts/start-pswamp-in-local-minikube-cluster.sh   # build into minikube + apply k8s/pswamp-client-server-poc-local.yaml
+./scripts/start-pswamp-in-local-minikube-cluster.sh   # build into minikube + apply k8s/p-swamp-local.yaml
 ./scripts/logs-minikube.sh     # follow server logs (kubectl logs -f, bound to one pod)
 ```
 
@@ -299,9 +299,9 @@ client once `/healthz` answers (`NO_BROWSER=1` skips that), then tails the pod's
 logs until Ctrl-C (`NO_LOGS=1` skips that). NodePort is 30081.
 
 There are two k8s manifests, one per target:
-`k8s/pswamp-client-server-poc-local.yaml` (minikube, image built into the cluster)
-and `k8s/pswamp-client-server-poc-rndp.yaml` (the remote cluster, pulling the
-published image). `doc/pswamp-client-server-poc-operations.md` is the cheat sheet
+`k8s/p-swamp-local.yaml` (minikube, image built into the cluster)
+and `k8s/p-swamp-rndp.yaml` (the remote cluster, pulling the
+published image). `doc/pswamp-server-infra-ops.md` is the cheat sheet
 for deploying and operating the remote one — a manual `kubectl` flow. **No script
 in this repo touches a remote cluster**, and CI does not deploy either.
 
@@ -334,22 +334,41 @@ in this repo touches a remote cluster**, and CI does not deploy either.
   `app/server-python/src/static/` locally, both being what the server resolves as
   `Path(__file__).parent / "static"` and mounts at `/`. `static/` is generated,
   never committed (gitignored).
+- **The root `.gitignore` is the stock Python template, and its rules are
+  unanchored** — `lib/`, `public/`, `build/`, `dist/` match at *any* depth, so they
+  reach into `app/client-web/` too. That silently kept `app/client-web/src/lib/`
+  (`basePath.ts`, `servers.ts`, `utils.ts`) out of the repo entirely, even though
+  every shadcn `ui/` component imports `@/lib/utils` — a clean checkout could not
+  type-check or build. A `!app/client-web/src/lib/` + `!app/client-web/public/`
+  block at the bottom of the file rescues them, and must stay **below** the Python
+  rules since gitignore is last-match-wins. When adding a folder under `app/`, run
+  `git check-ignore -v <path>` before assuming it is tracked, and `git status`
+  is not enough — an ignored file simply never shows up.
 - **Dockerfile base images are digest-pinned**, with the readable tag kept as a
   comment and refresh instructions inline. Those digests are multi-arch indexes,
   so the Dockerfile builds natively on amd64 and arm64 alike — which is what lets
   an arm64 laptop build it locally. What **CI publishes is amd64 only**; see "CI".
-- **The deployable is named `pswamp-client-server-poc` everywhere** — local image
-  tag, GHCR package, k8s Deployment/Service/labels, and the remote namespace — and
-  the minikube NodePort is **30081**, not the usual 30080. The `-poc` suffix is a
-  leftover from when this stack was its own repo, kept because the name is now
-  load-bearing *outside* this repo (the GHCR package, and the remote cluster's
-  namespace, which is provisioned elsewhere). Renaming it is a coordinated change
-  across all of those, not a search-and-replace here. The Deployment name and
-  NodePort also have to stay distinct from an older `timeline-server` sandbox whose
-  resources still live in the same local minikube cluster: a shared Deployment
-  name means each deploy silently overwrites the other's, and a shared nodePort
-  makes the second Service fail to allocate outright. (The Python module names —
-  `server.py`, `timeline/` — are internal to the image and collide with nothing.)
+- **The deployable is named `p-swamp` everywhere** — local image tag, k8s
+  Deployment/Service/Ingress, `app:` labels and selectors, container name, and both
+  manifest filenames. The published image follows from the repo name rather than
+  being written down: CI sets `IMAGE_NAME: ghcr.io/${{ github.repository }}`, so
+  `thomanil/p-SWAMP` publishes as `ghcr.io/thomanil/p-swamp` — which is exactly what
+  `k8s/p-swamp-rndp.yaml` pins. Keep those two agreeing; they drifted apart once
+  already when the stack was merged in under the old `pswamp-client-server-poc` name.
+  **Two identifiers deliberately still carry the old name** and are marked TODO in
+  the manifest: the remote namespace `rndp-pswamp-client-server-poc` (created by the
+  rndp/auth chart from `environ/development/users.yaml` in *another* repo, so an
+  apply against a renamed namespace that doesn't exist yet is rejected outright) and
+  the ingress path `/pswamp-client-server-poc` (a live, bookmarked URL). Don't
+  "finish" that rename here without the chart change landing first.
+- **The minikube NodePort is 30081**, not the usual 30080. It and the Deployment
+  name have to stay distinct from an older `timeline-server` sandbox whose resources
+  still live in the same local minikube cluster: a shared Deployment name means each
+  deploy silently overwrites the other's, and a shared nodePort makes the second
+  Service fail to allocate outright. Renaming the Deployment does **not** remove the
+  old objects — the previous `pswamp-client-server-poc` Service keeps 30081 claimed
+  until it is deleted. (The Python module names — `server.py`, `timeline/` — are
+  internal to the image and collide with nothing.)
 - **Lint is explicitly `--select E,F`** (pycodestyle errors + pyflakes) in both
   `error_check.sh` and `autofix_lint_formatting.sh`. Don't drop the flag: ruff's
   own defaults now include opinionated families that fail the build on style
@@ -443,7 +462,7 @@ What has to hold in the check job:
   cluster and differs in little more than the registry image ref and the
   namespace/ingress. Keep the two in step when the pod spec changes.
 - **CI publishes but never deploys.** Rolling the remote cluster forward is a
-  manual `kubectl` step out of `doc/pswamp-client-server-poc-operations.md` —
+  manual `kubectl` step out of `doc/pswamp-server-infra-ops.md` —
   nothing here automates it, and no cluster credentials live in this repo.
 
 ## Workflow rules

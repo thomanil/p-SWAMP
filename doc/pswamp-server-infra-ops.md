@@ -1,7 +1,7 @@
-# pswamp-client-server-poc: deploy & operate
+# p-swamp serverside: deploy & operate
 
-Cheat sheet for the manifest in [pswamp-client-server-poc.yaml](pswamp-client-server-poc.yaml).
-Run these from a terminal in your rndp notebook pod.
+Cheat sheet for the manifest in [p-swamp-rndp.yaml](p-swamp-rndp.yaml).
+For now, run these ad-hoc from a terminal in your rndp notebook pod.
 
 ## Setup
 
@@ -11,6 +11,9 @@ There is no `~/.kube/config`, so:
 
 - `kubectl config set-context ...` fails with `no current context is set` -- expected, not a fault.
 - There is no default namespace, so every query command needs `-n`.
+- **The namespace is still `rndp-pswamp-client-server-poc`** even though the
+  deployable is now `p-swamp`. TODO rename it once the rndp/auth chart entry is
+  updated in the other repo.
 
 Save typing with an alias (re-add after the notebook pod restarts):
 
@@ -26,7 +29,7 @@ No `--namespace` needed -- `metadata.namespace` is set on all three objects and
 takes precedence over the flag.
 
 ```bash
-kubectl apply -f pswamp-client-server-poc.yaml
+kubectl apply -f k8s/p-swamp-rndp.yaml
 ```
 
 Preview first (optional):
@@ -36,10 +39,10 @@ Preview first (optional):
 kubectl auth can-i create deployments -n rndp-pswamp-client-server-poc
 
 # full admission check (RBAC + Kyverno webhooks), nothing persisted
-kubectl apply -f pswamp-client-server-poc.yaml --dry-run=server
+kubectl apply -f k8s/p-swamp-rndp.yaml --dry-run=server
 
 # unified diff against live state; exit code 1 just means "differs"
-kubectl diff -f pswamp-client-server-poc.yaml
+kubectl diff -f k8s/p-swamp-rndp.yaml
 ```
 
 `--dry-run=client` only parses YAML locally -- it will not catch a missing
@@ -49,7 +52,7 @@ namespace, an RBAC failure or a policy rejection. Use `server`.
 
 ```bash
 # blocks until the rollout completes; non-zero exit on timeout
-kubectl -n rndp-pswamp-client-server-poc rollout status deployment/pswamp-client-server-poc --timeout=120s
+kubectl -n rndp-pswamp-client-server-poc rollout status deployment/p-swamp --timeout=120s
 
 # watch pods come up
 kubectl -n rndp-pswamp-client-server-poc get pods -w
@@ -62,27 +65,27 @@ When it will not come up, the **Events** section here explains almost everything
 (image pull, scheduling, probe and admission failures):
 
 ```bash
-kubectl -n rndp-pswamp-client-server-poc describe pod -l app=pswamp-client-server-poc
+kubectl -n rndp-pswamp-client-server-poc describe pod -l app=p-swamp
 
 kubectl -n rndp-pswamp-client-server-poc get events --sort-by=.lastTimestamp
 ```
 
 ## Logs
 
-`-c pswamp` is needed because linkerd injects sidecar containers.
+`-c p-swamp` is needed because linkerd injects sidecar containers.
 
 ```bash
 # follow
-kubectl -n rndp-pswamp-client-server-poc logs -l app=pswamp-client-server-poc -c pswamp -f
+kubectl -n rndp-pswamp-client-server-poc logs -l app=p-swamp -c p-swamp -f
 
 # last 50 lines, then follow
-kubectl -n rndp-pswamp-client-server-poc logs -l app=pswamp-client-server-poc -c pswamp --tail=50 -f
+kubectl -n rndp-pswamp-client-server-poc logs -l app=p-swamp -c p-swamp --tail=50 -f
 
 # last 10 minutes
-kubectl -n rndp-pswamp-client-server-poc logs -l app=pswamp-client-server-poc -c pswamp --since=10m
+kubectl -n rndp-pswamp-client-server-poc logs -l app=p-swamp -c p-swamp --since=10m
 
 # after a crash-restart the real error is in the *previous* container
-kubectl -n rndp-pswamp-client-server-poc logs -l app=pswamp-client-server-poc -c pswamp --previous
+kubectl -n rndp-pswamp-client-server-poc logs -l app=p-swamp -c p-swamp --previous
 ```
 
 No output at all means the container never started -- that is a `describe pod`
@@ -95,8 +98,8 @@ image string in the Deployment is unchanged, so `kubectl apply` correctly does
 nothing. The moved tag is only resolved when a new pod is created:
 
 ```bash
-kubectl -n rndp-pswamp-client-server-poc rollout restart deployment/pswamp-client-server-poc
-kubectl -n rndp-pswamp-client-server-poc rollout status deployment/pswamp-client-server-poc
+kubectl -n rndp-pswamp-client-server-poc rollout restart deployment/p-swamp
+kubectl -n rndp-pswamp-client-server-poc rollout status deployment/p-swamp
 ```
 
 This stamps a timestamp annotation on the pod template, forcing a new ReplicaSet
@@ -105,7 +108,7 @@ and a fresh pull (`:latest` implies `imagePullPolicy: Always`).
 Confirm the new build actually landed by comparing the digest before/after:
 
 ```bash
-kubectl -n rndp-pswamp-client-server-poc get pod -l app=pswamp-client-server-poc \
+kubectl -n rndp-pswamp-client-server-poc get pod -l app=p-swamp \
   -o jsonpath='{.items[*].status.containerStatuses[*].imageID}'
 ```
 
@@ -119,10 +122,10 @@ when the YAML itself changes.
 
 ```bash
 # did the Service find the pod? empty result = label selector mismatch (503 at the ingress)
-kubectl -n rndp-pswamp-client-server-poc get endpointslices -l kubernetes.io/service-name=pswamp-client-server-poc
+kubectl -n rndp-pswamp-client-server-poc get endpointslices -l kubernetes.io/service-name=p-swamp
 
 # did Kyverno rewrite ghcr.io -> harbor?
-kubectl -n rndp-pswamp-client-server-poc get pod -l app=pswamp-client-server-poc \
+kubectl -n rndp-pswamp-client-server-poc get pod -l app=p-swamp \
   -o jsonpath='{.items[*].spec.containers[*].image}'
 ```
 

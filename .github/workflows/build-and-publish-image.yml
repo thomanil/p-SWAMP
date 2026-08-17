@@ -15,7 +15,7 @@
 # forks get a read-only GITHUB_TOKEN, so a push would fail anyway).
 #
 # Pulling what this publishes:
-#   docker pull ghcr.io/<owner>/pswamp-client-server-poc:latest
+#   docker pull ghcr.io/<owner>/p-swamp:latest
 #
 # NOTE: a newly created GHCR package is PRIVATE. The first push succeeds, but an
 # unauthenticated `docker pull` (e.g. from a cluster with no imagePullSecret)
@@ -55,10 +55,14 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # ghcr.io/<owner>/<repo>. GHCR requires an all-lowercase path; this repo's
-  # owner/name already are. If this workflow is ever copied under an owner with
-  # uppercase letters, lowercase it first (e.g. with a small `tr` step) or the
-  # push fails with "invalid reference format".
+  # ghcr.io/<owner>/<repo> — so thomanil/p-SWAMP publishes as
+  # ghcr.io/thomanil/p-swamp, which is what k8s/p-swamp-rndp.yaml pins.
+  # GHCR requires an all-lowercase path and this repo's name is NOT
+  # (p-SWAMP); docker/metadata-action lowercases the image name for the tags it
+  # computes, which is what keeps the push valid. If a step is ever added that
+  # uses IMAGE_NAME directly rather than through metadata-action, lowercase it
+  # explicitly (e.g. with a small `tr` step) or the push fails with "invalid
+  # reference format".
   IMAGE_NAME: ghcr.io/${{ github.repository }}
 
 jobs:
