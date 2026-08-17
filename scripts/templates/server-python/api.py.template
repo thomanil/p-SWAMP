@@ -1,0 +1,126 @@
+"""The __LABEL__ app's backend.
+
+WebSocket api, per-client state, REST commands — here a placeholder counter, one
+per client. Replace it with what this app really does, keeping the shape.
+
+Commands come up over REST and state goes down over the socket; the reasoning is
+in AGENTS.md and doc/the-client-server-api.md.
+
+server.py mounts this `router` under this app's /api/<app> prefix — here
+/api/__SLUG__ — so the paths below carry no prefix of their own.
+
+All state is in memory and dies with the process, and everything runs on the one
+asyncio event loop, so no locking is needed.
+"""
+
+from typing import Literal
+
+from fastapi import APIRouter, WebSocket
+from pydantic import BaseModel, Field
+from shared import (
+    ClientId,
+    CommandAck,
+    SocketRegistry,
+    get_logger,
+    read_client_id,
+    send_state,
+    wait_for_disconnect,
+)
+
+from .model import __NAME__Model
+
+logger = get_logger("__SLUG__")
+sockets = SocketRegistry()
+router = APIRouter()
+
+
+# --- authoritative in-memory state ------------------------------------------
+#
+# One model per client seed (the ?client_id= URL param), kept across reconnects
+# and never evicted. The web client persists that seed in localStorage, so this
+# state survives a page reload as well as a dropped socket; nothing is persisted
+# server-side, so a restart puts every client back at zero.
+
+states: dict[str, __NAME__Model] = {}
+
+
+def get_state(client_id: str) -> __NAME__Model:
+    """The single place per-client state is born; called on connect and on every
+    command, so a command can never hit a missing client."""
+    if client_id not in states:
+        states[client_id] = __NAME__Model()
+    return states[client_id]
+
+
+class __NAME__State(BaseModel):
+    """The single message shape pushed to a client on connect and every change.
+
+    Keys are snake_case on the wire, and stay that way: the page reads the
+    generated type for this model rather than a renamed mirror of it.
+    """
+
+    type: Literal["state"] = "state"
+    count: int = Field(description="This client's count. Replace with real state.")
+
+
+def state_message(model: __NAME__Model) -> __NAME__State:
+    """The single message shape pushed to a client on connect and every change."""
+    return __NAME__State(count=model.count)
+
+
+# --- REST commands ----------------------------------------------------------
+#
+# One POST per operation; see doc/the-client-server-api.md for why the upstream
+# half is HTTP and the downstream half is not.
+
+
+async def applied(client_id: str, action: str) -> CommandAck:
+    """Log the command, push this client its new state, acknowledge the request."""
+    model = get_state(client_id)
+    logger.info("client %s: %s (count=%s)", client_id, action, model.count)
+    await sockets.send_to_client(client_id, state_message(model))
+    return CommandAck(applied=action)
+
+
+@router.post("/count/bump", operation_id="__PKG___bump")
+async def bump(client_id: ClientId) -> CommandAck:
+    """Add one to this client's count."""
+    get_state(client_id).bump()
+    return await applied(client_id, "bump")
+
+
+@router.post("/count/reset", operation_id="__PKG___reset")
+async def reset(client_id: ClientId) -> CommandAck:
+    """Put this client's count back to zero."""
+    get_state(client_id).reset()
+    return await applied(client_id, "reset")
+
+
+# --- websocket endpoint (downstream only) -----------------------------------
+
+
+@router.websocket("/ws")
+async def ws_endpoint(ws: WebSocket) -> None:
+    # The client identifies itself with a numeric seed in the socket URL
+    # (?client_id=<seed>); reject a connection without a valid one.
+    # `read_client_id` applies the very rule the `ClientId` query parameter
+    # enforces, so a page's socket and its commands can never address different
+    # state.
+    client_id = read_client_id(ws)
+    if client_id is None:
+        await ws.close(code=1008)  # policy violation
+        return
+
+    async with sockets.connected(ws, client_id):
+        logger.info("client %s: connected", client_id)
+        # Straight down this socket, not through the registry: the opening
+        # message is for the connection that just arrived, while a command's
+        # result goes to every socket the client has open. Both go through
+        # `send_state`, which is the one serialiser -- see shared.py.
+        await send_state(ws, state_message(get_state(client_id)))
+        # Nothing is sent up this socket; this is what notices the client going
+        # away. See pswamp_web/pump.py -- the page packages share it.
+        await wait_for_disconnect(ws)
+    # Outside the block, so the socket is already out of the registry: an app
+    # that prints a roster on disconnect must not list the client that left.
+    logger.info("client %s: disconnected", client_id)

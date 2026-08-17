@@ -1,0 +1,16 @@
+"""Pure domain model for the Reference example app.
+
+A placeholder counter: no I/O and no knowledge of WebSockets, since api.py owns
+all of that. This is the file to grow into whatever the app actually computes.
+"""
+
+
+class ReferenceSubappModel:
+    def __init__(self) -> None:
+        self.count = 0
+
+    def bump(self) -> None:
+        self.count += 1
+
+    def reset(self) -> None:
+        self.count = 0
