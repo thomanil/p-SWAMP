@@ -1,0 +1,213 @@
+"""The PMU test streamer's backend: WebSocket api, per-client position, ticker.
+
+Streams sample grid records line by line. Structurally the twin of
+src/timeline/api.py — same message shape, same command dispatch, same per-client
+state keyed by an integer seed — differing only in what is being streamed and that
+there is nothing to pick (no set_sequence: one data file, one stream).
+
+server.py mounts this `router` under /api/pmu-test-streamer, so the endpoint below
+is reachable at /api/pmu-test-streamer/ws. Nothing here knows about that prefix.
+
+Like the timeline, all state is in memory and dies with the process, and everything
+runs on the one asyncio event loop — the WS handlers, the ticker, and broadcasts are
+cooperatively scheduled and never truly parallel, so no locking is needed.
+"""
+
+import asyncio
+import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+
+from fastapi import APIRouter, FastAPI, WebSocket, WebSocketDisconnect
+from shared import ConnectionManager, make_logger
+
+from .model import LINES, TICKS_PER_SECOND, PmuStreamModel
+
+# Discrete client events only — never the ticker's auto-advance, which fires
+# TICKS_PER_SECOND times a second per playing client.
+logger = make_logger("pmu")
+
+
+# --- authoritative in-memory state ------------------------------------------
+#
+# One position + play flag per client seed (the ?client_id= URL param), kept across
+# reconnects so a dropped client resumes mid-stream, and never evicted (a bounded,
+# acceptable leak for a local dev demo). This dict is the only store; nothing is
+# persisted, so a restart puts every client back at the first record.
+
+
+@dataclass
+class ClientState:
+    model: PmuStreamModel = field(default_factory=PmuStreamModel)
+    playing: bool = False
+
+
+states: dict[int, ClientState] = {}
+
+
+def get_state(client_id: int) -> ClientState:
+    """The single place per-client state is born; called on connect and on every
+    command, so a command can never hit a missing client."""
+    state = states.get(client_id)
+    if state is None:
+        state = states[client_id] = ClientState()
+    return state
+
+
+def state_message(state: ClientState) -> dict:
+    """The single message shape pushed to a client on connect and every change.
+
+    `total_lines` lets the client show "record N of M" — which is also how the
+    wrap-around at the end of the file becomes visible in the UI.
+    """
+    return {
+        "type": "state",
+        "window": state.model.visible_window(),
+        "index": state.model.index,
+        "total_lines": len(LINES),
+        "playing": state.playing,
+    }
+
+
+def roster_table(acting_id: int | None = None) -> str:
+    """An aligned table of every currently connected client: where it is in the
+    stream and whether it's playing. Disconnected-but-remembered seeds are excluded
+    — this is the live roster, not the state table. The client that triggered the
+    current event is flagged with an arrow."""
+    ids = sorted(manager.conns)
+    if not ids:
+        return "    (no clients connected)"
+    headers = ("", "CLIENT", "RECORD", "STATE")
+    rows = [headers]
+    for cid in ids:
+        state = states[cid]
+        rows.append(
+            (
+                "->" if cid == acting_id else "",
+                str(cid),
+                f"{state.model.index + 1}/{len(LINES)}",
+                "playing" if state.playing else "paused",
+            )
+        )
+    widths = [max(len(row[i]) for row in rows) for i in range(len(headers))]
+
+    def fmt(row: tuple[str, ...]) -> str:
+        return "    " + "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row))
+
+    rule = "    " + "-" * (sum(widths) + 2 * (len(widths) - 1))
+    return "\n".join([fmt(headers), rule, *(fmt(row) for row in rows[1:])])
+
+
+def log_event(action: str, client_id: int) -> None:
+    """The single logging entry point: the triggering client + action, then the full
+    live roster, so the console always shows the complete picture after any
+    operation."""
+    logger.info("client %s: %s\n\n%s\n", client_id, action, roster_table(client_id))
+
+
+# --- connection tracking ----------------------------------------------------
+#
+# Transport bookkeeping only, so it comes from shared.py; this app's own state lives
+# in `states` above and deliberately outlives a disconnect.
+
+manager = ConnectionManager()
+
+
+# --- server-side playback ticker -------------------------------------------
+
+
+async def ticker() -> None:
+    """One driver for every client: each tick, advance only the clients that are
+    currently playing and push each its own updated state.
+
+    Paced against a monotonic deadline rather than `sleep(interval)`, because the
+    latter waits interval *plus* the time the tick's own work took — a 5% shortfall
+    at this app's 100 ticks/s, which would compound over a long replay and quietly
+    make "real time" a lie. If a tick ever overruns by more than one interval (a
+    stalled client, a throttled CPU) the deadline is reset to now instead of firing
+    a catch-up burst: better to drop time than to flood the socket.
+
+    Iterate a snapshot of `states` because a connect/disconnect can mutate it
+    across the `await`.
+    """
+    interval = 1 / TICKS_PER_SECOND
+    next_tick = time.monotonic()
+    while True:
+        next_tick += interval
+        now = time.monotonic()
+        if now > next_tick + interval:
+            next_tick = now
+        await asyncio.sleep(max(0.0, next_tick - now))
+        for client_id, state in list(states.items()):
+            if state.playing:
+                state.model.step_forward()
+                await manager.send_to_client(client_id, state_message(state))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """This app's slice of the process lifespan: run the streaming ticker for as
+    long as the server is up. server.py composes it with the other app packages'
+    lifespans (see APPS there)."""
+    task = asyncio.create_task(ticker())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+# --- command dispatch + websocket endpoint ---------------------------------
+#
+# Paths here are relative to wherever server.py mounts this router
+# (/api/pmu-test-streamer), so "/ws" is served as /api/pmu-test-streamer/ws.
+
+router = APIRouter()
+
+
+async def handle_command(client_id: int, msg: dict) -> None:
+    state = get_state(client_id)
+    action = msg.get("action")
+    if action == "forward":
+        state.model.step_forward()
+    elif action == "back":
+        state.model.step_back()
+    elif action == "play":
+        state.playing = True
+    elif action == "stop":
+        state.playing = False
+    else:
+        logger.warning("client %s unknown action: %r", client_id, action)
+        return  # unknown action -> no state change, no send
+    log_event(action, client_id)
+    await manager.send_to_client(client_id, state_message(state))
+
+
+@router.websocket("/ws")
+async def ws_endpoint(ws: WebSocket) -> None:
+    # The client identifies itself with an integer seed in the URL
+    # (ws://.../api/pmu-test-streamer/ws?client_id=<seed>); reject a connection
+    # without a valid one.
+    try:
+        client_id = int(ws.query_params.get("client_id"))
+    except (TypeError, ValueError):
+        await ws.close(code=1008)  # policy violation
+        return
+
+    # Resuming an existing seed vs. a brand-new one changes the connect message.
+    known = client_id in states
+    await manager.connect(ws, client_id)
+    state = get_state(client_id)  # born here so it shows in the roster below
+    log_event("reconnected" if known else "connected", client_id)
+    try:
+        # Initial full state for this client (resumes prior position if known).
+        await ws.send_json(state_message(state))
+        while True:
+            msg = await ws.receive_json()
+            await handle_command(client_id, msg)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        manager.disconnect(ws, client_id)
+        log_event("disconnected", client_id)

@@ -1,0 +1,108 @@
+# Local minikube deployment of the p-swamp client-server stack (the FastAPI
+# state server, with the web client baked in and served from the same origin).
+#
+# Single replica on purpose: the server holds per-client state in memory and
+# runs one ticker for everyone (see src/timeline/api.py), so it must never be
+# scaled past 1 — a second pod would have its own independent state and the
+# Service would split clients across them. The strategy is Recreate (not the
+# default RollingUpdate) so the old pod is gone before the new one serves, for
+# the same reason.
+#
+# Nothing is persisted: no DB, no volumes. A rollout resets every client's
+# timeline, which is the expected behavior for this stateless deployment.
+#
+# Apply with scripts/start-pswamp-in-local-minikube-cluster.sh, which builds the image straight into
+# minikube and forces a rollout. Clients reach this over the NodePort at
+# ws://<minikube-ip>:30081/api/timeline/ws (and the web client is served from the
+# same port).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp
+  labels:
+    app: p-swamp
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp
+  template:
+    metadata:
+      labels:
+        app: p-swamp
+    spec:
+      # Matches the non-root user baked into the image (useradd --uid 10001 app).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: p-swamp
+          image: p-swamp:latest
+          # Use the image built into minikube; never try to pull from a registry.
+          # With the :latest tag the default policy would be Always, which would
+          # fail with ImagePullBackOff since this image only exists locally.
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            # Bind on all interfaces inside the pod. PORT defaults to 8000 via
+            # the Dockerfile's ENV, so it's not repeated here.
+            - name: HOST
+              value: "0.0.0.0"
+          # Both probes hit /healthz: with no external dependencies there is
+          # nothing readiness could check that liveness doesn't. Readiness still
+          # earns its keep by holding the pod out of the Service until the app
+          # is actually answering.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              # NOTE: deliberately roomy for such a tiny workload. This minikube
+              # node runs as a Docker container inside an aarch64 Linux VM that is
+              # itself nested on a Mac. Under that double virtualization each
+              # instruction is slower, so the small per-tick work (5 ticks/s:
+              # step + serialize + WS send) overruns a 25ms/100ms CFS budget and
+              # the event loop gets throttled in ~2/3 of periods — playback
+              # visibly crawls. Confirmed via the pod's cgroup cpu.stat
+              # (nr_throttled climbing). A roomier limit keeps the timer wakeups
+              # on time. This is a local-only test manifest, so the extra
+              # headroom costs nothing and never ships.
+              cpu: "2"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: p-swamp
+  labels:
+    app: p-swamp
+spec:
+  type: NodePort
+  selector:
+    app: p-swamp
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000        # cluster-internal Service port
+      targetPort: 8000  # container port
+      nodePort: 30081   # fixed external port (valid range 30000-32767)

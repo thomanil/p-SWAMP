@@ -1,0 +1,54 @@
+<!-- Simplified redraw of the p-SWAMP mark (the icon half of the LF Energy
+     "pswamp-horizontal-color" logo): a grid-covered disc, spokes at 30 degree
+     steps, the 30/210 diameter splitting off a yellow-to-green half, and PMU
+     dots on the rim. Pure geometry, no filters, so it stays legible at 16px.
+     The white disc keeps the dark teal ink readable on dark tab bars. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <title>p-SWAMP</title>
+  <defs>
+    <linearGradient id="pswamp-fill" x1="6.89" y1="46.5" x2="57.11" y2="17.5" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e2e700"/>
+      <stop offset="1" stop-color="#36d000"/>
+    </linearGradient>
+    <clipPath id="pswamp-disc"><circle cx="32" cy="32" r="29"/></clipPath>
+  </defs>
+  <circle cx="32" cy="32" r="29" fill="#fff"/>
+  <path d="M57.11 17.5A29 29 0 0 1 6.89 46.5Z" fill="url(#pswamp-fill)"/>
+  <g clip-path="url(#pswamp-disc)" stroke="#00534d" stroke-width="0.55" fill="none">
+    <path d="M7.5 0V64"/>
+    <path d="M0 7.5H64"/>
+    <path d="M13.62 0V64"/>
+    <path d="M0 13.62H64"/>
+    <path d="M19.75 0V64"/>
+    <path d="M0 19.75H64"/>
+    <path d="M25.87 0V64"/>
+    <path d="M0 25.87H64"/>
+    <path d="M32 0V64"/>
+    <path d="M0 32H64"/>
+    <path d="M38.13 0V64"/>
+    <path d="M0 38.13H64"/>
+    <path d="M44.25 0V64"/>
+    <path d="M0 44.25H64"/>
+    <path d="M50.38 0V64"/>
+    <path d="M0 50.38H64"/>
+    <path d="M56.5 0V64"/>
+    <path d="M0 56.5H64"/>
+  </g>
+  <g stroke="#00534d" stroke-width="1.15" stroke-linecap="round" fill="none">
+    <path d="M57.11 17.5L6.89 46.5"/>
+    <path d="M32 32L46.5 6.89"/>
+    <path d="M32 32L32 3"/>
+    <path d="M32 32L17.5 6.89"/>
+    <path d="M32 32L6.89 17.5"/>
+    <path d="M32 32L17.5 57.11"/>
+    <path d="M32 32L32 61"/>
+    <path d="M32 32L46.5 57.11"/>
+  </g>
+  <g fill="#00534d">
+    <circle cx="46.5" cy="6.89" r="3.03"/>
+    <circle cx="32" cy="3" r="3.03"/>
+    <circle cx="17.5" cy="6.89" r="3.03"/>
+    <circle cx="6.89" cy="17.5" r="3.03"/>
+    <circle cx="3" cy="32" r="3.03"/>
+  </g>
+</svg>

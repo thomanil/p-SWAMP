@@ -1,0 +1,68 @@
+# Dependency manifest for the Python state server — the single source of truth
+# for what this deployable depends on. Mirrors app/client-web/package.json on the
+# other half of the repo: this file states intent (compatible version ranges),
+# and the committed uv.lock beside it pins the exact resolved versions of the
+# full transitive closure, with hashes.
+#
+# Add or change a dependency by editing this file, then run `uv lock` (from this
+# directory) and commit both files together.
+
+[project]
+name = "pswamp-server"
+version = "0.1.0"
+description = "P-SWAMP state server: WebSocket timeline backend."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.6,<0.116",
+    "uvicorn[standard]>=0.34,<0.35",
+    "p-swamp",
+]
+
+# p-swamp is the desktop package at the repo root (root pyproject.toml, root
+# src/pswamp/). It supplies the PMU decoding, the time-window storage and the
+# monitoring applications this server is a front end for, and the code under
+# src/pswamp_web/ is written so it could fold into it as src/pswamp/web/.
+#
+# This is the ONE place where the two Python projects in this repo are wired
+# together — everywhere else in AGENTS.md still holds: the web backend keeps its
+# own manifest and lockfile, and nothing under src/pswamp/ imports pswamp_web.
+# The dependency points one way only, web → desktop.
+#
+# Editable, so an edit to root src/pswamp/ is live here with no reinstall.
+#
+# Deliberately no extras. p-swamp's [full] extra is what carries PySide6,
+# pyqtgraph, kafka, nqkafka and tops-rt; none of that belongs in a headless
+# server image, and the base dependency set (numpy, scipy, pandas) is all the
+# analysis core needs.
+#
+# The path is relative to this file's directory: app/server-python/ → repo root.
+# It is deliberately the same string on the host and inside the image, which is
+# why the image mirrors the repo at its real depth rather than flattening the
+# server to /app — see the workspace note at the top of the runtime stage in the
+# Dockerfile.
+[tool.uv.sources]
+p-swamp = { path = "../../", editable = true }
+
+# Tooling that must never ship in the image — the Dockerfile installs with
+# --no-dev. Declared here so the linter version is locked and hash-verified like
+# everything else, and defined in exactly one place rather than duplicated across
+# the two scripts that invoke it.
+[dependency-groups]
+dev = ["ruff==0.16.2"]
+
+# Not an installable package: src/ is a plain source folder that the process runs
+# from, not a packaging layout. src/server.py is the one entrypoint and imports
+# each app package by name (`import timeline`), which resolves because the working
+# directory is src/ — locally via `uv run src/server.py`, and in the image via
+# WORKDIR /app/src. Inside an app package the modules use relative imports
+# (timeline/api.py does `from .model import ...`), so a package can be moved or
+# renamed without touching its internals. uv manages the dependencies and the venv
+# only — it builds no wheel — so adding a backend api is just a new folder under
+# src/, with no manifest change.
+#
+# Deliberately no [tool.ruff] section: ruff treats a pyproject.toml as config only
+# when one is present, and the explicit `--select E,F` in scripts/error_check.sh is
+# meant to stay authoritative (see the note there about not inheriting ruff's
+# opinionated defaults).
+[tool.uv]
+package = false
