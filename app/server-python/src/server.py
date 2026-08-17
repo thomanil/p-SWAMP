@@ -1,0 +1,137 @@
+"""The one process entrypoint: assembles the app and routes to the app packages.
+
+This module deliberately owns no domain logic. It does four things:
+
+  1. mounts each app package's router under its own /api/<app> prefix (APPS below),
+  2. composes their lifespans into the single FastAPI lifespan,
+  3. serves GET /healthz, the cheap liveness probe for Docker/k8s,
+  4. serves the web client (the Vite build in static/) at / — same app, port, and
+     origin as the api, so one image and one Service serve both.
+
+Each app under src/<app>/ is a self-contained package exposing `router` and
+optionally `lifespan` (see src/timeline/__init__.py). Adding a backend api is one
+new package plus one line in APPS; nothing else in this file changes.
+
+The server is entirely stateless in the persistence sense: there is no database
+and nothing is written to disk. All state lives in the app packages' memory and is
+gone when the process exits — a restart or redeploy resets every client.
+
+Bind host/port come from the HOST/PORT env vars (default 127.0.0.1:8000) so the
+container can publish on 0.0.0.0 without code changes; see Dockerfile.
+"""
+
+import os
+from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import Scope
+
+import pmu_test_streamer
+import timeline
+
+# --- the app registry -------------------------------------------------------
+#
+# (url prefix, app package). One entry per backend api. The prefix namespaces
+# each package's endpoints, so several apps can each have a "ws" or a "status"
+# without colliding — the timeline's "/ws" is served as /api/timeline/ws. Keep the
+# prefix aligned with the web client's route for the same app so the two halves
+# read the same. Note that only the URL is hyphenated: the package must be a valid
+# Python identifier, hence pmu_test_streamer → /api/pmu-test-streamer.
+#
+# src/shared.py is NOT an app package and never appears here — it holds the
+# domain-free helpers the packages import (see its docstring).
+
+APPS = [
+    ("/api/timeline", timeline),
+    ("/api/pmu-test-streamer", pmu_test_streamer),
+]
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Run every app package's own lifespan for as long as the process is up.
+
+    An app package may need startup/shutdown work — the timeline runs its
+    playback ticker task that way. AsyncExitStack composes however many there are
+    into this one context, and unwinds them in reverse on shutdown, so no package
+    has to know about any other. `lifespan` is optional: a package with only
+    request handlers just omits it.
+    """
+    async with AsyncExitStack() as stack:
+        for _, module in APPS:
+            app_lifespan = getattr(module, "lifespan", None)
+            if app_lifespan is not None:
+                await stack.enter_async_context(app_lifespan(app))
+        yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/healthz")
+async def healthz() -> dict:
+    """Liveness probe for Docker/k8s, and the compose healthcheck. Cheap and
+    side-effect-free: the server has no external dependencies, so "the process is
+    up and serving" is the whole health story — there is nothing a separate
+    readiness probe could usefully check. Deliberately at the root rather than
+    under /api: it is the process's health, not any one app's."""
+    return {"status": "ok"}
+
+
+for _prefix, _module in APPS:
+    app.include_router(_module.router, prefix=_prefix)
+
+
+# --- web client assets ------------------------------------------------------
+#
+# Serve the web client from this same app/port/origin as the api, so the single
+# node (and single k8s Service) serves both — no second service, no CORS.
+#
+# static/ is the Vite build output (index.html + favicon/icons + hashed files
+# under assets/), baked into the image by the Dockerfile's web-build stage. The
+# mount is guarded on the dir existing so the api-only paths still boot without it
+# — i.e. `uv run src/server.py` from app/server-python/ for quick backend dev (the
+# web client is run separately with hot reload via
+# scripts/start-local-hotloaded-pswamp-web-client.sh). It's registered AFTER
+# /healthz and the routers above because a mount at "/" is greedy and would shadow
+# them — so must any api route added later.
+
+
+class SPAStaticFiles(StaticFiles):
+    """StaticFiles that falls back to index.html on a 404, so client-side routes
+    (and a hard refresh / deep link onto one) resolve to the SPA shell instead of
+    404ing. Requests for real files — hashed assets, favicon — still hit those
+    first.
+
+    Two prefixes keep their real 404 instead of the shell: a missing file under
+    assets/ (a bad hashed-asset URL should fail loudly, not return HTML with the
+    wrong content type) and anything under api/ (a wrong or removed endpoint must
+    look wrong to a JSON caller, and an api 404 is never a navigation route).
+    Everything else, i.e. the client's own routes, falls through to the shell."""
+
+    _NO_FALLBACK = ("assets/", "api/")
+
+    async def get_response(self, path: str, scope: Scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404 and not path.startswith(self._NO_FALLBACK):
+                return await super().get_response("index.html", scope)
+            raise
+
+
+STATIC_DIR = Path(__file__).parent / "static"
+if STATIC_DIR.is_dir():
+    app.mount("/", SPAStaticFiles(directory=STATIC_DIR, html=True), name="static")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    # Default to loopback for local dev; the container sets HOST=0.0.0.0.
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "8000"))
+    uvicorn.run(app, host=host, port=port)

@@ -1,0 +1,107 @@
+#
+# Remote (rndp) deployment of the p-swamp client-server stack.
+#
+# Namespace ..... rndp-p-swamp
+#                 Namespaces are named rndp-<project-key> and are created by the
+#                 rndp/auth chart from the project entry in
+#                 environ/production/users.yaml -- it does not exist until that
+#                 chart has been redeployed.
+# Image ......... ghcr.io/thomanil/p-swamp:latest
+#                 Matches what CI publishes: the workflow derives IMAGE_NAME from
+#                 ${{ github.repository }} NOTE the p-swamp package starts
+#                 PRIVATE on GHCR -- flip it to public once, or the pull fails
+#                 with ImagePullBackOff.
+#                 Left as ghcr.io on purpose: Kyverno rewrites it to the Harbor
+#                 proxy at admission (config/kyverno/container-registry.yaml).
+# External URL .. https://rndpsvc.statnett.no/p-swamp/
+#                 Production only. The "services" ingress controller routes on the
+#                 Host header, so the host below must match the cluster exactly
+#                 (dev would be rndpdevsvc.statnett.no); a mismatch gives a 404.
+#
+# Deploy:
+#   kubectl apply -f k8s/p-swamp-rndp.yaml
+#   (--namespace is redundant?, the namespace is set on each object below)
+#
+# TODO Deliberately omitted for now, add if/when needed:
+#   - securityContext?
+#     project namespaces?
+#   - probes -- only useful with a real health endpoint?
+#
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp
+  namespace: rndp-p-swamp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: p-swamp
+  template:
+    metadata:
+      labels:
+        app: p-swamp
+    spec:
+      nodeSelector:
+        group: frontend # Fine for now, but since node of actual pswamp rig later on will also include backend eg the heavy bit, maybe it should be something different then
+      containers:
+        - name: p-swamp
+          image: ghcr.io/thomanil/p-swamp:latest
+          ports:
+            # uvicorn in this image listens on 8000. The Service maps its own
+            # port 80 to this one via the symbolic name "http", so only this
+            # number needs changing if the app moves port.
+            - name: http
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: p-swamp
+  namespace: rndp-p-swamp
+spec:
+  selector:
+    app: p-swamp
+  ports:
+    - port: 80
+      targetPort: http
+
+---
+# Reverse-proxy ingress with prefix rewriting:
+#   https://rndpsvc.statnett.no/p-swamp/foo -> <service>:80/foo
+#
+# The app receives "/foo", not "/p-swamp/foo", so any absolute
+# URL it generates (css, js, redirects) will 404 unless it is told its base path.
+# It is: the client emits relative asset urls and derives the prefix at runtime,
+# see app/client-web/src/lib/basePath.ts.
+#
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: p-swamp
+  namespace: rndp-p-swamp
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+spec:
+  ingressClassName: services
+  rules:
+    - host: rndpsvc.statnett.no
+      http:
+        paths:
+          - path: /p-swamp(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: p-swamp
+                port:
+                  number: 80
