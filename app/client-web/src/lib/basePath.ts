@@ -2,7 +2,7 @@
 //
 // Locally (dev, docker, minikube) the app lives at the origin root, `/`. In the
 // remote deployment it sits behind a reverse proxy under
-// `/pswamp-client-server-poc/`, which strips that prefix before forwarding — so
+// `/p-swamp/`, which strips that prefix before forwarding — so
 // the server still sees plain `/api/...` and needs no knowledge of it, but the
 // *browser* must ask for every url with the prefix on the front.
 //
@@ -13,7 +13,7 @@
 // against whatever path the page was served at. That means this module's own url
 // already carries the answer:
 //
-//   https://host/pswamp-client-server-poc/assets/index-a1b2c3.js  →  '/pswamp-client-server-poc'
+//   https://host/p-swamp/assets/index-a1b2c3.js  →  '/p-swamp'
 //   http://localhost:30081/assets/index-a1b2c3.js                 →  ''
 //
 // Under `npm run dev` there is no build and no assets/ dir — the url is
@@ -41,7 +41,7 @@ function deriveBasePath(): string {
 }
 
 /** The path prefix the app is mounted under: `''` at the origin root, otherwise
- *  a leading-slash path with no trailing slash (`'/pswamp-client-server-poc'`).
+ *  a leading-slash path with no trailing slash (`'/p-swamp'`).
  *  Prepend it to any absolute path the browser is asked to fetch or navigate to;
  *  react-router does that for routes on its own, given `basename` (see App.tsx). */
 export const BASE_PATH = deriveBasePath()

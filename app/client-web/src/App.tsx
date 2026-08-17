@@ -19,7 +19,7 @@ import { TimelinePage } from '@/pages/timeline/TimelinePage'
  * what keeps a typo'd URL from rendering the nav over an empty outlet.
  *
  * `basename` is what makes every route below relative to wherever the app is
- * mounted — `/` locally, `/pswamp-client-server-poc` behind the remote reverse
+ * mounted — `/` locally, `/p-swamp` behind the remote reverse
  * proxy — so the paths here (and every `<NavLink to>` / `<Navigate to>`) stay
  * written as if the app owned the origin root. BASE_PATH is discovered at
  * runtime, not configured; see src/lib/basePath.ts.

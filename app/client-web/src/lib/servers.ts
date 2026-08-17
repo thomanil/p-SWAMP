@@ -25,7 +25,7 @@ export const PMU_STREAM_WS_PATH = '/api/pmu-test-streamer/ws'
 /** The full ws:// (or wss://) URL for one app's endpoint on the serving origin,
  *  derived from the current page so it follows http→ws / https→wss automatically.
  *
- *  BASE_PATH is empty locally and `/pswamp-client-server-poc` behind the remote
+ *  BASE_PATH is empty locally and `/p-swamp` behind the remote
  *  reverse proxy, which strips it again before the request reaches the server —
  *  so the paths above stay written the way the server actually mounts them.
  *
