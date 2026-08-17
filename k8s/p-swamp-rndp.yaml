@@ -1,20 +1,24 @@
 #
-# PoC deployment for the "pswamp-client-server-poc" project.
+# Remote (rndp) deployment of the p-swamp client-server stack.
 #
-# Namespace ..... rndp-pswamp-client-server-poc
+# Namespace ..... rndp-p-swamp
 #                 Created by the rndp/auth chart from the project entry in
 #                 environ/development/users.yaml -- it does not exist until
 #                 that chart has been redeployed.
-# Image ......... ghcr.io/thomanil/pswamp-client-server-poc:latest
+# Image ......... ghcr.io/thomanil/p-swamp:latest
+#                 Matches what CI publishes: the workflow derives IMAGE_NAME from
+#                 ${{ github.repository }} NOTE the p-swamp package starts
+#                 PRIVATE on GHCR -- flip it to public once, or the pull fails
+#                 with ImagePullBackOff.
 #                 Left as ghcr.io on purpose: Kyverno rewrites it to the Harbor
 #                 proxy at admission (config/kyverno/container-registry.yaml).
-# External URL .. https://rndpdevsvc.statnett.no/pswamp-client-server-poc/
+# External URL .. https://rndpdevsvc.statnett.no/p-swamp/
 #
 # Deploy:
-#   kubectl apply -f pswamp-client-server-poc.yaml
+#   kubectl apply -f k8s/p-swamp-rndp.yaml
 #   (--namespace is redundant?, the namespace is set on each object below)
 #
-# TODO Deliberately omitted for a PoC, add if/when needed:
+# TODO Deliberately omitted for now, add if/when needed:
 #   - securityContext?
 #     project namespaces?
 #   - probes -- only useful with a real health endpoint?
@@ -23,23 +27,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pswamp-client-server-poc
-  namespace: rndp-pswamp-client-server-poc
+  name: p-swamp
+  namespace: rndp-p-swamp
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: pswamp-client-server-poc
+      app: p-swamp
   template:
     metadata:
       labels:
-        app: pswamp-client-server-poc
+        app: p-swamp
     spec:
       nodeSelector:
         group: frontend # Fine for now, but since node of actual pswamp rig later on will also include backend eg the heavy bit, maybe it should be something different then
       containers:
-        - name: pswamp
-          image: ghcr.io/thomanil/pswamp-client-server-poc:latest
+        - name: p-swamp
+          image: ghcr.io/thomanil/p-swamp:latest
           ports:
             # uvicorn in this image listens on 8000. The Service maps its own
             # port 80 to this one via the symbolic name "http", so only this
@@ -58,26 +62,29 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: pswamp-client-server-poc
-  namespace: rndp-pswamp-client-server-poc
+  name: p-swamp
+  namespace: rndp-p-swamp
 spec:
   selector:
-    app: pswamp-client-server-poc
+    app: p-swamp
   ports:
     - port: 80
       targetPort: http
 
 ---
 # Reverse-proxy ingress with prefix rewriting:
-#   https://rndpdevsvc.statnett.no/pswamp-client-server-poc/foo -> <service>:80/foo
+#   https://rndpdevsvc.statnett.no/p-swamp/foo -> <service>:80/foo
 #
-# The app receives "/foo", not "/pswamp-client-server-poc/foo", so any absolute
+# The app receives "/foo", not "/p-swamp/foo", so any absolute
 # URL it generates (css, js, redirects) will 404 unless it is told its base path.
+# It is: the client emits relative asset urls and derives the prefix at runtime,
+# see app/client-web/src/lib/basePath.ts.
+#
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: pswamp-client-server-poc
-  namespace: rndp-pswamp-client-server-poc
+  name: p-swamp
+  namespace: rndp-p-swamp
   annotations:
     nginx.ingress.kubernetes.io/use-regex: "true"
     nginx.ingress.kubernetes.io/rewrite-target: /$2
@@ -87,10 +94,10 @@ spec:
     - host: rndpdevsvc.statnett.no
       http:
         paths:
-          - path: /pswamp-client-server-poc(/|$)(.*)
+          - path: /p-swamp(/|$)(.*)
             pathType: ImplementationSpecific
             backend:
               service:
-                name: pswamp-client-server-poc
+                name: p-swamp
                 port:
                   number: 80
