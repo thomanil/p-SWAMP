@@ -2,13 +2,6 @@
 
 
 
-Classification
-==
-
-```text
-K1 Internal code
-```
-
 Driving goals, constraints and principles:
 ==
 
@@ -197,7 +190,7 @@ Currently there are two examples:
 
 | Page URL | Api | What                                              |
 |---|---|---------------------------------------------------|
-| `/pmu-test-streamer` (also `/`) | `/api/pmu-test-streamer/ws` | Streams canned sample of PMU records line by line |
+| `/pmu-test-streamer` (also `/`) | `/api/pmu-test-streamer/ws` | Streams a canned sample of simulated PMU records line by line |
 | `/timeline` | `/api/timeline/ws` | Scrolling-number timeline with playback controls  |
 
 
@@ -271,7 +264,8 @@ timeline/         one package per api — the thing you add
   model.py        the app's own domain logic
 pmu_test_streamer/
   __init__.py, api.py, model.py
-  sample_data.txt  the streamed records — real PMU data, see above
+  sample_data.txt  the streamed records — 300 lines of *simulated* PMU data
+                   from the Nordic 44 sim, committed as a static test fixture
 ```
 
 **To add an api**, two small edits (again, both done by

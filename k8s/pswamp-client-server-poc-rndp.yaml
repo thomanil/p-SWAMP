@@ -14,10 +14,10 @@
 #   kubectl apply -f pswamp-client-server-poc.yaml
 #   (--namespace is redundant?, the namespace is set on each object below)
 #
-# Deliberately omitted for a PoC, add if/when needed:
-#   - securityContext (see docs/k8s/workloads.md) -- not enforced by Kyverno in
-#     project namespaces, and pinning a wrong uid is worse than pinning none
-#   - probes -- only useful with a real health endpoint
+# TODO Deliberately omitted for a PoC, add if/when needed:
+#   - securityContext?
+#     project namespaces?
+#   - probes -- only useful with a real health endpoint?
 #
 ---
 apiVersion: apps/v1
