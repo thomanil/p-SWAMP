@@ -6,17 +6,58 @@ are thin pointers to this file; put new guidance **here**, never in those.
 
 ## What this is
 
-A sandbox for figuring out the client-server shape of P-SWAMP: tech stack, repo
-structure, local dev experience, and the deploy path. See `README.md` for the
-driving goals and constraints.
+The p-SWAMP repository. It holds **two implementations side by side**:
 
-The app it is built around is deliberately trivial — a scrolling-number timeline
-with playback controls (back / play / stop / forward). It exists only to have
-*something* real running end to end; the interesting part is everything around
-it (dev scripts, container image, k8s manifests, quality gates).
+- the original **Python + Qt single-process application** — the research/desktop
+  code at the repo root (`src/pswamp/`, `examples/`, `tests/`, and the root
+  `pyproject.toml` + `uv.lock`), and
+- the **client-server stack** — a FastAPI server plus a React web client under
+  `app/`, with its dev tooling and deploy path (`Dockerfile`,
+  `docker-compose.yml`, `k8s/`, `scripts/`, `.github/`, `doc/`).
 
-**This sandbox project is stateless on purpose.** There is no database and no persistent
-volume anywhere in the repo. Don't reintroduce one without an explicit ask.
+The second started life as a separate proof-of-concept repo for working out the
+client-server shape of P-SWAMP — tech stack, repo structure, local dev
+experience, deploy path — and has since been **merged back into this repo**. It is
+no longer a PoC of its own: it is the web half of this project, living *alongside*
+the Qt implementation rather than replacing it. `doc/client-server-rig.md` holds
+the driving goals and constraints behind it; `README.md` is the desktop package's.
+
+**Everything below is about the client-server stack.** The desktop package at the
+repo root has its own manifest and is covered by neither these conventions nor
+`error_check.sh` — see the next section.
+
+The pages the web stack ships today are deliberately trivial — a PMU record
+streamer and a scrolling-number timeline with playback controls (back / play /
+stop / forward). They exist to have *something* real running end to end; the
+interesting part is everything around them (dev scripts, container image, k8s
+manifests, quality gates), and they are placeholders for the real applications.
+
+**The client-server stack is stateless on purpose.** There is no database and no
+persistent volume anywhere under `app/` or `k8s/`. Don't reintroduce one without
+an explicit ask.
+
+## Two Python projects in one repo
+
+The root `pyproject.toml` + `uv.lock` belong to the **desktop `p-swamp` package**
+(root `src/pswamp/`, imported as `pswamp`; PySide6, pyqtgraph, Kafka). The web
+backend keeps its own `app/server-python/pyproject.toml` + `uv.lock` and shares
+nothing with it: no imports in either direction, and the container image copies
+only `app/server-python/`. That separation is what keeps the two dependency sets
+(Qt + Kafka vs FastAPI + uvicorn) from having to resolve together — don't hoist
+either manifest to the other's level.
+
+Consequences worth knowing before touching anything:
+
+- **`src/` is ambiguous — always qualify it.** Root `src/` is the desktop package;
+  `app/server-python/src/` is the server. This file always means the latter unless
+  it says otherwise.
+- **`./scripts/error_check.sh` and CI only look at `app/`.** ruff, `tsc` and the
+  lockfile check are scoped there, and the workflow's path filters are `app/**`
+  plus the build files. A change under root `src/` triggers no gate and no image
+  build. Don't widen either without first deciding what to do about the existing
+  desktop code's lint state.
+- **A dependency for the web backend goes in `app/server-python/pyproject.toml`**,
+  never the root one — and vice versa.
 
 ## Architecture
 
@@ -33,12 +74,14 @@ Two deployables, one wire protocol:
   endpoint, per-client state, ticker, logging) and `model.py` (the pure domain
   model), which `api.py` imports **relatively** (`from .model import ...`).
   The streamer's `model.py` also owns its `sample_data.txt` (read once at import,
-  one record per line): a **one-off sample committed for testing** — 300 PMU records
-  extracted by hand from the Nordic 44 simulation in the sibling p-SWAMP project
-  (voltage phasor + measured frequency, five stations at 20 Hz, spanning a line
-  trip). It is a static fixture: nothing in this repo generates it, and there is
-  **no dependency on p-SWAMP**. Don't add tooling or deps to regenerate it unless
-  asked; replacing it is a file swap, since no code parses the contents. **`src/shared.py`** holds the
+  one record per line): a **one-off sample committed for testing** — 300
+  *simulated* PMU records extracted by hand from the Nordic 44 simulation that now
+  lives in this same repo under `examples/nordic44_rtsim/` (voltage phasor +
+  measured frequency, five stations at 20 Hz, spanning a line trip). Sharing a
+  repo with that simulation buys the streamer nothing: it is still a static
+  fixture, nothing generates it, and the web stack **imports no code from the
+  desktop package**. Don't add tooling or deps to regenerate it unless asked;
+  replacing it is a file swap, since no code parses the contents. **`src/shared.py`** holds the
   domain-free helpers both packages use — `ConnectionManager` and
   `make_logger(name)`; it is *not* an app package and never appears in `APPS`.
   Note the spelling split: a package dir must be a Python identifier
@@ -79,11 +122,13 @@ Key invariants to preserve:
 - **Single asyncio event loop, no locks.** The WS handlers, the `ticker()` task,
   and broadcasts are cooperatively scheduled — never truly parallel — so shared
   state needs no locking. Don't introduce threads or blocking calls.
-- **This example does not scale past one replica.** Because state is in-process, every k8s
-  manifest is `replicas: 1` with a `Recreate` strategy. A second pod would keep
-  its own independent state and the Service would split clients across them.
-  Horizontal scaling would require an external live store — a real design change,
-  not a manifest tweak.
+- **This example does not scale past one replica.** Because state is in-process,
+  both k8s manifests are `replicas: 1`. A second pod would keep its own
+  independent state and the Service would split clients across them. Horizontal
+  scaling would require an external live store — a real design change, not a
+  manifest tweak. Only `…-local.yaml` also sets `strategy: Recreate`, so that the
+  old pod is gone before the new one serves; `…-rndp.yaml` still defaults to
+  `RollingUpdate` and briefly runs two pods with separate state during a rollout.
 - **One message shape.** The server pushes `state_message()` on connect and every
   change; the client renders it. Changing the protocol means touching both sides.
 - **One cheap probe.** `GET /healthz` is both the liveness and readiness probe (and
@@ -248,21 +293,23 @@ Deploy / test the real artifact:
 ./scripts/logs-minikube.sh     # follow server logs (kubectl logs -f, bound to one pod)
 ```
 
-`start-pswamp-in-local-minikube-cluster.sh` is the single k8s test path: it builds the image straight
-from your working tree into minikube, opens the web client once `/healthz`
-answers (`NO_BROWSER=1` skips that), then tails the pod's logs until Ctrl-C
-(`NO_LOGS=1` skips that). NodePort is 30081. There is exactly one k8s manifest,
-`k8s/pswamp-client-server-poc-local.yaml`.
+`start-pswamp-in-local-minikube-cluster.sh` is the single *local* k8s test path: it
+builds the image straight from your working tree into minikube, opens the web
+client once `/healthz` answers (`NO_BROWSER=1` skips that), then tails the pod's
+logs until Ctrl-C (`NO_LOGS=1` skips that). NodePort is 30081.
 
-Nothing is published from this repo: no image registry, no remote-cluster
-deploy. The container image exists only where it is built — in your local Docker
-(via compose) or inside minikube. If a shareable artifact is needed later, that
-is a new decision, not a restored one.
+There are two k8s manifests, one per target:
+`k8s/pswamp-client-server-poc-local.yaml` (minikube, image built into the cluster)
+and `k8s/pswamp-client-server-poc-rndp.yaml` (the remote cluster, pulling the
+published image). `doc/pswamp-client-server-poc-operations.md` is the cheat sheet
+for deploying and operating the remote one — a manual `kubectl` flow. **No script
+in this repo touches a remote cluster**, and CI does not deploy either.
 
 ## Conventions
 
 - **Central Python manifest.** `app/server-python/pyproject.toml` declares the
-  server's direct dependencies (the single source of truth) and
+  web backend's direct dependencies (its single source of truth — the root
+  `pyproject.toml` belongs to the desktop package and is unrelated) and
   `app/server-python/uv.lock` pins the whole resolved transitive closure with
   hashes — the Python mirror of `app/client-web/package.json` +
   `package-lock.json`. Both are committed; `.venv/` is derived and is not.
@@ -292,13 +339,17 @@ is a new decision, not a restored one.
   so the Dockerfile builds natively on amd64 and arm64 alike — which is what lets
   an arm64 laptop build it locally. What **CI publishes is amd64 only**; see "CI".
 - **The deployable is named `pswamp-client-server-poc` everywhere** — local image
-  tag, k8s Deployment/Service/labels — and the minikube NodePort is
-  **30081**, not the usual 30080. This repo was forked from an older `timeline-server`
-  sandbox whose resources still live in the same local minikube cluster; sharing a
-  Deployment name would mean each deploy silently overwrites the other's, and
-  sharing a nodePort makes the second Service fail to allocate outright. Keep them
-  distinct. (The Python module names — `server.py`, `timeline/` — are internal to
-  the image and collide with nothing.)
+  tag, GHCR package, k8s Deployment/Service/labels, and the remote namespace — and
+  the minikube NodePort is **30081**, not the usual 30080. The `-poc` suffix is a
+  leftover from when this stack was its own repo, kept because the name is now
+  load-bearing *outside* this repo (the GHCR package, and the remote cluster's
+  namespace, which is provisioned elsewhere). Renaming it is a coordinated change
+  across all of those, not a search-and-replace here. The Deployment name and
+  NodePort also have to stay distinct from an older `timeline-server` sandbox whose
+  resources still live in the same local minikube cluster: a shared Deployment
+  name means each deploy silently overwrites the other's, and a shared nodePort
+  makes the second Service fail to allocate outright. (The Python module names —
+  `server.py`, `timeline/` — are internal to the image and collide with nothing.)
 - **Lint is explicitly `--select E,F`** (pycodestyle errors + pyflakes) in both
   `error_check.sh` and `autofix_lint_formatting.sh`. Don't drop the flag: ruff's
   own defaults now include opinionated families that fail the build on style
@@ -387,12 +438,13 @@ What has to hold in the check job:
 - **Pin deployments to the immutable `sha-<full sha>` tag**, not to `:latest`.
   `latest` and the branch tag both move, and neither triggers a k8s rollout on
   its own (the pod spec doesn't change) — the sha tag does.
-- **k8s manifests:** only `k8s/pswamp-client-server-poc-local.yaml` exists, and it
-  is local-only (`imagePullPolicy: Never`, image built into minikube). Running a
-  *published* image needs a second manifest differing in exactly two lines — the
-  registry image ref and `imagePullPolicy: Always`.
-- **Deploying is still undecided.** The pipeline publishes and stops; nothing has
-  ever deployed to a remote cluster from this repo.
+- **k8s manifests:** `…-local.yaml` is local-only (`imagePullPolicy: Never`, image
+  built into minikube); `…-rndp.yaml` runs the *published* image on the remote
+  cluster and differs in little more than the registry image ref and the
+  namespace/ingress. Keep the two in step when the pod spec changes.
+- **CI publishes but never deploys.** Rolling the remote cluster forward is a
+  manual `kubectl` step out of `doc/pswamp-client-server-poc-operations.md` —
+  nothing here automates it, and no cluster credentials live in this repo.
 
 ## Workflow rules
 
