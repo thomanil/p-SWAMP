@@ -10,8 +10,22 @@ In the NEWEPS project, several demonstration videos were created, which can be a
 **NOTE:** This code is being developed as part of ongoing research, and thus contains experimental features. Use at your own risk!
 
 
+## Where this is heading: a client-server architecture
+
+p-SWAMP is moving towards a client-server architecture. For the near to mid term, this repository carries both implementations side by side:
+
+* the original **single-process Python + Qt** application — what the rest of this readme describes, and
+* a newer **client-server** stack: a Python backend serving a web frontend.
+
+Both are kept working for now, and nothing about installing or running the Qt version changes. The intention is that the client-server version takes over at a later point.
+
+Documentation for the new stack lives under [`doc/`](doc/). Start with [`doc/client-server-rig.md`](doc/client-server-rig.md), which covers the architecture, the local development workflow, and how to add a new page or backend api. [`doc/the-client-server-api.md`](doc/the-client-server-api.md) then covers the api itself — the generated contract both halves agree on, the REST layer upstream, the WebSocket layer downstream, and how a call is routed through both.
+
+The rest of the README describes the current/original python+qt implementation.
+
+
 ## Installation
-This Python package can be installed using pip (or another package manager, for instance uv):    
+This Python package can be installed using pip (or another package manager, for instance uv):
 ```typescript
 pip install -e .[full]
 ```

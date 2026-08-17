@@ -1,0 +1,18 @@
+"""The __LABEL__ app.
+
+Same public surface as every app package — src/server.py uses nothing else:
+
+  router      the endpoints, mounted under /api/__SLUG__
+  WS_MESSAGE  optional; the model this app pushes down its socket
+  lifespan    optional; startup/shutdown work — see src/pswamp_web/
+
+Note the spelling difference: this directory has to be a Python identifier,
+while its URL prefix is hyphenated to match the web client's route —
+`__PKG__` vs `/api/__SLUG__`.
+"""
+
+from .api import __NAME__State, router
+
+WS_MESSAGE = __NAME__State
+
+__all__ = ["WS_MESSAGE", "__NAME__State", "router"]
