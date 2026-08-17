@@ -1,0 +1,188 @@
+# Build the deployable container image and publish it to GitHub Container
+# Registry (GHCR).
+#
+# Two jobs, in order:
+#
+#   check  — runs scripts/error_check.sh, the same gate .githooks/pre-push runs
+#            locally. CI calls the script rather than reimplementing the checks
+#            in YAML, so the two can never drift apart.
+#   build  — builds Dockerfile (web client + server, one image) for amd64 and
+#            pushes it to ghcr.io/<owner>/<repo>. `needs: check`, so a failing
+#            check never produces an image.
+#
+# On a pull request the image is built but NOT pushed: it proves the Dockerfile
+# still builds, without publishing anything from an unmerged branch (and PRs from
+# forks get a read-only GITHUB_TOKEN, so a push would fail anyway).
+#
+# Pulling what this publishes:
+#   docker pull ghcr.io/<owner>/pswamp-client-server-poc:latest
+#
+# NOTE: a newly created GHCR package is PRIVATE. The first push succeeds, but an
+# unauthenticated `docker pull` (e.g. from a cluster with no imagePullSecret)
+# fails until the package is flipped to public once, under
+# github.com/users/<owner>/packages → the package → Package settings → Change
+# visibility. The org.opencontainers.image.source label set below links the
+# package back to this repo.
+name: build-and-publish-image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      # Directory globs, never per-file lists: listing individual .py files here
+      # would silently miss pyproject.toml/uv.lock, so a dependency-only change
+      # would not rebuild the image.
+      - "app/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "scripts/error_check.sh" # a change to the gate re-runs the gate
+      - ".github/workflows/build-and-publish-image.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "scripts/error_check.sh"
+      - ".github/workflows/build-and-publish-image.yml"
+  # Lets you rebuild from the Actions tab without pushing a commit.
+  workflow_dispatch:
+
+# A new push to the same branch cancels the previous run — image builds are the
+# expensive part here and only the newest commit's image is interesting.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # ghcr.io/<owner>/<repo>. GHCR requires an all-lowercase path; this repo's
+  # owner/name already are. If this workflow is ever copied under an owner with
+  # uppercase letters, lowercase it first (e.g. with a small `tr` step) or the
+  # push fails with "invalid reference format".
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  # --- Static checks: the local pre-push gate, run again on the server --------
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # error_check.sh preflights exactly node, npx, uv and python3 and fails
+      # fast if any is missing. python3 is already on ubuntu-latest; node, uv and
+      # the 3.11 interpreter uv needs are set up below.
+      #
+      # Node 22 matches the Dockerfile's web-build stage — the web client must
+      # type-check and lint on the same major it is built with.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/client-web/package-lock.json
+
+      # `uv` (not `uvx`): error_check.sh runs ruff out of the locked `dev`
+      # dependency group, so everyone — hook, CI, developer — runs the identical
+      # linter version pinned in pyproject.toml.
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: app/server-python/uv.lock
+
+      # Python 3.11 specifically — matching app/server-python/.python-version and
+      # the image's base. The runner ships a newer python3, which is fine for
+      # py_compile but NOT for `uv lock --check`: that resolves against the
+      # project's requires-python and needs a real 3.11 interpreter. The check
+      # runs `--offline` (deliberate: it keeps the pre-push hook off the
+      # network), so uv may not download one on demand — without this step it
+      # fails with "No interpreter found for Python 3.11 … uv is set to offline
+      # mode". Installing it here, before the offline check, is what satisfies
+      # that.
+      - name: Install Python 3.11 for uv
+        run: uv python install 3.11
+
+      # Installs node_modules itself on a cold checkout (see the script), so
+      # there is no separate `npm ci` step to keep in sync with it.
+      - name: Static checks (tsc, eslint, uv lock --check, py_compile, ruff)
+        run: ./scripts/error_check.sh
+
+  # --- Build the image and push it to GHCR ------------------------------------
+  build-and-push:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for pushing to GHCR with the automatic GITHUB_TOKEN. No extra
+      # secret is needed for ghcr.io.
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # buildx for the layer cache below (the plain builder can't export one).
+      # No QEMU here: the published image is amd64 only, which the runner is
+      # natively — see the `platforms` note on the build step.
+      - uses: docker/setup-buildx-action@v3
+
+      # Skipped on pull requests: nothing is pushed there, and fork PRs have no
+      # write token to log in with.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Computes the tag list and the standard OCI labels (including
+      # org.opencontainers.image.source, which links the GHCR package to this
+      # repo and makes it inherit the repo's visibility settings).
+      #
+      # Tags produced:
+      #   latest             — only on the default branch
+      #   <branch>           — e.g. main
+      #   pr-<n>             — pull requests (computed, never pushed)
+      #   sha-<full sha>     — immutable, the one to pin a deployment to
+      #   v1.2.3 / 1.2 / 1   — when a v* tag is pushed
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=long
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Build context is the repo root, matching docker-compose.yml (`build: .`)
+      # and start-pswamp-in-local-minikube-cluster.sh — the Dockerfile's
+      # web-build stage needs app/client-web/ in the context, so it cannot be
+      # narrowed to app/server-python/.
+      # amd64 only, deliberately: that is what the clusters run. Local dev boxes
+      # here are often arm64, but they build their own image (compose /
+      # minikube), never pull this one. Adding arm64 would mean emulating `npm
+      # ci` + `vite build` + pip install through QEMU on every push, for an
+      # artifact nothing consumes.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache in GitHub's own cache backend, so an unchanged
+          # package-lock.json / uv.lock skips the two slow install layers.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### Pushed image tags"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

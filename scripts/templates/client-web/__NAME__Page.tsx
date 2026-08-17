@@ -1,0 +1,79 @@
+import { WifiOffIcon } from 'lucide-react'
+
+import { use__NAME__Socket } from './use__NAME__Socket'
+import { Alert, AlertTitle } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
+
+/**
+ * The __LABEL__ page (route `/__SLUG__`), scaffolded by
+ * scripts/generate-new-subapp.sh: the buttons send commands, the server owns the
+ * count and pushes it back, and this component only renders what it is handed.
+ */
+export function __NAME__Page() {
+  const { state, status, connected, send } = use__NAME__Socket()
+
+  return (
+    <Card className="w-full max-w-xl gap-0">
+      <CardHeader className="border-b">
+        <CardTitle className="text-lg">__LABEL__</CardTitle>
+        <span className="text-gray-500">
+          A new subapp. The count below lives on the server, one per connected client.
+        </span>
+        <CardAction className="self-center">
+          {connected ? (
+            <Badge variant="default">Online</Badge>
+          ) : (
+            <Badge variant="outline" className="text-muted-foreground">
+              <WifiOffIcon className="size-3" />
+              Offline
+            </Badge>
+          )}
+        </CardAction>
+      </CardHeader>
+
+      <CardContent className="px-6 py-0">
+        {/* The server-owned state, or the status banner in its place. */}
+        <div className="flex min-h-[152px] items-center justify-center">
+          {connected && state ? (
+            <span className="text-6xl font-bold tabular-nums">{state.count}</span>
+          ) : (
+            <Alert
+              variant={status.kind === 'offline' && status.isError ? 'destructive' : 'default'}
+              className="w-auto"
+            >
+              <AlertTitle>
+                {status.kind === 'online' ? 'Waiting for state…' : status.label}
+              </AlertTitle>
+            </Alert>
+          )}
+        </div>
+      </CardContent>
+
+      <CardFooter className="flex-col gap-4 border-t pt-6">
+        <div className="grid w-full max-w-xs grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2">
+          <label className="text-right text-sm text-muted-foreground">Client</label>
+          <span className="text-sm tabular-nums">{state ? state.clientId : '—'}</span>
+        </div>
+
+        {/* Disabled until connected: with no socket there is nothing to send to. */}
+        <div className="flex items-center justify-center gap-2">
+          <Button disabled={!connected} onClick={() => send('bump')}>
+            Bump
+          </Button>
+          <Button variant="outline" disabled={!connected} onClick={() => send('reset')}>
+            Reset
+          </Button>
+        </div>
+      </CardFooter>
+    </Card>
+  )
+}
