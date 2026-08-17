@@ -101,8 +101,11 @@ Two deployables, one wire protocol:
   imported relatively within the folder. The route table is `src/App.tsx` and the
   nav + centering shell is `src/components/AppLayout.tsx`. Only genuinely
   cross-page code sits outside a page folder: shared UI in `src/components/`
-  (`ui/` is vendored shadcn), shared logic in `src/hooks/`
-  (`useServerSocket`) and `src/lib/`.
+  (`ui/` is vendored shadcn), shared logic in `src/hooks/` (`useServerSocket`) and
+  `src/lib/` — `servers.ts` (each app's ws path + the serving-origin url),
+  `basePath.ts` (the runtime-discovered mount prefix) and `utils.ts` (shadcn's `cn`).
+  Note `src/lib/` was invisible to git until recently; see the `.gitignore` note
+  under "Conventions".
   Current pages: `/` + `/pmu-test-streamer` (both `PmuTestStreamerPage`, api
   `/api/pmu-test-streamer/ws` — the streamer is the landing page, and comes
   first in the nav) and `/timeline` (`TimelinePage`, api
@@ -143,13 +146,29 @@ Key invariants to preserve:
 
 - **The client always talks to the origin it was served from.** There is no backend
   picker and no address table: `resolveServerUrl(wsPath)` in
-  `app/client-web/src/lib/servers.ts` derives `ws(s)://<window.location.host>` and
-  appends the app's `*_WS_PATH` const from that same file. In the shipped image
-  that origin *is* the backend (container, minikube NodePort, any cluster); under
-  Vite it is the dev server, whose `/api` proxy forwards to the local docker server
-  on :8000 — so dev is made to *look* like production rather than be special-cased.
-  Pointing dev at some other backend is a one-line `server.proxy` target change in
-  `vite.config.ts`, not a runtime choice in the UI.
+  `app/client-web/src/lib/servers.ts` derives `ws(s)://<window.location.host>`,
+  inserts `BASE_PATH`, and appends the app's `*_WS_PATH` const from that same file.
+  In the shipped image that origin *is* the backend (container, minikube NodePort,
+  any cluster); under Vite it is the dev server, whose `/api` proxy forwards to the
+  local docker server on :8000 — so dev is made to *look* like production rather
+  than be special-cased. Pointing dev at some other backend is a one-line
+  `server.proxy` target change in `vite.config.ts`, not a runtime choice in the UI.
+
+- **The mount prefix is discovered at runtime, never baked in.** Remotely the app
+  sits behind a reverse proxy under `/p-swamp/`, which strips the prefix before
+  forwarding — so the server sees plain `/api/...` and knows nothing about it, but
+  the browser must put it back on the front of every url.
+  `app/client-web/src/lib/basePath.ts` recovers it by reading its own
+  `import.meta.url` and cutting at the `/assets/` marker; `App.tsx` feeds the
+  result to react-router as `basename`, and `resolveServerUrl` prepends it to
+  WebSocket urls. This is what lets **one** published image run at the origin root
+  and under a prefix, which matters because CI publishes exactly one. Two
+  invariants it rests on, both spelled out in that file: built chunks stay under
+  `assets/` (Vite's default, and what `SPAStaticFiles` special-cases), and
+  **routes stay one segment deep** — `base: './'` makes asset urls resolve against
+  the current document's directory, so `/prefix/timeline/detail` would look for
+  `/prefix/timeline/assets/…`. Nested routes would mean switching to a build-time
+  `--base` or a server-injected `<base href>`.
 
 ## Adding a page
 
@@ -170,7 +189,9 @@ Three edits, no build config:
    its views), importing them **relatively** (`./useMyThingSocket`). Copy
    `src/pages/pmu-test-streamer/` as a starting point.
 2. Register it in `src/App.tsx`: `<Route path="<slug>" element={<NamePage />} />`,
-   inside the `AppLayout` layout route.
+   inside the `AppLayout` layout route. Keep the slug **one segment deep** — a
+   nested route breaks relative asset resolution behind the remote path prefix
+   (see the `basePath.ts` invariant above).
 3. Add `{ to: '/<slug>', label: '…' }` to `NAV_ITEMS` in
    `src/components/AppLayout.tsx`.
 
@@ -354,21 +375,22 @@ in this repo touches a remote cluster**, and CI does not deploy either.
   being written down: CI sets `IMAGE_NAME: ghcr.io/${{ github.repository }}`, so
   `thomanil/p-SWAMP` publishes as `ghcr.io/thomanil/p-swamp` — which is exactly what
   `k8s/p-swamp-rndp.yaml` pins. Keep those two agreeing; they drifted apart once
-  already when the stack was merged in under the old `pswamp-client-server-poc` name.
-  **Two identifiers deliberately still carry the old name** and are marked TODO in
-  the manifest: the remote namespace `rndp-pswamp-client-server-poc` (created by the
-  rndp/auth chart from `environ/development/users.yaml` in *another* repo, so an
-  apply against a renamed namespace that doesn't exist yet is rejected outright) and
-  the ingress path `/pswamp-client-server-poc` (a live, bookmarked URL). Don't
-  "finish" that rename here without the chart change landing first.
+  already, when the stack was merged in still carrying its old PoC-era name.
+  The remote identifiers follow the same slug: namespace `rndp-p-swamp`, ingress
+  path `/p-swamp`, external URL `https://rndpdevsvc.statnett.no/p-swamp/`.
+  **The namespace is not created by this repo** — the rndp/auth chart makes it from
+  the project entry in `environ/development/users.yaml`, which lives in *another*
+  repo, so that entry has to say `rndp-p-swamp` before an apply here can succeed;
+  applying into a namespace that does not exist is rejected outright.
 - **The minikube NodePort is 30081**, not the usual 30080. It and the Deployment
   name have to stay distinct from an older `timeline-server` sandbox whose resources
   still live in the same local minikube cluster: a shared Deployment name means each
   deploy silently overwrites the other's, and a shared nodePort makes the second
-  Service fail to allocate outright. Renaming the Deployment does **not** remove the
-  old objects — the previous `pswamp-client-server-poc` Service keeps 30081 claimed
-  until it is deleted. (The Python module names — `server.py`, `timeline/` — are
-  internal to the image and collide with nothing.)
+  Service fail to allocate outright. Renaming a Deployment does **not** remove the
+  old objects either — `kubectl apply` creates the new name alongside the old, and
+  the stale Service keeps its nodePort claimed until deleted by name. (The Python
+  module names — `server.py`, `timeline/` — are internal to the image and collide
+  with nothing.)
 - **Lint is explicitly `--select E,F`** (pycodestyle errors + pyflakes) in both
   `error_check.sh` and `autofix_lint_formatting.sh`. Don't drop the flag: ruff's
   own defaults now include opinionated families that fail the build on style
