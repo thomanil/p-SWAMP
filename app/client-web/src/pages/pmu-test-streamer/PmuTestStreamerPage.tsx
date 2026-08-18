@@ -40,7 +40,7 @@ export function PmuTestStreamerPage() {
       <CardHeader className="border-b">
         <CardTitle className="text-lg">PMU Test Streamer</CardTitle>
         <span className="text-gray-500">
-          Raw dump of PMU data streamed from server (just a static textfile of sample data for now)
+          Example subapp. Raw dump of PMU data streamed from server (just a static textfile of sample data for now)
         </span>
         <CardAction className="self-center">
           {connected ? (

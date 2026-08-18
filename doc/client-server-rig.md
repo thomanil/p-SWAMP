@@ -186,12 +186,18 @@ backend is one process that routes each api to its own package. One deployable
 serves all of it from one origin, so there is nothing per-page to deploy or
 configure.
 
-Currently there are two examples:
+One real application and two scaffold demos:
 
 | Page URL | Api | What                                              |
 |---|---|---------------------------------------------------|
-| `/pmu-test-streamer` (also `/`) | `/api/pmu-test-streamer/ws` | Streams a canned sample of simulated PMU records line by line |
+| `/` (grid monitor) | `/api/time-window/ws`, `/api/islanding/ws`, `/api/phasors/ws`, `/api/app-status/ws`, `/api/grid/model` | Dashboard of panels over a recorded Nordic 44 PMU stream replayed through p-SWAMP's monitoring applications |
+| `/time-window`, `/phasors`, `/islanding`, `/app-status` | as above | The same panel components, full-size — focused views, not copies |
+| `/pmu-test-streamer` | `/api/pmu-test-streamer/ws` | Streams a canned sample of simulated PMU records line by line |
 | `/timeline` | `/api/timeline/ws` | Scrolling-number timeline with playback controls  |
+
+The grid monitor is the real one; the last two are scaffold demos that predate it
+and are what `generate-new-subapp.sh` clones. A new *p-SWAMP* view is a panel in
+the monitor rather than a new page — see "Adding a p-SWAMP view" in `AGENTS.md`.
 
 
 ### Adding a new page/subapp: just run the script

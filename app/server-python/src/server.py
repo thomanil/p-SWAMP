@@ -25,12 +25,33 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
 import pmu_test_streamer
+import pswamp_web
+import pswamp_web.app_status
+import pswamp_web.grid
+import pswamp_web.islanding
+import pswamp_web.line_outage
+import pswamp_web.phasors
+import pswamp_web.time_window
 import timeline
+
+# --- shared services --------------------------------------------------------
+#
+# Packages with no url surface of their own, whose lifespan must be running
+# before any app package handles a request. Entered before everything in APPS and
+# exited after it, so a websocket handler can assume its dependencies are up.
+#
+# pswamp_web is the one: it owns the PMU replay and the monitoring application
+# threads that its page packages all read from. Unlike the app packages, whose
+# state is per client, that pipeline is process-wide and shared — there is one
+# grid being monitored no matter how many browsers are watching.
+
+SERVICES = [pswamp_web]
 
 # --- the app registry -------------------------------------------------------
 #
@@ -47,6 +68,12 @@ import timeline
 APPS = [
     ("/api/timeline", timeline),
     ("/api/pmu-test-streamer", pmu_test_streamer),
+    ("/api/app-status", pswamp_web.app_status),
+    ("/api/grid", pswamp_web.grid),
+    ("/api/time-window", pswamp_web.time_window),
+    ("/api/islanding", pswamp_web.islanding),
+    ("/api/line-outage", pswamp_web.line_outage),
+    ("/api/phasors", pswamp_web.phasors),
 ]
 
 
@@ -61,6 +88,8 @@ async def lifespan(app: FastAPI):
     request handlers just omits it.
     """
     async with AsyncExitStack() as stack:
+        for module in SERVICES:
+            await stack.enter_async_context(module.lifespan(app))
         for _, module in APPS:
             app_lifespan = getattr(module, "lifespan", None)
             if app_lifespan is not None:
@@ -69,6 +98,26 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# In the shipped image the web client is served from this same origin, so none of
+# this applies. In local dev it is not: the client runs on the Vite dev server
+# and talks to this process on another port.
+#
+# That was invisible for as long as the client only opened WebSockets, which are
+# not subject to the same-origin policy. The moment a page fetched something over
+# plain HTTP — the grid topology, the channel catalogue — the browser began
+# silently discarding the responses, and the affected component sat waiting for
+# data that had in fact arrived.
+#
+# Wide open because this server has no auth, no secrets and no side effects worth
+# protecting: every endpoint is a read of a replayed sample dataset. Anything
+# that changes needs this narrowed to the dev origins first.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/healthz")
@@ -110,17 +159,41 @@ class SPAStaticFiles(StaticFiles):
     assets/ (a bad hashed-asset URL should fail loudly, not return HTML with the
     wrong content type) and anything under api/ (a wrong or removed endpoint must
     look wrong to a JSON caller, and an api 404 is never a navigation route).
-    Everything else, i.e. the client's own routes, falls through to the shell."""
+    Everything else, i.e. the client's own routes, falls through to the shell.
+
+    It also sets Cache-Control, which StaticFiles does not. Without it a browser
+    may apply heuristic freshness and serve the shell from cache unvalidated —
+    and since asset filenames are content-hashed, a cached shell pins the previous
+    build's assets, so the whole old client is reassembled from cache with no
+    requests made. The deploy looks stale when it isn't. Only the shipped image
+    is affected; Vite's dev server sends no-cache itself.
+
+    So: the shell is a mutable name and must revalidate (`no-cache` means "ask
+    first", not "don't store" — the ETag makes that a 304); everything under
+    assets/ is immutable and never needs revalidating.
+    """
 
     _NO_FALLBACK = ("assets/", "api/")
 
+    _IMMUTABLE = "public, max-age=31536000, immutable"
+    _REVALIDATE = "no-cache"
+
     async def get_response(self, path: str, scope: Scope):
         try:
-            return await super().get_response(path, scope)
+            response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
             if exc.status_code == 404 and not path.startswith(self._NO_FALLBACK):
-                return await super().get_response("index.html", scope)
+                response = await super().get_response("index.html", scope)
+                response.headers["cache-control"] = self._REVALIDATE
+                return response
             raise
+
+        # favicon.svg and index.html change in place, so only assets/ is cacheable.
+        cacheable = path.startswith("assets/") and response.status_code == 200
+        response.headers["cache-control"] = (
+            self._IMMUTABLE if cacheable else self._REVALIDATE
+        )
+        return response
 
 
 STATIC_DIR = Path(__file__).parent / "static"

@@ -63,7 +63,7 @@ BASE_URL="http://${MINIKUBE_IP}:${NODE_PORT}"
 # $1 = base url, $2 = attempts. Prints a dot per attempt and always closes the
 # line, so a wait is visibly progressing rather than looking frozen.
 #
-# `--connect-timeout 1` is the load-bearing flag, not `-m`. An unroutable node IP
+# `--connect-timeout 1` is what makes this fail fast, not `-m`. An unroutable node IP
 # *drops* packets rather than refusing them — nothing sends a TCP reset — so
 # without it every attempt burns its full `-m` timeout and the probe sits silent
 # for the better part of a minute before falling back, which reads as a hang.

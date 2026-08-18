@@ -36,15 +36,26 @@ services:
         # The whole source dir, not a file-by-file list: a new module — or a
         # whole new app package under src/ — is picked up without editing this
         # file. The image mirrors the repo
-        # (app/server-python/ → /app), so the two sides of this path match.
+        # (the whole repo at /workspace/p-SWAMP, at its real depth — see the
+        # Dockerfile), so the two sides of this path match.
         # .dockerignore applies here too, so __pycache__/ and a locally built
         # src/static/ are not synced in — importantly, the web client baked into
-        # the image at /app/src/static keeps being served during a watch session.
+        # the image at <server dir>/src/static keeps being served during a watch
+        # session.
         # Adds and edits propagate; a local *delete* does not (the file lingers
         # in the container until the next rebuild).
         - path: app/server-python/src
           action: sync
-          target: /app/src
+          target: /workspace/p-SWAMP/app/server-python/src
+        # The same live-reload loop for the desktop package at the repo root.
+        # p-swamp is installed editable (see the Dockerfile), so root src/pswamp/
+        # in the image is what actually gets imported, and syncing it means a
+        # change to a monitoring application or the time-window storage
+        # hot-reloads here just like a change to the server's own code. Without
+        # this, edits there would appear to do nothing until the next rebuild.
+        - path: src
+          action: sync
+          target: /workspace/p-SWAMP/src
         # Dependency changes are the exception: new packages have to be
         # installed, which a file sync can't do. These rebuild the image and
         # recreate the container instead — slower, on purpose. Without this,

@@ -34,6 +34,14 @@ on:
       # would silently miss pyproject.toml/uv.lock, so a dependency-only change
       # would not rebuild the image.
       - "app/**"
+      # The desktop package at the repo root is IN the image: the web backend
+      # depends on it as an editable path dependency and pswamp_web/ imports
+      # pswamp.* (see AGENTS.md, "Two Python projects in one repo"). A change
+      # under root src/ therefore changes what gets published, so it has to
+      # trigger a rebuild — this used to be app/** only, back when the two
+      # projects genuinely shared nothing.
+      - "src/**"
+      - "pyproject.toml"
       - "Dockerfile"
       - ".dockerignore"
       - "scripts/error_check.sh" # a change to the gate re-runs the gate
@@ -41,6 +49,8 @@ on:
   pull_request:
     paths:
       - "app/**"
+      - "src/**"
+      - "pyproject.toml"
       - "Dockerfile"
       - ".dockerignore"
       - "scripts/error_check.sh"

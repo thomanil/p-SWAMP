@@ -154,7 +154,7 @@ edit(
 edit(
     WEB / "components" / "AppLayout.tsx",
     r"^\]\n",
-    f"  {{ to: '/{slug}', label: '{label}', isIndex: false }},\n",
+    f"  {{ to: '/{slug}', label: '{label}', end: false }},\n",
     before=True,
 )
 

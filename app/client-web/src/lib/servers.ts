@@ -21,6 +21,14 @@ import { BASE_PATH } from '@/lib/basePath'
 // than a literal repeated across the hooks that connect.
 export const TIMELINE_WS_PATH = '/api/timeline/ws'
 export const PMU_STREAM_WS_PATH = '/api/pmu-test-streamer/ws'
+export const APP_STATUS_WS_PATH = '/api/app-status/ws'
+export const TIME_WINDOW_WS_PATH = '/api/time-window/ws'
+export const ISLANDING_WS_PATH = '/api/islanding/ws'
+export const PHASORS_WS_PATH = '/api/phasors/ws'
+export const LINE_OUTAGE_WS_PATH = '/api/line-outage/ws'
+
+// The grid topology is static, so it is fetched over HTTP rather than pushed.
+export const GRID_MODEL_PATH = '/api/grid/model'
 
 /** The full ws:// (or wss://) URL for one app's endpoint on the serving origin,
  *  derived from the current page so it follows http→ws / https→wss automatically.

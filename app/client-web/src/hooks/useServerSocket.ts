@@ -17,6 +17,20 @@ function randomSeed(): number {
   return Math.floor(Math.random() * 2_147_483_647) + 1
 }
 
+/** Options for callers whose data path shouldn't go through React state. */
+export type ServerSocketOptions<M> = {
+  /**
+   * Called for each message *instead of* storing it in state.
+   *
+   * Only worth reaching for on a high-rate stream whose payload is drawn
+   * imperatively — a canvas chart, say — where a render pass per message buys
+   * nothing. Setting this leaves `message` permanently null, so the caller owns
+   * the data entirely; `status` still updates normally, since connection changes
+   * are rare and genuinely do need a render.
+   */
+  onMessage?: (message: M) => void
+}
+
 /**
  * The connection half of every app's socket, shared by useTimelineSocket and
  * usePmuStreamSocket: one WebSocket to `wsPath` on the serving origin (see
@@ -27,10 +41,21 @@ function randomSeed(): number {
  * which also keeps a mapping callback out of the effect's dependencies, where an
  * unstable one would reconnect the socket on every render.
  */
-export function useServerSocket<M = unknown>(wsPath: string) {
+export function useServerSocket<M = unknown>(
+  wsPath: string,
+  options: ServerSocketOptions<M> = {},
+) {
   const clientId = useRef(randomSeed())
   const wsRef = useRef<WebSocket | null>(null)
   const [message, setMessage] = useState<M | null>(null)
+  // Held in a ref so a caller can pass an inline function without the identity
+  // of that function tearing down and reopening the socket on every render.
+  // Updated after commit rather than during render: the socket only ever calls
+  // it asynchronously, so it is always the committed version that runs.
+  const onMessage = useRef(options.onMessage)
+  useEffect(() => {
+    onMessage.current = options.onMessage
+  })
   const [status, setStatus] = useState<ConnStatus>({
     kind: 'connecting',
     label: 'Connecting to server…',
@@ -58,6 +83,10 @@ export function useServerSocket<M = unknown>(wsPath: string) {
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data)
         if (msg.type !== 'state') return
+        if (onMessage.current) {
+          onMessage.current(msg as M)
+          return
+        }
         setMessage(msg as M)
       }
       ws.onclose = () => {

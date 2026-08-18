@@ -2,16 +2,23 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router'
 
 import { AppLayout } from '@/components/AppLayout'
 import { BASE_PATH } from '@/lib/basePath'
+import { GridMonitorPage } from '@/pages/grid-monitor/GridMonitorPage'
+import { AppStatusPanel } from '@/pages/grid-monitor/app-status/AppStatusPanel'
+import { IslandingFocused } from '@/pages/grid-monitor/islanding/IslandingFocused'
+import { LineOutagePanel } from '@/pages/grid-monitor/line-outage/LineOutagePanel'
+import { PhasorsPanel } from '@/pages/grid-monitor/phasors/PhasorsPanel'
+import { MeasurementsPanel } from '@/pages/grid-monitor/time-window/MeasurementsPanel'
 import { PmuTestStreamerPage } from '@/pages/pmu-test-streamer/PmuTestStreamerPage'
 import { TimelinePage } from '@/pages/timeline/TimelinePage'
 
 /**
  * The route table — the one place that knows which apps this client hosts.
- * Every page is a folder under `src/pages/<route>/` holding its own component,
- * hook and views, rendered into AppLayout's outlet; adding one means a folder
- * there, a <Route> here, and a NAV_ITEMS entry in AppLayout. Only genuinely
- * cross-page code lives outside those folders (`src/components/`, `src/hooks/`,
- * `src/lib/`).
+ *
+ * An app is a folder under `src/pages/<app>/`. Most own a single route; the grid
+ * monitor owns several, because its panels are views of one server-side timeline
+ * that are useful both together (the dashboard at `/`) and one at a time (the
+ * focused routes below, which render the *same* panel components with
+ * variant="focused" rather than copies of them).
  *
  * Deep links and hard refreshes work in both modes: Vite's dev server and the
  * Python server's SPAStaticFiles both fall back to index.html on an unknown
@@ -29,10 +36,29 @@ function App() {
     <BrowserRouter basename={BASE_PATH || '/'}>
       <Routes>
         <Route element={<AppLayout />}>
-          <Route index element={<PmuTestStreamerPage />} />
+          <Route index element={<GridMonitorPage />} />
+
+          {/* Full-size views of individual monitor panels. */}
+          <Route
+            path="time-window"
+            element={<MeasurementsPanel variant="focused" />}
+          />
+          <Route path="phasors" element={<PhasorsPanel variant="focused" />} />
+          <Route path="islanding" element={<IslandingFocused />} />
+          <Route
+            path="line-outage"
+            element={<LineOutagePanel variant="focused" />}
+          />
+          <Route
+            path="app-status"
+            element={<AppStatusPanel variant="focused" />}
+          />
+
+          {/* Scaffold demos, unrelated to the p-SWAMP pipeline. */}
           <Route path="pmu-test-streamer" element={<PmuTestStreamerPage />} />
           <Route path="timeline" element={<TimelinePage />} />
-          <Route path="*" element={<Navigate to="/pmu-test-streamer" replace />} />
+
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
     </BrowserRouter>

@@ -15,7 +15,33 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.6,<0.116",
     "uvicorn[standard]>=0.34,<0.35",
+    "p-swamp",
 ]
+
+# p-swamp is the desktop package at the repo root (root pyproject.toml, root
+# src/pswamp/). It supplies the PMU decoding, the time-window storage and the
+# monitoring applications this server is a front end for, and the code under
+# src/pswamp_web/ is written so it could fold into it as src/pswamp/web/.
+#
+# This is the ONE place where the two Python projects in this repo are wired
+# together — everywhere else in AGENTS.md still holds: the web backend keeps its
+# own manifest and lockfile, and nothing under src/pswamp/ imports pswamp_web.
+# The dependency points one way only, web → desktop.
+#
+# Editable, so an edit to root src/pswamp/ is live here with no reinstall.
+#
+# Deliberately no extras. p-swamp's [full] extra is what carries PySide6,
+# pyqtgraph, kafka, nqkafka and tops-rt; none of that belongs in a headless
+# server image, and the base dependency set (numpy, scipy, pandas) is all the
+# analysis core needs.
+#
+# The path is relative to this file's directory: app/server-python/ → repo root.
+# It is deliberately the same string on the host and inside the image, which is
+# why the image mirrors the repo at its real depth rather than flattening the
+# server to /app — see the workspace note at the top of the runtime stage in the
+# Dockerfile.
+[tool.uv.sources]
+p-swamp = { path = "../../", editable = true }
 
 # Tooling that must never ship in the image — the Dockerfile installs with
 # --no-dev. Declared here so the linter version is locked and hash-verified like

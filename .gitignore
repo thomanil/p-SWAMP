@@ -18,12 +18,6 @@ __pycache__/
 *kubeconfig*.yaml
 
 
-# A staging copy of the sibling p-SWAMP checkout, made by scripts/vendor-pswamp.sh
-# so the Docker build can reach it from inside the build context. Derived, never
-# edited by hand — edit ../p-SWAMP instead.
-app/server-python/.vendor/
-
-
 
 # ---- Pre-existing base python+qt stack
 
