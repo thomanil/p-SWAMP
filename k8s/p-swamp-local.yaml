@@ -75,7 +75,7 @@ spec:
           resources:
             requests:
               cpu: "50m"
-              memory: "64Mi"
+              memory: "256Mi"
             limits:
               # NOTE: deliberately roomy for such a tiny workload. This minikube
               # node runs as a Docker container inside an aarch64 Linux VM that is
@@ -88,7 +88,14 @@ spec:
               # on time. This is a local-only test manifest, so the extra
               # headroom costs nothing and never ships.
               cpu: "2"
-              memory: "128Mi"
+              # Memory is sized from MAX_PIPELINES, not from typical load. Each
+              # connected client gets its own PMU replay (~30 MB and four threads,
+              # see pswamp_web/hub.py), and freed memory is not returned to the OS
+              # — so peak RSS tracks the cap: ~100 MB base + 8 x 30 MB, plus room
+              # for the transient double allocation while a pipeline starts.
+              # This was 128Mi when one pipeline served the whole process, which
+              # does not fit even a single client under the new arrangement.
+              memory: "768Mi"
 ---
 apiVersion: v1
 kind: Service

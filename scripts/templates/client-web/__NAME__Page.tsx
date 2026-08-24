@@ -59,11 +59,6 @@ export function __NAME__Page() {
       </CardContent>
 
       <CardFooter className="flex-col gap-4 border-t pt-6">
-        <div className="grid w-full max-w-xs grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2">
-          <label className="text-right text-sm text-muted-foreground">Client</label>
-          <span className="text-sm tabular-nums">{state ? state.clientId : '—'}</span>
-        </div>
-
         {/* Disabled until connected: with no socket there is nothing to send to. */}
         <div className="flex items-center justify-center gap-2">
           <Button disabled={!connected} onClick={() => send('bump')}>

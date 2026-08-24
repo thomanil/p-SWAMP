@@ -42,11 +42,12 @@ logger = make_logger("timeline")
 
 # --- authoritative in-memory state ------------------------------------------
 #
-# State is per client, not global. Each client process generates an integer
-# seed (its client id, sent as the ?client_id= URL param) and the server keeps
-# one timeline + play flag per seed. State is keyed by seed and survives across
-# reconnects, so a dropped-and-reopened client resumes where it left off; it is
-# never evicted (a bounded, acceptable leak for a local dev demo).
+# State is per client, not global. Each browser has one integer client id (sent
+# as the ?client_id= URL param, persisted in localStorage) and the server keeps
+# one timeline + play flag per id. State survives across reconnects *and* across
+# page reloads, so a returning client resumes where it left off; it is never
+# evicted (a bounded, acceptable leak for a local dev demo -- this dict holds
+# integers, not the PMU pipelines that pswamp_web has to reclaim).
 #
 # This dict is the ONLY store — there is no database and nothing is written to
 # disk, so all of it dies with the process. That's deliberate: a restart or

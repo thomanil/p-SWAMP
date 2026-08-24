@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+import { CLIENT_ID } from '@/lib/clientId'
 import { resolveServerUrl } from '@/lib/servers'
 
 /** Connection status, mirroring the Qt client's banner states. */
@@ -10,11 +11,28 @@ export type ConnStatus =
 
 const RECONNECT_MS = 2000
 
-/** A new random integer seed per browser session, sent as ?client_id= so the
- *  server keys our state on it and resumes it across reconnects / server
- *  switches — exactly like the Qt client's per-process seed. */
-function randomSeed(): number {
-  return Math.floor(Math.random() * 2_147_483_647) + 1
+/**
+ * Close codes we must not retry after.
+ *
+ * Reconnecting is the right default — a dropped socket usually means the server
+ * restarted or the network blinked, and the server's state survives. These two
+ * are the exceptions, and retrying them is actively harmful:
+ *
+ *   1008 policy violation — our client id was rejected. It will be rejected
+ *        again in two seconds, and again forever.
+ *   1013 try again later  — the server is at its pipeline cap. This is the one
+ *        that matters: every refused client that kept retrying would add load to
+ *        a server already turning people away, and none of them would ever get
+ *        in any faster.
+ *
+ * The user's move in both cases is to reload, which is why the banner says so.
+ */
+const TERMINAL_CLOSE_CODES = new Set([1008, 1013])
+
+function terminalLabel(code: number): string {
+  return code === 1013
+    ? 'The server is at capacity — too many streams are running. Reload to try again.'
+    : 'The server rejected this client. Reload to try again.'
 }
 
 /** Options for callers whose data path shouldn't go through React state. */
@@ -32,9 +50,14 @@ export type ServerSocketOptions<M> = {
 }
 
 /**
- * The connection half of every app's socket, shared by useTimelineSocket and
- * usePmuStreamSocket: one WebSocket to `wsPath` on the serving origin (see
- * resolveServerUrl), auto-reconnecting every 2s while down.
+ * The connection half of every app's socket: one WebSocket to `wsPath` on the
+ * serving origin (see resolveServerUrl), auto-reconnecting every 2s while down —
+ * except after a refusal the server meant, see TERMINAL_CLOSE_CODES.
+ *
+ * Every socket identifies itself with the same browser-wide CLIENT_ID, which is
+ * what makes the grid monitor's five panels views of *one* server-side pipeline
+ * rather than five. That id used to be rolled here, per hook; see lib/clientId.ts
+ * for why it moved.
  *
  * Deliberately knows nothing about message *shape*. It hands back the raw `state`
  * payload the server pushed and each app's own hook maps it to a typed object —
@@ -45,7 +68,6 @@ export function useServerSocket<M = unknown>(
   wsPath: string,
   options: ServerSocketOptions<M> = {},
 ) {
-  const clientId = useRef(randomSeed())
   const wsRef = useRef<WebSocket | null>(null)
   const [message, setMessage] = useState<M | null>(null)
   // Held in a ref so a caller can pass an inline function without the identity
@@ -73,7 +95,7 @@ export function useServerSocket<M = unknown>(
       // "an established connection dropped" (lost-connection banner), the way
       // the Qt client splits on_error vs on_disconnected.
       let wasOpen = false
-      const ws = new WebSocket(`${url}?client_id=${clientId.current}`)
+      const ws = new WebSocket(`${url}?client_id=${CLIENT_ID}`)
       wsRef.current = ws
 
       ws.onopen = () => {
@@ -89,7 +111,7 @@ export function useServerSocket<M = unknown>(
         }
         setMessage(msg as M)
       }
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         // Only retract the shared ref if it still points at THIS socket. A closing
         // socket's onclose can fire *after* its replacement is already installed
         // (a re-run of this effect, e.g. StrictMode's double-mount); nulling
@@ -97,6 +119,18 @@ export function useServerSocket<M = unknown>(
         // nothing to write to — live connection, dead controls, no error banner.
         if (wsRef.current === ws) wsRef.current = null
         if (disposed) return
+
+        // A refusal the server meant: stay down and say why, rather than asking
+        // again every 2s for as long as the tab is open.
+        if (TERMINAL_CLOSE_CODES.has(event.code)) {
+          setStatus({
+            kind: 'offline',
+            isError: true,
+            label: terminalLabel(event.code),
+          })
+          return
+        }
+
         setStatus({
           kind: 'offline',
           isError: true,

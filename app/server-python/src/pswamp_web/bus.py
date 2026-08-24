@@ -22,10 +22,11 @@ stops being reviewable, so don't.
 
 import asyncio
 import contextlib
-import logging
 from collections.abc import Iterator
 
-logger = logging.getLogger("pswamp_web.bus")
+from .log import get_logger
+
+logger = get_logger("pswamp_web.bus")
 
 
 class Subscription:

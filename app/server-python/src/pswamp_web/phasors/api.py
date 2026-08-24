@@ -6,9 +6,10 @@
 The web counterpart of p-SWAMP's ``visualization.voltage_phasor_plot`` and the
 ``PhasorPlotFancy`` family.
 
-Reads the same shared measurement window ``/time-window`` does, on its own
-ticker, and adds no application of its own -- which is the point of having one
-measurement store rather than a buffer per page.
+Reads the same measurement window ``/time-window`` does -- the connecting
+client's own, one per pipeline -- on its own ticker, and adds no application of
+its own, which is the point of having one measurement store per pipeline rather
+than a buffer per page.
 
 Only the most recent row is sent, so this is a snapshot rather than a stream:
 44 stations at 10 Hz is a few kilobytes a second with no history to maintain.
@@ -21,7 +22,8 @@ import functools
 import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ..hub import HUB
+from ..hub import Hub, connected_hub
+from ..replay import load_recording
 from ..wire import Phasor, PhasorSnapshot, sample, send_state
 
 # Half the time window page's rate. Unlike a scrolling trace, where the eye
@@ -40,10 +42,15 @@ def _voltage_columns() -> tuple:
     """(station, channel, magnitude column, angle column) per station.
 
     The decoder emits a station's magnitude and angle as two separate columns, so
-    they have to be paired back up by station and channel name. Cached: the
-    header is fixed for the process lifetime.
+    they have to be paired back up by station and channel name.
+
+    Read from the *recording* rather than from any one pipeline's window. Every
+    pipeline replays the same file through the same decoder with no channel
+    selection, so the measurement store's header is this header — but taking it
+    from a live Hub would cache one client's object and keep it alive after that
+    client's pipeline had been evicted.
     """
-    header = HUB.store_app.tw.header
+    header = load_recording().header
     stations = np.asarray(header["station"])
     channels = np.asarray(header["channel"])
     measurements = np.asarray(header["measurement"])
@@ -63,18 +70,18 @@ def _voltage_columns() -> tuple:
     )
 
 
-def snapshot_message() -> PhasorSnapshot:
+def snapshot_message(hub: Hub) -> PhasorSnapshot:
     columns = _voltage_columns()
     indices = [col for entry in columns for col in (entry[2], entry[3])]
     # get_safe rather than snapshot: a snapshot is only a phasor set, so the
     # append count the time-window page needs is of no use here.
-    times, data = HUB.store_app.tw.get_safe(np.asarray(indices))
+    times, data = hub.store_app.tw.get_safe(np.asarray(indices))
 
     latest = data[-1]
     magnitudes = latest[0::2]
     angles = latest[1::2]
 
-    islands = HUB.islands.station_to_island
+    islands = hub.islands.station_to_island
 
     finite = magnitudes[np.isfinite(magnitudes)]
     mag_ref = float(np.max(finite)) if finite.size else None
@@ -114,23 +121,25 @@ def snapshot_message() -> PhasorSnapshot:
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    await ws.accept()
+    async with connected_hub(ws) as hub:
+        if hub is None:
+            return
 
-    async def push() -> None:
-        interval = 1 / PUSH_HZ
-        while True:
-            await send_state(ws, snapshot_message())
-            await asyncio.sleep(interval)
+        async def push() -> None:
+            interval = 1 / PUSH_HZ
+            while True:
+                await send_state(ws, snapshot_message(hub))
+                await asyncio.sleep(interval)
 
-    pusher = asyncio.create_task(push())
-    try:
-        while True:
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
-    finally:
-        pusher.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await pusher
+        pusher = asyncio.create_task(push())
+        try:
+            while True:
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+        finally:
+            pusher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pusher

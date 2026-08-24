@@ -45,7 +45,6 @@ every screen watching it.
 """
 
 import json
-import logging
 import queue
 import threading
 import time
@@ -56,7 +55,9 @@ import numpy as np
 
 from pswamp.utils.time_window_labeled import Indexer
 
-logger = logging.getLogger(__name__)
+from .log import get_logger
+
+logger = get_logger(__name__)
 
 HEADER_ROWS = ("station", "channel", "measurement")
 

@@ -309,20 +309,83 @@ TODO harden wire format? Add REST api surface?
 
 
 
-Session state management
+Server state
 --
 
-Right now there are no sessions in the usual sense: no cookies, no login, no session
-store. Each page mount rolls a random integer and sends it as `?client_id=` on the
-WebSocket; the server keeps one in-memory `ClientState` per id. So every visitor does
-get their own state — but:
+**Every connected client gets its own PMU stream.** Not its own view of a shared
+one — its own replay of the recording, its own copies of the monitoring
+applications, its own alarms and its own detected islands. Open the grid monitor
+and you start watching the disturbance from the beginning, whoever else is on the
+server and however long it has been up.
 
-- **One replica only.** State is in process memory, so the manifest is `replicas: 1`.
-  Two pods = two `states` dicts. Scaling out needs an external store.
-- **Restarts reset everyone.** Nothing is persisted.
-- **A page reload is a new client.** Only a socket-level reconnect resumes.
-- **`client_id` is unauthenticated.** Supply someone else's and you share their state.
-- **State is never evicted.** Grows with cumulative page loads, not concurrent users.
+This is the opposite of how it started, and the reasoning is worth keeping around.
+The first version ran one pipeline for the whole process, on the grounds that
+there is one grid and two operators seeing different frequencies would be a bug.
+That is true of a control room. It is false of this, which is a rig for exploring
+recorded data: a visitor wants the event from the start, not to join someone
+else's replay half way through. So the useful unit is one timeline per viewer.
+
+### Lifecycle
+
+```
+first socket connects  ->  pipeline built, replay starts at 0s
+sockets come and go    ->  same pipeline, still replaying
+last socket closes     ->  keeps replaying, idle timer starts
+reconnect within 5 min ->  rejoins the same stream, mid-flight
+5 min with nobody      ->  torn down; next connect starts fresh at 0s
+```
+
+The pieces that make that work:
+
+- **`?client_id=` identifies the browser, not the tab or the socket.** The web
+  client generates one random integer per browser profile and keeps it in
+  `localStorage` (`app/client-web/src/lib/clientId.ts`), so every socket the page
+  opens carries the same value. This matters more than it looks: the grid monitor
+  opens **five** sockets at once, and they must all resolve to one pipeline.
+  Because the id is persisted rather than rolled per mount, a reload, a
+  navigation or a crashed tab all come back to the same stream.
+- **`HubRegistry` owns the lifecycle** (`app/server-python/src/pswamp_web/hub.py`).
+  It is the only thing that constructs a pipeline, and it holds a per-client lock
+  so five simultaneous first-connects build one pipeline rather than five.
+- **A pipeline outlives its sockets by design.** Closing the last one starts an
+  idle timer instead of tearing down, which is what makes a reload cheap.
+- **There is a hard cap** (`MAX_PIPELINES`, currently 8). At the cap a new client
+  reclaims the least-recently-used pipeline that nobody is watching; if every one
+  has a live socket the connection is refused with WebSocket close code 1013, and
+  the client shows a banner instead of retrying forever.
+
+### What it costs, and why the cap exists
+
+A pipeline is **four OS threads** (three monitoring applications plus the replay
+player) and roughly **30 MB** of resident memory, dominated by the 30-second
+measurement window. Two consequences shape the design:
+
+- **Memory is the binding constraint, not CPU.** A pipeline is about 1.4% of a
+  core; eight of them are nothing. But freed memory is not returned to the OS, so
+  **peak RSS follows the cap rather than the typical load** — which is why both
+  k8s manifests size `resources.limits.memory` from `MAX_PIPELINES` and say so.
+- **The GIL is the real ceiling.** Every one of those threads runs Python
+  bytecode, contending with the event loop that serialises WebSocket messages.
+  That, more than any single resource, is why the cap is single-digit.
+
+The recording itself is the one thing still shared: ~10 MB of read-only arrays,
+loaded once and handed to every pipeline (`load_recording()` is cached). It is
+safe because `Recording` is frozen and the decoder copies each row before
+touching it.
+
+### What this still does not give you
+
+- **One replica only.** Pipelines live in one process's memory, so the manifests
+  are `replicas: 1`. A second pod would run its own unrelated replays and the
+  Service would scatter clients between them — and, unlike before, a client whose
+  sockets landed on different pods would see different instants on one screen.
+- **Restarts reset everyone.** Nothing is persisted; every client starts over at
+  0 s.
+- **`client_id` is unauthenticated.** Supply someone else's and you share their
+  stream. It is a routing key, not a credential.
+- **Clearing site data is a new identity.** The id lives in `localStorage`, so
+  clearing it (or opening a private window) gets a fresh pipeline — which is also
+  the easy way to force a restart from 0 s.
 
 TODO if the rndp ingresses have some identifiers (user id/email headers on incomring requests?), we could use that instead
 of the currently client-generated clientid.

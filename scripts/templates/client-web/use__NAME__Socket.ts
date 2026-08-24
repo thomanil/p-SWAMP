@@ -5,17 +5,21 @@ import { useServerSocket } from '@/hooks/useServerSocket'
 
 /** What the server pushes (see `state_message` in
  *  app/server-python/src/__PKG__/api.py), before and after camelCasing. */
-type __NAME__Message = { count: number; client_id: number }
-export type __NAME__State = { count: number; clientId: number }
+type __NAME__Message = { count: number }
+export type __NAME__State = { count: number }
 
-/** Connection handling — the client_id seed, reconnects, status — comes from
- *  useServerSocket; this hook adds only the mapping to __NAME__State. */
+/** Connection handling — identifying this browser, reconnects, status — comes
+ *  from useServerSocket; this hook adds only the mapping to __NAME__State.
+ *
+ *  Note the client id is not in here. It is one value for the whole app
+ *  (src/lib/clientId.ts), sent on every socket and shown in the layout footer, so
+ *  a page neither receives it nor renders it. */
 export function use__NAME__Socket() {
   const { message, status, connected, send } =
     useServerSocket<__NAME__Message>(__WS_PATH_CONST__)
 
   const state = useMemo<__NAME__State | null>(
-    () => (message === null ? null : { count: message.count, clientId: message.client_id }),
+    () => (message === null ? null : { count: message.count }),
     [message],
   )
 

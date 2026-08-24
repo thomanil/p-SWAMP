@@ -19,7 +19,7 @@ import contextlib
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ..hub import HUB
+from ..hub import Hub, connected_hub
 from ..wire import AppStatusTable, send_state
 import time
 
@@ -30,36 +30,38 @@ PUSH_HZ = 2
 router = APIRouter()
 
 
-def status_message() -> AppStatusTable:
+def status_message(hub: Hub) -> AppStatusTable:
     return AppStatusTable(
-        apps=HUB.statuses.table(),
+        apps=hub.statuses.table(),
         server_time=time.time(),
-        replay=HUB.replay_status(),
+        replay=hub.replay_status(),
     )
 
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    await ws.accept()
+    async with connected_hub(ws) as hub:
+        if hub is None:
+            return
 
-    async def push() -> None:
-        interval = 1 / PUSH_HZ
-        while True:
-            await send_state(ws, status_message())
-            await asyncio.sleep(interval)
+        async def push() -> None:
+            interval = 1 / PUSH_HZ
+            while True:
+                await send_state(ws, status_message(hub))
+                await asyncio.sleep(interval)
 
-    pusher = asyncio.create_task(push())
-    try:
-        # Nothing is sent by this page, but the receive loop is what surfaces a
-        # disconnect: without it a closed socket is only noticed on the next
-        # send, and a client that goes away between ticks would linger.
-        while True:
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
-    finally:
-        pusher.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await pusher
+        pusher = asyncio.create_task(push())
+        try:
+            # Nothing is sent by this page, but the receive loop is what surfaces
+            # a disconnect: without it a closed socket is only noticed on the next
+            # send, and a client that goes away between ticks would linger.
+            while True:
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+        finally:
+            pusher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pusher

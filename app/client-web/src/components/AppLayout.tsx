@@ -1,11 +1,13 @@
 import { NavLink, Outlet } from 'react-router'
 
+import { CLIENT_ID } from '@/lib/clientId'
 import { cn } from '@/lib/utils'
 
 /**
- * The shell every page renders inside: a nav bar listing the apps, then the
- * outlet the page itself fills. Registered as the layout route in App.tsx, so
- * adding a page means adding a NAV_ITEMS entry plus a <Route>.
+ * The shell every page renders inside: a nav bar listing the apps, the outlet
+ * the page itself fills, and a footer naming this browser. Registered as the
+ * layout route in App.tsx, so adding a page means adding a NAV_ITEMS entry plus
+ * a <Route>.
  *
  * Nothing here selects a backend: every socket resolves against the origin the
  * client was served from (see src/lib/servers.ts), so the several panels of the
@@ -49,6 +51,15 @@ export function AppLayout() {
       <main className="flex flex-1 items-center justify-center p-6">
         <Outlet />
       </main>
+
+      {/* The client id is worth surfacing now that it decides which server-side
+          PMU stream you are watching: two browsers showing different instants of
+          the recording is correct behaviour, and this is what explains it. Also
+          the thing to quote when a server log line names a client. Kept to a
+          faint single line — it is diagnostic, not something to act on. */}
+      <footer className="px-6 py-2 text-right text-xs text-muted-foreground/60">
+        client <span className="font-mono">{CLIENT_ID}</span>
+      </footer>
     </div>
   )
 }

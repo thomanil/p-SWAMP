@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""A live view of the shared measurement window.
+"""A live view of this client's measurement window.
 
 The web counterpart of p-SWAMP's ``visualization.time_window_plot_v2``.
 
@@ -17,7 +17,7 @@ So the window is sent once, and after that only the samples that are new. At
 the cost stops depending on how much history the page shows.
 
 The read itself is the deliberate mirror of what the Qt widget does: poll the
-shared window on a timer, under the lock the window already has. No queue and no
+window on a timer, under the lock the window already has. No queue and no
 bus, which is what keeps the 50 Hz sample stream from becoming 50 event-loop
 callbacks a second.
 """
@@ -30,7 +30,8 @@ from dataclasses import dataclass, field
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from .. import channels as channel_utils
-from ..hub import HUB
+from ..hub import Hub, connected_hub
+from ..replay import load_recording
 from ..wire import TimeWindowSlice, send_state, series
 
 # How often a client is updated. Fast enough to read as live, and slow enough
@@ -42,7 +43,7 @@ router = APIRouter()
 
 @dataclass
 class ClientState:
-    """Per-connection *view* state. The data itself is process-wide and shared;
+    """Per-connection *view* state. The data lives in the client's own Hub;
     what varies between clients is only what they are looking at."""
 
     selection: list[int] = field(default_factory=list)
@@ -55,18 +56,23 @@ class ClientState:
 
 @functools.lru_cache(maxsize=1)
 def _channels() -> tuple:
-    """The flattened channel list. Cached because the window's header is fixed
-    for the process lifetime, and rebuilding 176 objects on every tick of every
-    client would be the most expensive thing this module does."""
-    return tuple(channel_utils.describe(HUB.store_app.tw.header))
+    """The flattened channel list, shared by every pipeline.
+
+    Cached because rebuilding 700 objects on every tick of every client would be
+    the most expensive thing this module does. Read from the *recording* rather
+    than from a live Hub: every pipeline decodes the same file with no channel
+    selection, so this is the same header its measurement window carries, and
+    taking it from a Hub would outlive the client that happened to connect first.
+    """
+    return tuple(channel_utils.describe(load_recording().header))
 
 
-def build_message(state: ClientState) -> TimeWindowSlice | None:
-    """Read the shared window and produce this client's next message.
+def build_message(hub: Hub, state: ClientState) -> TimeWindowSlice | None:
+    """Read this client's window and produce its next message.
 
     Returns None when there is nothing new, so an idle client costs nothing.
     """
-    tw = HUB.store_app.tw
+    tw = hub.store_app.tw
     appended, times, data = tw.snapshot(state.selection)
 
     new_rows = appended - state.last_appended
@@ -103,15 +109,15 @@ def build_message(state: ClientState) -> TimeWindowSlice | None:
         ],
         channels=described,
         n_samples=tw.n_samples if full else None,
-        sampling_rate=HUB.recording.data_rate if full else None,
+        sampling_rate=hub.recording.data_rate if full else None,
     )
 
 
-async def handle_command(state: ClientState, message: dict) -> None:
+async def handle_command(hub: Hub, state: ClientState, message: dict) -> None:
     action = message.get("action")
     if action == "select_channels":
         selection = channel_utils.sanitise(
-            message.get("channels"), HUB.store_app.tw.n_cols
+            message.get("channels"), hub.store_app.tw.n_cols
         )
         if selection:
             state.selection = selection
@@ -124,34 +130,38 @@ async def handle_command(state: ClientState, message: dict) -> None:
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    await ws.accept()
+    async with connected_hub(ws) as hub:
+        if hub is None:
+            return
 
-    all_channels = _channels()
-    state = ClientState(selection=channel_utils.default_selection(all_channels))
-    # The first read establishes the baseline for the append counter; without it
-    # the opening message would claim every sample ever appended is new.
-    state.last_appended = HUB.store_app.tw.n_appended
+        all_channels = _channels()
+        state = ClientState(selection=channel_utils.default_selection(all_channels))
+        # The first read establishes the baseline for the append counter; without
+        # it the opening message would claim every sample ever appended is new.
+        # Note this is *this client's* window, which on a fresh pipeline has just
+        # been prefilled and is at the start of the recording.
+        state.last_appended = hub.store_app.tw.n_appended
 
-    async def push() -> None:
-        interval = 1 / PUSH_HZ
-        while True:
-            message = build_message(state)
-            if message is not None:
-                await send_state(ws, message)
-            await asyncio.sleep(interval)
+        async def push() -> None:
+            interval = 1 / PUSH_HZ
+            while True:
+                message = build_message(hub, state)
+                if message is not None:
+                    await send_state(ws, message)
+                await asyncio.sleep(interval)
 
-    pusher = asyncio.create_task(push())
-    try:
-        while True:
-            await handle_command(state, await ws.receive_json())
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
-    finally:
-        pusher.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await pusher
+        pusher = asyncio.create_task(push())
+        try:
+            while True:
+                await handle_command(hub, state, await ws.receive_json())
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+        finally:
+            pusher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pusher
 
 
 @router.get("/channels")

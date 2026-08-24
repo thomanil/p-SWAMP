@@ -24,14 +24,14 @@ import contextlib
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ..hub import HUB, LINE_OUTAGE_RESULT_TOPIC
+from ..hub import LINE_OUTAGE_RESULT_TOPIC, Hub, connected_hub
 from ..wire import LineOutageLog, send_state
 
 router = APIRouter()
 
 
-def current_message() -> LineOutageLog:
-    store = HUB.line_outages
+def current_message(hub: Hub) -> LineOutageLog:
+    store = hub.line_outages
     return LineOutageLog(
         app_uuid=store.app_uuid,
         app_name=store.app_name,
@@ -42,38 +42,41 @@ def current_message() -> LineOutageLog:
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    await ws.accept()
+    async with connected_hub(ws) as hub:
+        if hub is None:
+            return
 
-    updates: asyncio.Queue = asyncio.Queue(maxsize=64)
+        updates: asyncio.Queue = asyncio.Queue(maxsize=64)
 
-    # The payload is re-read from the store rather than carried on the queue, so
-    # a dropped notification costs latency and never content -- the same
-    # arrangement the islanding endpoint uses.
-    detach = HUB.bus.add_listener(
-        LINE_OUTAGE_RESULT_TOPIC, lambda _payload: _offer(updates)
-    )
+        # This client's own bus, so the listener only ever hears about this
+        # client's replay. The payload is re-read from the store rather than
+        # carried on the queue, so a dropped notification costs latency and never
+        # content -- the same arrangement the islanding endpoint uses.
+        detach = hub.bus.add_listener(
+            LINE_OUTAGE_RESULT_TOPIC, lambda _payload: _offer(updates)
+        )
 
-    async def push() -> None:
-        await send_state(ws, current_message())
-        while True:
-            await updates.get()
-            await send_state(ws, current_message())
+        async def push() -> None:
+            await send_state(ws, current_message(hub))
+            while True:
+                await updates.get()
+                await send_state(ws, current_message(hub))
 
-    pusher = asyncio.create_task(push())
-    try:
-        # No commands: this page is read-only. Reading anyway, because that is
-        # what detects the client going away.
-        while True:
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
-    finally:
-        detach()
-        pusher.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await pusher
+        pusher = asyncio.create_task(push())
+        try:
+            # No commands: this page is read-only. Reading anyway, because that
+            # is what detects the client going away.
+            while True:
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+        finally:
+            detach()
+            pusher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pusher
 
 
 def _offer(queue: asyncio.Queue) -> None:

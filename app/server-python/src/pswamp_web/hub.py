@@ -1,31 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""The process-wide pipeline: one PMU source, and the applications reading it.
+"""One PMU pipeline per client, and the registry that owns their lifecycle.
 
-This is where the server departs from the pattern the other app packages in this
-repo follow, and the departure is worth stating plainly.
+Each connected client gets its **own** replay of the recording, starting at 0 s
+when it first connects, with its own player, its own application threads and its
+own alarm/status/island stores. Nothing about the grid data is shared between
+clients any more except the recording itself, which is read-only.
 
-``timeline`` and ``pmu_test_streamer`` give every client its own model, because
-their "state" is a cursor into a sequence and two people looking at it have no
-reason to agree. A grid monitor is the opposite: there is one grid, one replay of
-it, and one islanding detector, no matter how many browsers are open. Two
-operators seeing different frequencies would be a bug, not a feature.
+That is a reversal of what this module used to do, and the reasoning is worth
+keeping. The earlier arrangement ran one pipeline for the whole process, on the
+grounds that there is one grid and two operators seeing different frequencies
+would be a bug. True of a control room; false of this, which is a rig for
+exploring recorded data. A visitor wants to watch the disturbance from the
+beginning, not join someone else's replay half way through — so the useful unit
+is one timeline per viewer.
 
-So the split moves rather than disappearing. The Hub owns the shared, read-only
-data -- the recording, the player, the application threads, the alarm and status
-stores. Each page package keeps its own ``states: dict[int, ClientState]``, but
-what lives in it is now view state: which channels this client selected, what it
-was last sent. The invariant becomes: state is per client, data is process-wide.
+The invariant is therefore now simply: **everything is per client.** The page
+packages' ``ClientState`` still holds view state (which channels are selected,
+what was last sent); the Hub beside it holds that client's data.
+
+What that costs, and why the registry is not optional: a Hub is **four threads**
+and roughly 30 MB of resident memory, and freed memory is not returned to the OS,
+so peak RSS follows the *cap* rather than the typical load. Hence
+:class:`HubRegistry` — it bounds how many exist, reclaims them when nobody is
+watching, and is the only thing allowed to construct one.
 """
 
-import logging
+import asyncio
+import contextlib
 import threading
+import time
+from collections.abc import AsyncIterator
+
+from fastapi import WebSocket
 
 from pswamp.monitoring.islanding import IslandingApp
 from pswamp.monitoring.line_outage_detection import LineOutageDetectionApp
 
 from .bus import Bus
+from .log import get_logger
 from .recorded_io import LabeledRowDecoder, RecordingPlayer
 from .replay import (
     ISLANDING_EVAL_HZ,
@@ -37,7 +51,7 @@ from .replay import (
 from .stores import AlarmStore, AppStatusStore, IslandStore, LineOutageStore
 from .wire import ReplayStatus
 
-logger = logging.getLogger("pswamp_web.hub")
+logger = get_logger("pswamp_web.hub")
 
 # Topic the islanding application's results are published on. Results carry no
 # reliable marker of which application produced them, so the source is encoded in
@@ -45,11 +59,29 @@ logger = logging.getLogger("pswamp_web.hub")
 ISLANDING_RESULT_TOPIC = "islanding.result"
 LINE_OUTAGE_RESULT_TOPIC = "line_outage.result"
 
+# How many pipelines may exist at once. Sized from memory and the GIL rather than
+# CPU time: one pipeline is ~1.4% of a core but ~30 MB that never comes back, and
+# every one of its four threads runs Python bytecode contending for the one GIL
+# with the event loop that serialises WebSocket messages.
+MAX_PIPELINES = 8
+
+# How long a pipeline keeps replaying after its last socket closes. Long enough
+# that a reload, a navigation or a flaky network rejoins the same stream; short
+# enough that a closed tab gives its slot back within a coffee break.
+IDLE_EVICT_SECONDS = 300.0
+
+
+class CapacityError(RuntimeError):
+    """Every pipeline slot is taken by a client that still has a socket open."""
+
 
 class Hub:
-    """Owns the replay and the applications. One instance per process."""
+    """Owns one client's replay and applications. Built only by HubRegistry."""
 
-    def __init__(self) -> None:
+    def __init__(self, client_id: str = "-") -> None:
+        # Only ever used to label threads and log lines. The Hub itself does not
+        # care whose it is.
+        self.client_id = client_id
         self.bus = Bus()
         self.alarms = AlarmStore()
         self.statuses = AppStatusStore()
@@ -73,15 +105,11 @@ class Hub:
             return
         self.bus.bind(loop)
 
+        # Shared across every pipeline and read-only; see load_recording().
         self.recording = load_recording()
-        logger.info(
-            "loaded recording: %s samples x %s channels @ %s Hz (%s)",
-            self.recording.n_samples,
-            self.recording.n_channels,
-            self.recording.data_rate,
-            self.recording.source,
-        )
 
+        # Fresh player, so this client's replay starts at sample 0 with its own
+        # wall-clock base regardless of how long the process has been up.
         self.player = RecordingPlayer(self.recording, speed=1.0, loop=True)
 
         # One reader per application, all off the same player, so every
@@ -123,11 +151,15 @@ class Hub:
         # as though a consumer were lagging.
         for app in (self.store_app, self.islanding_app, self.line_outage_app):
             app.run_in_thread()
+            # run_in_thread names them "Thread-N (run)", and the player calls
+            # itself "RecordingPlayer" in every pipeline. With one pipeline that
+            # was merely unhelpful; with one per client a thread dump at the cap
+            # is 32 indistinguishable rows, so label them by owner.
+            app.runner_thread.name = f"pswamp[{self.client_id}]-{app.app_name}"
             self._threads.append(app.runner_thread)
         self.player.start()
 
         self._started = True
-        logger.info("pipeline started")
 
     def stop(self) -> None:
         """Tear down, newest-dependency-first. Called off the event loop."""
@@ -155,7 +187,19 @@ class Hub:
 
         self.bus.bind(None)
         self._started = False
-        logger.info("pipeline stopped")
+
+    def dead_threads(self) -> list[str]:
+        """Names of application threads that have exited while we were running.
+
+        ``SnapshotApp.run`` has no exception handling and p-SWAMP logs nothing,
+        so a failing application dies silently. With one pipeline that was an
+        outage somebody noticed; with one per client it is a single client's
+        panel quietly freezing, which nobody reports. The registry checks this so
+        it at least reaches the log.
+        """
+        if not self._started:
+            return []
+        return [t.name for t in self._threads if not t.is_alive()]
 
     # -- internals -----------------------------------------------------------
 
@@ -215,4 +259,273 @@ class Hub:
         )
 
 
-HUB = Hub()
+def read_client_id(ws: WebSocket) -> str | None:
+    """The pipeline key from ``?client_id=``, or None if it is unusable.
+
+    The web client persists one integer per browser profile in localStorage and
+    sends it on every socket, so all of a page's panels resolve to the same
+    pipeline. Kept numeric because the scaffold demos parse the same parameter
+    with ``int()`` — an opaque token would close those sockets with 1008.
+
+    This is not authentication and does not pretend to be: supply someone else's
+    id and you share their stream.
+    """
+    raw = ws.query_params.get("client_id")
+    if raw is None:
+        return None
+    raw = raw.strip()
+    # Bounded and numeric: this string ends up in thread names and log lines.
+    if not raw.isdigit() or len(raw) > 20:
+        return None
+    return raw
+
+
+class _Entry:
+    """One client's pipeline, plus the bookkeeping that decides its fate."""
+
+    def __init__(self, hub: Hub) -> None:
+        self.hub = hub
+        self.sockets = 0  # live WebSockets; 0 means evictable
+        self.last_used = time.monotonic()
+        self.evict_task: asyncio.Task | None = None
+
+
+class HubRegistry:
+    """Creates, hands out and reclaims per-client pipelines.
+
+    The only thing that constructs a :class:`Hub`. Three rules it enforces:
+
+    * **One pipeline per client, however many sockets.** The grid monitor opens
+      five at once, so five ``acquire`` calls for a client that has no pipeline
+      yet arrive together. A per-client lock is what makes them build one
+      pipeline instead of five — this is the single sharpest edge in here.
+    * **A pipeline outlives its sockets, briefly.** Closing the last one starts
+      an idle timer rather than tearing down, so a reload rejoins the same
+      stream. Reconnecting cancels the timer.
+    * **Never more than the cap.** At the cap a new client reclaims the
+      least-recently-used pipeline that nobody is watching; if every one is in
+      use, the connection is refused rather than the machine oversubscribed.
+
+    Everything here runs on the event loop, so ``_entries`` needs no lock of its
+    own — the per-client locks exist to bracket the *awaits* inside ``acquire``,
+    not to protect the dict.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_pipelines: int = MAX_PIPELINES,
+        idle_seconds: float = IDLE_EVICT_SECONDS,
+    ) -> None:
+        self._entries: dict[str, _Entry] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self.max_pipelines = max_pipelines
+        self.idle_seconds = idle_seconds
+
+    def bind(self, loop: asyncio.AbstractEventLoop | None) -> None:
+        self._loop = loop
+
+    @property
+    def live(self) -> int:
+        return len(self._entries)
+
+    @contextlib.asynccontextmanager
+    async def session(self, client_id: str) -> AsyncIterator[Hub]:
+        """Hold a client's pipeline for the life of one WebSocket.
+
+        Every endpoint goes through this rather than calling acquire/release, so
+        the release cannot be skipped on an exception path — and every endpoint
+        has one, since they all end in a bare ``except``.
+        """
+        hub = await self.acquire(client_id)
+        try:
+            yield hub
+        finally:
+            self.release(client_id)
+
+    async def acquire(self, client_id: str) -> Hub:
+        lock = self._locks.setdefault(client_id, asyncio.Lock())
+        async with lock:
+            entry = self._entries.get(client_id)
+            if entry is not None:
+                # Cancel the pending eviction *inside* the lock. If the evictor
+                # already started, it holds this lock and we waited for it — so
+                # we find no entry below and build a fresh pipeline, rather than
+                # handing back one that is being torn down.
+                if entry.evict_task is not None:
+                    entry.evict_task.cancel()
+                    entry.evict_task = None
+                entry.sockets += 1
+                entry.last_used = time.monotonic()
+                self._report_dead_threads(client_id, entry.hub)
+                return entry.hub
+
+            await self._make_room()
+
+            hub = Hub(client_id=client_id)
+            # Off the loop: start() constructs three applications and prefills
+            # their windows (~40-50 ms of blocking work). On the loop that would
+            # stall every other client's push task.
+            await asyncio.to_thread(hub.start, self._loop)
+
+            entry = _Entry(hub)
+            entry.sockets = 1
+            self._entries[client_id] = entry
+            logger.info(
+                "pipeline started for client %s (%s/%s live)",
+                client_id,
+                self.live,
+                self.max_pipelines,
+            )
+            return hub
+
+    def release(self, client_id: str) -> None:
+        entry = self._entries.get(client_id)
+        if entry is None:
+            return
+        entry.sockets = max(0, entry.sockets - 1)
+        entry.last_used = time.monotonic()
+        if entry.sockets == 0 and entry.evict_task is None:
+            entry.evict_task = asyncio.create_task(self._evict_when_idle(client_id))
+
+    async def stop_all(self) -> None:
+        """Tear down every pipeline, on process shutdown.
+
+        Concurrently: one ``Hub.stop`` is ~0.5 s of joining threads and can be
+        8 s in the worst case, so doing them in sequence would make shutdown at
+        the cap take longer than most orchestrators wait before sending SIGKILL.
+        """
+        client_ids = list(self._entries)
+        for client_id in client_ids:
+            entry = self._entries.get(client_id)
+            if entry is not None and entry.evict_task is not None:
+                entry.evict_task.cancel()
+        entries = [self._entries.pop(cid) for cid in client_ids]
+        self._locks.clear()
+        if not entries:
+            return
+        await asyncio.gather(
+            *(asyncio.to_thread(entry.hub.stop) for entry in entries),
+            return_exceptions=True,
+        )
+        logger.info("stopped %s pipeline(s)", len(entries))
+
+    # -- internals -----------------------------------------------------------
+
+    async def _make_room(self) -> None:
+        """Free a slot if we are at the cap. Caller holds the new client's lock.
+
+        Note this evicts *another* client's pipeline while holding ours. That is
+        the only place two clients' bookkeeping is touched at once, and it is
+        deadlock-free because it never waits on the victim's lock — ``Hub.stop``
+        is idempotent, so racing with the victim's own idle evictor is harmless.
+        """
+        while self.live >= self.max_pipelines:
+            victim = min(
+                (cid for cid, e in self._entries.items() if e.sockets == 0),
+                key=lambda cid: self._entries[cid].last_used,
+                default=None,
+            )
+            if victim is None:
+                raise CapacityError(f"all {self.max_pipelines} pipelines are in use")
+            await self._evict(victim, "capacity")
+
+    async def _evict_when_idle(self, client_id: str) -> None:
+        try:
+            await asyncio.sleep(self.idle_seconds)
+        except asyncio.CancelledError:
+            return
+        lock = self._locks.get(client_id)
+        if lock is None:
+            return
+        async with lock:
+            entry = self._entries.get(client_id)
+            # A client may have reconnected while we waited for the lock.
+            if entry is None or entry.sockets > 0:
+                return
+            await self._evict(client_id, "idle")
+
+    async def _evict(self, client_id: str, reason: str) -> None:
+        entry = self._entries.pop(client_id, None)
+        # Drop the lock only when nobody holds it. A held lock implies a waiter
+        # may be queued behind it, and removing it would let that waiter and the
+        # next caller each setdefault a *different* lock, take them both, and
+        # build two pipelines for one client — orphaning four threads.
+        lock = self._locks.get(client_id)
+        if lock is not None and not lock.locked():
+            self._locks.pop(client_id, None)
+        if entry is None:
+            return
+        if entry.evict_task is not None:
+            entry.evict_task = None
+        # A fresh Hub is always built on the next connect; a stopped one is never
+        # restarted. It would resume from its old cursor rather than 0, and its
+        # readers are still registered with a player that has been shut down.
+        await asyncio.to_thread(entry.hub.stop)
+        logger.info(
+            "pipeline evicted for client %s (%s), %s/%s live",
+            client_id,
+            reason,
+            self.live,
+            self.max_pipelines,
+        )
+
+    def _report_dead_threads(self, client_id: str, hub: Hub) -> None:
+        dead = hub.dead_threads()
+        if dead:
+            logger.error(
+                "client %s has dead application thread(s): %s",
+                client_id,
+                ", ".join(dead),
+            )
+
+
+REGISTRY = HubRegistry()
+
+
+@contextlib.asynccontextmanager
+async def connected_hub(ws: WebSocket) -> AsyncIterator[Hub | None]:
+    """Accept one socket and hold its client's pipeline for as long as it lives.
+
+    Every page endpoint opens with this, so the identify-accept-acquire preamble
+    and the matching release exist once rather than five times. Yields ``None``
+    when the connection was refused, which the caller returns on::
+
+        async with connected_hub(ws) as hub:
+            if hub is None:
+                return
+
+    Two refusals, and the ordering of ``accept`` between them is the point:
+
+    * **No usable client id** -- closed before accepting, i.e. the handshake is
+      rejected outright. Our own client always sends one, so this is a caller
+      that has no business here.
+    * **At capacity** -- accepted *first*, then closed with 1013, because a code
+      only reaches the browser on an established connection. The web client
+      treats 1013 as terminal and stops reconnecting, which is the whole reason
+      to spend a handshake on saying no politely.
+    """
+    client_id = read_client_id(ws)
+    if client_id is None:
+        await ws.close(code=1008)  # policy violation
+        yield None
+        return
+
+    await ws.accept()
+    try:
+        hub = await REGISTRY.acquire(client_id)
+    except CapacityError:
+        logger.warning(
+            "refused client %s: all %s pipelines in use",
+            client_id,
+            REGISTRY.max_pipelines,
+        )
+        await ws.close(code=1013)  # try again later
+        yield None
+        return
+
+    try:
+        yield hub
+    finally:
+        REGISTRY.release(client_id)

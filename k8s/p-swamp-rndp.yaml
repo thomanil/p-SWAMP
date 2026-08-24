@@ -55,6 +55,14 @@ spec:
             - name: http
               containerPort: 8000
           resources:
+            # Sized from MAX_PIPELINES (pswamp_web/hub.py), not from typical
+            # load. Every connected client gets its own PMU replay — roughly
+            # 30 MB and four threads — and freed memory is not returned to the
+            # OS, so peak RSS follows the cap rather than the number of people
+            # actually watching: ~100 MB base + 8 x 30 MB leaves headroom in 1Gi.
+            # CPU is not the constraint here (a pipeline is ~1.4% of a core), but
+            # the threads all contend for one GIL, which is the real reason the
+            # cap is 8 rather than something sized purely from this limit.
             requests:
               cpu: 250m
               memory: 512Mi

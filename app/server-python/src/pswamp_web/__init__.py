@@ -12,25 +12,35 @@ modules is relative. Moving it upstream is a directory move plus the import line
 in server.py that name it.
 
 Unlike the app packages beside it, this one exports a ``lifespan`` but no
-``router``: it owns the shared pipeline that its page packages -- app_status,
-grid, time_window, phasors, islanding -- all read from. server.py enters it
-before any of them.
+``router``: it owns the registry of per-client pipelines that its page packages
+-- app_status, grid, time_window, phasors, islanding, line_outage -- all draw
+theirs from. server.py enters it before any of them.
 """
 
 import asyncio
 from contextlib import asynccontextmanager
 
-from .hub import HUB
+from .hub import REGISTRY
 
-__all__ = ["HUB", "lifespan"]
+__all__ = ["REGISTRY", "lifespan"]
 
 
 @asynccontextmanager
 async def lifespan(app):
-    HUB.start(asyncio.get_running_loop())
+    """Bind the registry to the loop, and drain it on the way out.
+
+    Deliberately starts *no* pipeline: there is one per client now, built on
+    first connect, so an idle server runs no replay and no application threads at
+    all. What has to happen here is only the two things a pipeline cannot do for
+    itself -- learn which loop the bus should hand results to, and get torn down
+    when the process is going away.
+    """
+    REGISTRY.bind(asyncio.get_running_loop())
     try:
         yield
     finally:
-        # Off the loop: stopping joins application threads, and blocking the loop
-        # during shutdown would stall the very tasks that need to finish first.
-        await asyncio.to_thread(HUB.stop)
+        # Off the loop, and concurrently: stopping a pipeline joins its
+        # application threads, so doing them in sequence would make shutdown
+        # scale with the number of live clients.
+        await REGISTRY.stop_all()
+        REGISTRY.bind(None)

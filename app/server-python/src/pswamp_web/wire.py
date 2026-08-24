@@ -106,7 +106,7 @@ class Channel(BaseModel):
 
 
 class TimeWindowSlice(BaseModel):
-    """A slice of the shared measurement window.
+    """A slice of the client's measurement window.
 
     ``series`` is column-major -- one list per channel, parallel to ``channels``.
     That is the layout a streaming chart wants; row-major would force the client

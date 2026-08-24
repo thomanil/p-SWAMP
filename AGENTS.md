@@ -114,7 +114,8 @@ Two deployables, one wire protocol:
   is a package under `src/<app>/` exposing `router` + optional `lifespan`
   (the FastAPI mirror of the client's `src/pages/`). The real one is
   **`src/pswamp_web/`** — see "The p-SWAMP web layer" below; it is a package of
-  packages, contributing five entries to `APPS` plus a process-wide service.
+  packages, contributing six entries to `APPS` plus the pipeline registry
+  service.
   Beside it sit the two scaffold demos:
   **`src/timeline/`** and **`src/pmu_test_streamer/`**, each with `api.py` (WS
   endpoint, per-client state, ticker, logging) and `model.py` (the pure domain
@@ -150,18 +151,20 @@ Two deployables, one wire protocol:
   `src/pages/<app>/`, holding that app's components, its socket hooks and its
   views together — the client-side mirror of the server's `src/<app>/` packages,
   imported relatively within the folder. Most apps own a single route;
-  **`grid-monitor/` owns five**. The route table is `src/App.tsx` and the
-  nav + centering shell is `src/components/AppLayout.tsx`. Only genuinely
-  cross-app code sits outside an app folder: shared UI in `src/components/`
+  **`grid-monitor/` owns six** (the dashboard plus five focused views). The
+  route table is `src/App.tsx` and the nav + centering shell is
+  `src/components/AppLayout.tsx`. Only genuinely cross-app code sits outside
+  an app folder: shared UI in `src/components/`
   (`ui/` is vendored shadcn), shared logic in `src/hooks/` (`useServerSocket`) and
   `src/lib/` — `servers.ts` (each app's ws path + the serving-origin url),
   `basePath.ts` (the runtime-discovered mount prefix) and `utils.ts` (shadcn's `cn`).
   Note `src/lib/` was invisible to git until recently; see the `.gitignore` note
   under "Conventions".
   **`src/pages/grid-monitor/` is the p-SWAMP application**: `/` renders
-  `GridMonitorPage`, a grid of panels over the four p-SWAMP sockets, and
-  `/time-window`, `/phasors`, `/islanding`, `/app-status` render the *same* panel
-  components full-size (`variant="focused"`) rather than copies of them. Its
+  `GridMonitorPage`, a grid of six panels over five p-SWAMP sockets, and
+  `/time-window`, `/phasors`, `/islanding`, `/line-outage`, `/app-status` render
+  the *same* panel components full-size (`variant="focused"`) rather than
+  copies of them. Its
   subfolders are named after those routes, so the client↔server mirror holds one
   level down: `grid-monitor/time-window/` ↔ `/api/time-window` ↔
   `pswamp_web/time_window/`. `/pmu-test-streamer` (`PmuTestStreamerPage`) and
@@ -173,20 +176,37 @@ Two deployables, one wire protocol:
 
 Key invariants to preserve:
 
-- **State is per-client and in-memory only.** Each client generates a random
-  integer seed sent as `?client_id=` on the WebSocket URL; the server keeps one
-  `TimelineModel` + play flag per seed in `states: dict[int, ClientState]` (never
-  evicted — a bounded, acceptable leak here). That dict is the only store:
-  nothing is persisted, so a process/pod restart resets every client to the start
-  of the timeline. That reset is expected behavior, not a bug.
-- **…but the grid data is process-wide.** The `pswamp_web/` pages invert the
-  emphasis: there is one PMU replay, one measurement window and one islanding
-  detector for the whole process, because there is one grid — two operators
-  seeing different frequencies would be a bug, not a feature. `HUB` (in
-  `pswamp_web/hub.py`) owns that shared, read-only data; each page package still
-  keeps a `states: dict[int, ClientState]`, but what lives in it is *view* state
-  (selected channels, last sequence sent). The rule is: **state is per client,
-  data is process-wide.**
+- **State is per-client and in-memory only.** Each browser has one random integer
+  id, persisted in `localStorage` and sent as `?client_id=` on every WebSocket URL;
+  the server keeps one `TimelineModel` + play flag per id in
+  `states: dict[int, ClientState]` (never evicted — a bounded, acceptable leak
+  here, since the value is an integer and not a pipeline). That dict is the only
+  store: nothing is persisted, so a process/pod restart resets every client to the
+  start of the timeline. That reset is expected behavior, not a bug. Note the id
+  became stable per browser rather than per page mount when the grid monitor
+  needed it to be, so these demos now resume across a reload too — not only across
+  a socket-level reconnect.
+- **…and so is the grid data: one PMU pipeline per client.** The `pswamp_web/`
+  pages give each client its own replay, its own measurement window, its own
+  islanding detector and its own alarms, starting at 0 s when it first connects.
+  `HubRegistry` (in `pswamp_web/hub.py`) is the only thing that builds one, and
+  `connected_hub(ws)` is how every endpoint gets it — never a module-level
+  singleton. The rule is now simply: **everything is per client.** (It used to be
+  the opposite — one `HUB` for the process, on the grounds that there is one grid.
+  True of a control room, false of a rig for exploring recorded data, where a
+  visitor wants the event from the start rather than someone else's replay half
+  way through.) A page package's `ClientState` still holds only *view* state
+  (selected channels, last sequence sent); the Hub beside it holds that client's
+  data.
+- **A pipeline is expensive, so its lifecycle is managed.** Four OS threads and
+  ~30 MB apiece, and freed memory is not returned to the OS — so peak RSS follows
+  `MAX_PIPELINES` (8), not the typical load, and both manifests size
+  `limits.memory` from the cap. Pipelines outlive their sockets by
+  `IDLE_EVICT_SECONDS` so a reload rejoins the same stream; at the cap the
+  least-recently-used idle one is reclaimed, and a client is refused with close
+  code 1013 if none is. **The recording is the one thing still shared** —
+  `load_recording()` is `lru_cache`d, and safe to share only because `Recording`
+  is frozen and the decoder copies each row before touching it.
 - **One event loop for all I/O, and exactly two thread seams.** The WS handlers
   and ticker tasks are cooperatively scheduled — never truly parallel — so nothing
   they touch needs a lock. The one exception is `pswamp_web/`: the p-SWAMP
@@ -195,12 +215,21 @@ Key invariants to preserve:
   the tail wagging the dog. Those threads cross into the loop at **two** places
   and nowhere else — `Bus.publish_threadsafe()` (via `loop.call_soon_threadsafe`)
   and the time window's own already-locked snapshot read. Don't add a third seam,
-  and don't introduce threads outside that package.
+  and don't introduce threads outside that package. Note the bus is **per
+  pipeline**, so a listener only ever hears its own client's results.
+- **All of a browser's sockets must resolve to one pipeline.** The client id is
+  generated once per browser profile and persisted in `localStorage`
+  (`src/lib/clientId.ts`), *not* rolled per hook — the grid monitor opens five
+  sockets at once, and five ids would mean five replays and twenty threads for one
+  viewer. `HubRegistry.acquire` holds a per-client lock so those five simultaneous
+  first-connects build one pipeline rather than racing to build five.
 - **This example does not scale past one replica.** Because state is in-process,
   both k8s manifests are `replicas: 1`. A second pod would keep its own
   independent state and the Service would split clients across them. Horizontal
   scaling would require an external live store — a real design change, not a
-  manifest tweak. Only `…-local.yaml` also sets `strategy: Recreate`, so that the
+  manifest tweak. This got sharper with per-client pipelines: a client's five
+  sockets landing on different pods would be five unrelated replays, so one screen
+  would show five different instants. Only `…-local.yaml` also sets `strategy: Recreate`, so that the
   old pod is gone before the new one serves; `…-rndp.yaml` still defaults to
   `RollingUpdate` and briefly runs two pods with separate state during a rollout.
 - **One message shape.** The server pushes `state_message()` on connect and every
@@ -288,9 +317,14 @@ What is in there:
   normal case here (a `TimeWindow` is all-NaN until it fills), so this breaks on
   the first message of a page rather than in some edge case.
 - **`bus.py`** — the thread→loop fan-out. See the concurrency invariant above.
-- **`hub.py`** — `HUB`, the process-wide pipeline: the recording, the player, the
-  application threads, the alarm and status stores. Started by this package's
-  `lifespan`, which `server.py` enters via `SERVICES` *before* anything in `APPS`.
+- **`hub.py`** — `Hub`, one client's pipeline (the player, the application
+  threads, the alarm and status stores), plus `HubRegistry`/`REGISTRY`, which
+  builds them on first connect, keeps them alive across reconnects, evicts them
+  when idle or at the cap, and refuses over it. Endpoints reach a hub only through
+  `connected_hub(ws)`; `read_client_id` is the one place `?client_id=` is parsed
+  for this package. This package's `lifespan` — entered via `SERVICES` *before*
+  anything in `APPS` — no longer starts a pipeline, only binds the registry to the
+  loop and drains it on shutdown, so an idle server runs no threads at all.
 - **`replay.py`** + **`recorded_io.py`** — the PMU source: a recorded Nordic 44
   stream replayed at real time through p-SWAMP's own `io` seam, no broker and no
   second process. The recording is
@@ -334,12 +368,19 @@ Three things worth knowing before touching it:
   change. Panels whose payload is small and drawn as SVG (`phasors`, `islanding`)
   use plain state, which is correct for them — but on one screen those costs add
   up, which is why each panel owns its own hook rather than the dashboard owning
-  all four.
+  all five.
 
 Sanity values, for checking a change did not quietly break the pipeline: median
 frequency **50.0009 Hz**, median voltage **418.6 kV**, islanded stations **6500,
 6700, 6701**, island groups summing to exactly **44** stations with no overlap,
-and the dashboard opening exactly **4** WebSockets.
+and the dashboard opening exactly **5** WebSockets — for **one** pipeline, however
+many panels are open.
+
+**The disturbance now arrives on the client's own clock.** Each client's replay
+starts at 0 s when it connects, so the trip is roughly half a minute in, every
+time, rather than whenever a long-running shared replay happened to reach it.
+Checking the islanding values means connecting and waiting, not connecting and
+looking.
 
 ## Adding a p-SWAMP view
 
@@ -377,11 +418,15 @@ Server side, the backend package under `src/pswamp_web/<app>/` exporting `router
 `app_status/` for a ticker-driven api or `islanding/` for an event-driven one.
 Decide which of the two delivery patterns fits:
 
-- **Poll the shared window** (`time_window`, and any measurement plot) — read the
-  snapshot on your own asyncio ticker. This is the direct translation of what the
-  Qt widgets do, and it is what keeps the 50 Hz sample stream off the event loop.
-- **Subscribe to the bus** (`islanding`, alarms, status) — for results and events,
-  which arrive about once a second.
+- **Poll the client's window** (`time_window`, and any measurement plot) — read
+  the snapshot on your own asyncio ticker. This is the direct translation of what
+  the Qt widgets do, and it is what keeps the 50 Hz sample stream off the event
+  loop.
+- **Subscribe to the client's bus** (`islanding`, alarms, status) — for results
+  and events, which arrive about once a second.
+
+Either way the endpoint opens with `async with connected_hub(ws) as hub:` and
+reads everything off that `hub`, never a module-level singleton.
 
 ## Adding a page
 
@@ -445,8 +490,8 @@ Notes that matter when touching routing:
   path was not actually `/`.)
 - WebSockets are torn down on navigation (the hook lives inside the page), so
   leaving and returning starts a fresh client_id — and, for the monitor, a fresh
-  server-side channel selection. The grid monitor holds **four** sockets at once,
-  one per panel, each at its own rate so a slow one degrades alone. The islanding
+  server-side channel selection. The grid monitor holds **five** sockets across
+  its six panels, each at its own rate so a slow one degrades alone. The islanding
   socket is the exception: it feeds two panels, so it is hoisted into a provider
   (`grid-monitor/islanding/IslandingData.tsx`) rather than opened twice.
 
