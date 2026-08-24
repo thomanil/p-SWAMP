@@ -344,6 +344,25 @@ at runtime, not in any check.
 
 TODO harden the downstream (state) wire format too?
 
+Authentication
+--
+For the foreseeable future, the pswamp project itself does not implement its own 
+authentication in the web->backend strata of the architecture. 
+
+The project runs in the RND platform in Statnett infra, and its web/http ingresses are not exposed outside
+Statnett. Therefore auth is implicit for pSwamp: when you are inside the Statnett intranet/infra, you can reach the 
+pswamp web frontend at f.ex https://rndpsvc.statnett.no/p-swamp/, otherwise cannot.
+
+The only client identifier/identity we implement at the moment is an integer clientId that frontend persists in localstorage in 
+the browser. 
+
+
+Performance/profiling
+--
+
+TODO: We try not to complicate the pswamp architecture until we need it, which means we need
+good metrics on how its behaving. TBD!
+
 
 
 Server state
