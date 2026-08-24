@@ -2,8 +2,12 @@
 
 Single source of truth: this module owns the timeline state in memory
 (per-sequence indices, the active sequence, and the play/pause flag) and runs the
-playback ticker. The client is a thin renderer that streams commands in and state
-out over one WebSocket.
+playback ticker. The client is a thin renderer.
+
+**Commands come up over REST, state goes down over the socket.** A click POSTs to
+one of the endpoints below; the resulting state is pushed on the client's open
+WebSocket like any other change, including the ones nobody asked for (the ticker's
+auto-advance). See AGENTS.md for what the split is for.
 
 This is one app package among (eventually) several — see src/server.py, which
 assembles the process and mounts this `router` under /api/timeline, so the
@@ -19,16 +23,19 @@ nothing is written to disk. All state lives in this process and is gone when it
 exits — a restart or redeploy resets every client to the start of the timeline.
 
 Everything here runs on a single asyncio event loop: the WebSocket handler
-coroutines, the ticker task, and broadcasts are cooperatively scheduled and
-never truly parallel, so the shared `model`/`playing` state needs no locks.
+coroutines, the request handlers, the ticker task, and broadcasts are
+cooperatively scheduled and never truly parallel, so the shared `model`/`playing`
+state needs no locks — a POST mutating a client's state cannot interleave with
+the ticker mid-command.
 """
 
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
-from fastapi import APIRouter, FastAPI, WebSocket, WebSocketDisconnect
-from shared import ConnectionManager, make_logger
+from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
+from shared import ClientId, CommandAck, ConnectionManager, make_logger
 
 from .model import SEQUENCES, TICKS_PER_SECOND, TimelineModel
 
@@ -46,7 +53,7 @@ logger = make_logger("timeline")
 # as the ?client_id= URL param, persisted in localStorage) and the server keeps
 # one timeline + play flag per id. State survives across reconnects *and* across
 # page reloads, so a returning client resumes where it left off; it is never
-# evicted (a bounded, acceptable leak for a local dev demo -- this dict holds
+# evicted (a bounded, acceptable leak for a local dev demo — this dict holds
 # integers, not the PMU pipelines that pswamp_web has to reclaim).
 #
 # This dict is the ONLY store — there is no database and nothing is written to
@@ -87,7 +94,7 @@ def state_message(state: ClientState) -> dict:
 def roster_table(acting_id: int | None = None) -> str:
     """An aligned, human-readable table of every currently connected client and
     its state: sequence picked, place in the timeline (index + value there), and
-    play/pause. Disconnected-but-remembered seeds are excluded -- this is the
+    play/pause. Disconnected-but-remembered seeds are excluded — this is the
     live roster, not the state table. The client that triggered the current
     event (if any) is flagged with an arrow."""
     ids = sorted(manager.conns)
@@ -166,45 +173,101 @@ async def lifespan(app: FastAPI):
         task.cancel()
 
 
-# --- command dispatch + websocket endpoint ---------------------------------
+# --- REST commands ----------------------------------------------------------
 #
-# Paths here are relative to wherever server.py mounts this router
-# (/api/timeline), so "/ws" is served as /api/timeline/ws.
+# One POST per operation, rather than one endpoint taking an action name. It costs
+# a few more lines here and buys a named, individually documented operation per
+# command — which is what a log line, a proxy rule and (next) an OpenAPI schema
+# all key off.
+#
+# Paths are relative to wherever server.py mounts this router (/api/timeline), so
+# "/playback/play" is served as /api/timeline/playback/play.
+#
+# Note what is NOT here: any way to read state. That comes down the socket, and
+# only down the socket.
 
 router = APIRouter()
 
 
-async def handle_command(client_id: int, msg: dict) -> None:
-    state = get_state(client_id)
-    action = msg.get("action")
-    m = state.model
-    if action == "forward":
-        m.step_forward()
-    elif action == "back":
-        m.step_back()
-    elif action == "play":
-        state.playing = True
-    elif action == "stop":
-        state.playing = False
-    elif action == "set_sequence":
-        name = msg.get("name")
-        if name not in SEQUENCES:
-            logger.warning("client %s set_sequence rejected: %r", client_id, name)
-            return
-        m.set_sequence(name)
-        action = f"set_sequence {name}"
-    else:
-        logger.warning("client %s unknown action: %r", client_id, action)
-        return  # unknown action -> no state change, no send
+class SequenceSelection(BaseModel):
+    """Body of POST /sequence."""
+
+    name: str = Field(
+        description="One of the sequence names the state message lists.",
+        examples=["Fibonacci"],
+    )
+
+
+async def applied(client_id: int, state: ClientState, action: str) -> CommandAck:
+    """The tail every command shares: log it, push the new state to this client,
+    acknowledge it.
+
+    `manager.send_to_client` is what makes a REST command reach the browser at
+    all, and it needs no new plumbing: it already addresses a client id, and it
+    runs on the same event loop as this request handler.
+    """
     log_event(action, client_id)
     await manager.send_to_client(client_id, state_message(state))
+    return CommandAck(applied=action)
+
+
+@router.post("/playback/play", operation_id="timeline_play")
+async def play(client_id: ClientId) -> CommandAck:
+    """Start advancing this client's timeline on the server-side ticker."""
+    state = get_state(client_id)
+    state.playing = True
+    return await applied(client_id, state, "play")
+
+
+@router.post("/playback/stop", operation_id="timeline_stop")
+async def stop(client_id: ClientId) -> CommandAck:
+    """Pause this client's timeline where it is."""
+    state = get_state(client_id)
+    state.playing = False
+    return await applied(client_id, state, "stop")
+
+
+@router.post("/playback/forward", operation_id="timeline_forward")
+async def forward(client_id: ClientId) -> CommandAck:
+    """Step one tick forward, independently of the play/pause flag."""
+    state = get_state(client_id)
+    state.model.step_forward()
+    return await applied(client_id, state, "forward")
+
+
+@router.post("/playback/back", operation_id="timeline_back")
+async def back(client_id: ClientId) -> CommandAck:
+    """Step one tick back, independently of the play/pause flag."""
+    state = get_state(client_id)
+    state.model.step_back()
+    return await applied(client_id, state, "back")
+
+
+@router.post("/sequence", operation_id="timeline_set_sequence")
+async def set_sequence(client_id: ClientId, body: SequenceSelection) -> CommandAck:
+    """Switch which sequence this client is watching.
+
+    Each sequence keeps its own index, so switching back resumes where it was.
+    An unknown name is a 422 naming the valid ones, not a quiet no-op.
+    """
+    if body.name not in SEQUENCES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown sequence {body.name!r}; expected one of {list(SEQUENCES)}",
+        )
+    state = get_state(client_id)
+    state.model.set_sequence(body.name)
+    return await applied(client_id, state, f"set_sequence {body.name}")
+
+
+# --- websocket endpoint (downstream only) -----------------------------------
 
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     # The client identifies itself with an integer seed in the URL
     # (ws://.../api/timeline/ws?client_id=<seed>); reject a connection without a
-    # valid one.
+    # valid one. The commands above take the same id as a query parameter.
     try:
         client_id = int(ws.query_params.get("client_id"))
     except (TypeError, ValueError):
@@ -219,9 +282,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
     try:
         # Initial full state for this client (resumes prior state if seed is known).
         await ws.send_json(state_message(state))
+        # Nothing is sent up this socket; the receive loop is what surfaces a
+        # disconnect. Without it a closed socket is only noticed on the next
+        # send, so a client that goes away between ticks — or one that never
+        # plays — would linger in the roster indefinitely.
         while True:
-            msg = await ws.receive_json()
-            await handle_command(client_id, msg)
+            await ws.receive_text()
     except WebSocketDisconnect:
         pass
     except Exception:

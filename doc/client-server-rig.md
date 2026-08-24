@@ -195,6 +195,10 @@ One real application and two scaffold demos:
 | `/pmu-test-streamer` | `/api/pmu-test-streamer/ws` | Streams a canned sample of simulated PMU records line by line |
 | `/timeline` | `/api/timeline/ws` | Scrolling-number timeline with playback controls  |
 
+The Api column lists the *sockets* a page opens, which is where its state comes
+from. A page with controls also POSTs commands to its app's prefix — see "The api
+between client and backend" below.
+
 The grid monitor is the real one; the last two are scaffold demos that predate it
 and are what `generate-new-subapp.sh` clones. A new *p-SWAMP* view is a panel in
 the monitor rather than a new page — see "Adding a p-SWAMP view" in `AGENTS.md`.
@@ -294,18 +298,51 @@ they ship automatically, so nothing outside the folder needs touching.
 The api between client and backend
 ==
 
-There is no REST api yet: every subapp exposes exactly one WebSocket endpoint at
-`/api/<app>/ws` (`/healthz` is the only plain HTTP route). The client sends
-`{type: 'command', action: ...}` up, the server pushes `{type: 'state', ...}` down on
-connect and after every change — including unprompted pushes from the playback
-ticker. Same origin in both dev and prod: the shipped image serves the frontend
-itself, and Vite proxies `/api` to the backend in dev.
+**The two directions use two transports: commands up over REST, state down over
+the WebSocket.** (`api-architecture.md`, beside this file, traces both end to end
+— every hop, both layers. This section is the summary.)
 
-Note that nothing validates the wire format — the TypeScript message types are
-hand-written mirrors of Python dicts, so a renamed field fails at runtime, not in
-any check. Rejected commands are logged server-side and silently ignored.
+Each subapp exposes a WebSocket at `/api/<app>/ws`, which is downstream only: the
+server pushes `{type: 'state', ...}` on connect and after every change — including
+unprompted pushes from the playback ticker — and the client renders it. Nothing is
+sent up that socket; the receive loop on the server side exists purely to notice a
+disconnect.
 
-TODO harden wire format? Add REST api surface?
+Everything a user can trigger is a `POST` under the same `/api/<app>` prefix, one
+url per operation:
+
+```
+POST /api/timeline/playback/play?client_id=…
+POST /api/timeline/sequence?client_id=…            {"name": "Fibonacci"}
+POST /api/islanding/alarms/<uuid>/acknowledge?client_id=…
+POST /api/time-window/selection?client_id=…        {"channels": [5, 9]}
+```
+
+The `client_id` is the same value the sockets carry — one per browser profile,
+from `src/lib/clientId.ts` — which is what makes a command apply to the pipeline
+the page is watching. The reply is a small `CommandAck`, deliberately *not* the
+new state: state arrives on the socket, so there is exactly one path for it and
+nothing to reconcile.
+
+What the split buys, and why it is worth a round trip per click: every operation
+is a row in the browser's Network tab and a line in the server's access log with a
+status code; a rejected command says *why* (422 for a bad sequence name, 404 for
+an unknown alarm) rather than failing quietly; and the whole upstream surface is
+described by `/openapi.json` rather than only documented. Sockets are absent from
+that description by nature, which is the point — the describable half is the half
+worth describing. (Fuller OpenAPI/Swagger integration is a later step; what is
+there today is what FastAPI generates from the endpoints themselves.)
+
+Same origin in both dev and prod, for both transports: the shipped image serves
+the frontend itself, and Vite proxies `/api` to the backend in dev.
+
+The two directions are validated differently, which is worth knowing. Upstream is
+covered: request bodies are pydantic models, so a malformed command is a 422
+before any handler runs. Downstream is not — the TypeScript message types are
+hand-written mirrors of Python dicts, so a renamed field in a state message fails
+at runtime, not in any check.
+
+TODO harden the downstream (state) wire format too?
 
 
 

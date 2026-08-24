@@ -33,7 +33,7 @@ import {
  * app/server-python/src/pmu_test_streamer/sample_data.txt.
  */
 export function PmuTestStreamerPage() {
-  const { state, status, connected, send } = usePmuStreamSocket()
+  const { state, status, connected, play, stop, forward, back } = usePmuStreamSocket()
 
   return (
     <Card className="w-full max-w-xl gap-0">
@@ -92,7 +92,7 @@ export function PmuTestStreamerPage() {
             size="icon"
             aria-label="Step back"
             disabled={!connected}
-            onClick={() => send('back')}
+            onClick={back}
           >
             <SkipBackIcon />
           </Button>
@@ -101,7 +101,7 @@ export function PmuTestStreamerPage() {
             size="icon"
             aria-label="Play"
             disabled={!connected}
-            onClick={() => send('play')}
+            onClick={play}
           >
             <PlayIcon />
           </Button>
@@ -110,7 +110,7 @@ export function PmuTestStreamerPage() {
             size="icon"
             aria-label="Stop"
             disabled={!connected}
-            onClick={() => send('stop')}
+            onClick={stop}
           >
             <SquareIcon />
           </Button>
@@ -119,7 +119,7 @@ export function PmuTestStreamerPage() {
             size="icon"
             aria-label="Step forward"
             disabled={!connected}
-            onClick={() => send('forward')}
+            onClick={forward}
           >
             <SkipForwardIcon />
           </Button>

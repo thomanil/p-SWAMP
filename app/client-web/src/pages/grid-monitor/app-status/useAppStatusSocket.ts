@@ -65,7 +65,7 @@ type AppStatusMessage = {
 }
 
 export function useAppStatusSocket() {
-  const { message, status, connected, send } =
+  const { message, status, connected } =
     useServerSocket<AppStatusMessage>(APP_STATUS_WS_PATH)
 
   const state = useMemo<AppStatusState | null>(
@@ -96,5 +96,5 @@ export function useAppStatusSocket() {
     [message],
   )
 
-  return { state, status, connected, send }
+  return { state, status, connected }
 }

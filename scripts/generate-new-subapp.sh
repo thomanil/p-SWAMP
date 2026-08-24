@@ -5,12 +5,14 @@
 #
 #   scripts/generate-new-subapp.sh grid-overview "Grid Overview"
 #
-# What comes out already works: a nav entry, a page at /grid-overview, and a
-# WebSocket to a new backend package holding a per-client counter you can bump
-# and reset. Replacing that counter is then the only work left.
+# What comes out already works: a nav entry, a page at /grid-overview, a
+# WebSocket carrying state down from a new backend package, and two POST commands
+# bumping and resetting a per-client counter. Replacing that counter is then the
+# only work left.
 #
 # The generated files come from scripts/templates/ — edit them, not this script,
-# to change what a new subapp starts life as.
+# to change what a new subapp starts life as. Each is named <filename>.template;
+# the suffix is stripped on render and exists so editors leave them alone.
 #
 # NO_CHECK=1 skips the scripts/error_check.sh run at the end.
 set -euo pipefail
@@ -43,19 +45,24 @@ def die(msg):
 # The name shows up in four shapes, and keeping them in step by hand is the
 # error-prone part this script exists to remove:
 #
-#   slug           grid-overview           the URL, the page folder, the /api prefix
-#   pkg            grid_overview           the Python package (has to be an identifier)
-#   name           GridOverview            the React component, the hook, the model class
-#   ws_path_const  GRID_OVERVIEW_WS_PATH   the ws path const in lib/servers.ts
+#   slug            grid-overview            the URL, the page folder, the /api prefix
+#   pkg             grid_overview            the Python package (has to be an identifier)
+#   name            GridOverview             the React component, the hook, the model class
+#   ws_path_const   GRID_OVERVIEW_WS_PATH    the ws path const in lib/servers.ts
+#   api_path_const  GRID_OVERVIEW_API_PATH   the REST prefix const, same file
+#
+# Two path consts because the two directions use two transports: state comes down
+# the socket, commands go up as POSTs (see AGENTS.md).
 #
 # The templates in scripts/templates/ spell these __SLUG__, __PKG__, __NAME__,
-# __WS_PATH_CONST__ and __LABEL__.
+# __WS_PATH_CONST__, __API_PATH_CONST__ and __LABEL__.
 
 slug = os.environ["SLUG"]
 label = os.environ["LABEL"]
 pkg = slug.replace("-", "_")
 name = "".join(word.capitalize() for word in slug.split("-"))
 ws_path_const = f"{pkg.upper()}_WS_PATH"
+api_path_const = f"{pkg.upper()}_API_PATH"
 
 # The 32-char cap keeps the rendered Python inside ruff's 88-column line limit,
 # which error_check.sh enforces on it moments later.
@@ -77,8 +84,16 @@ if page_dir.exists() or api_dir.exists():
 
 # --- render scripts/templates/ into the two new folders ---------------------
 #
-# File *names* carry the tokens too (use__NAME__Socket.ts), so a template folder
-# maps 1:1 onto what the subapp gets.
+# File *names* carry the tokens too (use__NAME__Socket.ts.template), so a template
+# folder maps 1:1 onto what the subapp gets.
+#
+# Every template ends in .template, which is stripped here. The suffix is what
+# keeps editors and type-checkers off them: a file named `.ts` holding
+# `__WS_PATH_CONST__` and importing `@/lib/servers` from outside the Vite project
+# is four unresolved-module errors in an IDE, on a file that is not source and is
+# checked by nothing (error_check.sh scopes tsc to app/client-web and py_compile
+# to app/). Missing the suffix is an error rather than a no-op, so the convention
+# cannot rot into "some of them".
 
 
 def render(text):
@@ -87,21 +102,32 @@ def render(text):
         ("__PKG__", pkg),
         ("__NAME__", name),
         ("__WS_PATH_CONST__", ws_path_const),
+        ("__API_PATH_CONST__", api_path_const),
         ("__LABEL__", label),
     ):
         text = text.replace(token, value)
     return text
 
 
-for templates, dest_dir in (
+sources = [
     (Path("scripts/templates/server-python"), api_dir),
     (Path("scripts/templates/client-web"), page_dir),
-):
+]
+
+# Validate every template before writing anything. Bailing out mid-render would
+# leave a half-generated subapp with the registries unpatched — worse than the
+# name collision above, which is caught before the first mkdir.
+for templates, _ in sources:
     if not templates.is_dir():
         die(f"Missing {templates}/ — the templates live beside this script.")
+    for template in sorted(templates.iterdir()):
+        if not template.name.endswith(".template"):
+            die(f"{template} must be named <filename>.template — see the note above.")
+
+for templates, dest_dir in sources:
     dest_dir.mkdir(parents=True)
     for template in sorted(templates.iterdir()):
-        dest = dest_dir / render(template.name)
+        dest = dest_dir / render(template.name).removesuffix(".template")
         dest.write_text(render(template.read_text()))
         print(f"  new      {dest}")
 
@@ -131,10 +157,18 @@ server_py = PY_SRC / "server.py"
 edit(server_py, r"^import [a-z_][a-z0-9_]*\n", f"import {pkg}\n")
 edit(server_py, r"^\]\n", f'    ("/api/{slug}", {pkg}),\n', before=True)
 
+# Two separate blocks in that file, each anchored on its own pattern — the
+# entry goes after the last line of its own block, not at the end of the other's.
+servers_ts = WEB / "lib" / "servers.ts"
 edit(
-    WEB / "lib" / "servers.ts",
+    servers_ts,
     r"^export const \w+_WS_PATH = .*\n",
     f"export const {ws_path_const} = '/api/{slug}/ws'\n",
+)
+edit(
+    servers_ts,
+    r"^export const \w+_API_PATH = .*\n",
+    f"export const {api_path_const} = '/api/{slug}'\n",
 )
 
 app_tsx = WEB / "App.tsx"
@@ -161,7 +195,8 @@ edit(
 for path in patched:
     print(f"  patched  {path}")
 
-print(f"\n\033[1m{label}: page /{slug}, api /api/{slug}/ws\033[0m")
+print(f"\n\033[1m{label}: page /{slug}, socket /api/{slug}/ws, "
+      f"commands POST /api/{slug}/count/…\033[0m")
 PY
 
 [ "${NO_CHECK:-0}" = 1 ] || scripts/error_check.sh

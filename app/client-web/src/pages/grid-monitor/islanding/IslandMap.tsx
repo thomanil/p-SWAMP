@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 
-import { GRID_MODEL_PATH, resolveServerUrl } from '@/lib/servers'
+import { GRID_MODEL_PATH, resolveApiUrl } from '@/lib/servers'
 
 import { islandColor } from '../islands'
 import type { Island } from './useIslandingSocket'
@@ -41,7 +41,7 @@ export function IslandMap({
 
   useEffect(() => {
     let cancelled = false
-    const url = resolveServerUrl(GRID_MODEL_PATH).replace(/^ws/, 'http')
+    const url = resolveApiUrl(GRID_MODEL_PATH)
     fetch(url)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((body) => {

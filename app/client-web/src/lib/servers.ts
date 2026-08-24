@@ -1,5 +1,10 @@
-// Where the web client's WebSockets point: always the origin the page was served
+// Where the web client's requests point: always the origin the page was served
 // from. There is no backend picker and no address table.
+//
+// Two kinds of address live here, because the two directions use two transports.
+// State comes *down* over a WebSocket (the `*_WS_PATH` consts); commands go *up*
+// as POSTs (the `*_API_PATH` consts, which are the app's prefix — each endpoint
+// appends its own path). Both resolve against the same origin by the same rule.
 //
 // That one rule covers both ways this app runs, because dev is made to look like
 // production rather than special-cased:
@@ -27,8 +32,25 @@ export const ISLANDING_WS_PATH = '/api/islanding/ws'
 export const PHASORS_WS_PATH = '/api/phasors/ws'
 export const LINE_OUTAGE_WS_PATH = '/api/line-outage/ws'
 
+// Each app's REST prefix — where its commands are POSTed. Same value as the app's
+// mount prefix in APPS (app/server-python/src/server.py); an endpoint path is
+// appended by the caller, e.g. `${TIMELINE_API_PATH}/playback/play`.
+export const TIMELINE_API_PATH = '/api/timeline'
+export const PMU_STREAM_API_PATH = '/api/pmu-test-streamer'
+export const TIME_WINDOW_API_PATH = '/api/time-window'
+export const ISLANDING_API_PATH = '/api/islanding'
+
 // The grid topology is static, so it is fetched over HTTP rather than pushed.
 export const GRID_MODEL_PATH = '/api/grid/model'
+
+/** The full http(s):// URL for a path on the serving origin.
+ *
+ *  The plain-HTTP twin of resolveServerUrl below, and the same rule: the page's
+ *  own origin, plus BASE_PATH for the remote reverse proxy's mount prefix. Used
+ *  for command POSTs (see lib/commands.ts) and for the static GETs. */
+export function resolveApiUrl(path: string): string {
+  return `${window.location.origin}${BASE_PATH}${path}`
+}
 
 /** The full ws:// (or wss://) URL for one app's endpoint on the serving origin,
  *  derived from the current page so it follows http→ws / https→wss automatically.

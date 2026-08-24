@@ -21,7 +21,7 @@ export function AlarmsPanel({
 }: {
   variant?: PanelVariant
 }) {
-  const { state, status, connected, send } = useIslandingData()
+  const { state, status, connected, acknowledge, silence, annotate } = useIslandingData()
   const [selectedUuid, setSelectedUuid] = useState<string | null>(null)
 
   const alarms = state?.alarms ?? []
@@ -73,19 +73,17 @@ export function AlarmsPanel({
           alarms={alarms}
           selectedUuid={selectedUuid}
           onSelect={setSelectedUuid}
-          onAcknowledge={(uuid) => send('acknowledge', { alarm_uuid: uuid })}
-          onSilence={(uuid) => send('silence', { alarm_uuid: uuid })}
+          onAcknowledge={acknowledge}
+          onSilence={silence}
         />
       </div>
 
       {selected && (
         <AlarmDetails
           alarm={selected}
-          onAcknowledge={(uuid) => send('acknowledge', { alarm_uuid: uuid })}
-          onSilence={(uuid) => send('silence', { alarm_uuid: uuid })}
-          onAnnotate={(uuid, message) =>
-            send('annotate', { alarm_uuid: uuid, message })
-          }
+          onAcknowledge={acknowledge}
+          onSilence={silence}
+          onAnnotate={annotate}
         />
       )}
     </Panel>

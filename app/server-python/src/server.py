@@ -109,9 +109,21 @@ app = FastAPI(lifespan=lifespan)
 # silently discarding the responses, and the affected component sat waiting for
 # data that had in fact arrived.
 #
-# Wide open because this server has no auth, no secrets and no side effects worth
-# protecting: every endpoint is a read of a replayed sample dataset. Anything
-# that changes needs this narrowed to the dev origins first.
+# Wide open, and it now needs a fuller justification than it did: this server no
+# longer only reads. Every operator action -- play, pause, pick a channel,
+# acknowledge an alarm -- is a POST under /api/<app>/, so a page on any origin can
+# drive a client's replay if it knows that client's id.
+#
+# It stays open anyway, deliberately, because of what those mutations actually
+# touch: a per-client replay of a committed sample recording, with no auth, no
+# secrets, and nothing persisted -- a reload of the page undoes any of it. The
+# client id is not a credential and the server says so (see hub.read_client_id).
+#
+# What WOULD change this: anything real behind an endpoint. Live PMU data, a
+# store that outlives the process, or any notion of a user. Narrow it to the dev
+# origins then, and note that nothing here depends on the wildcard today -- both
+# dev (through the Vite proxy) and production (served by this process) are
+# same-origin, so CORS is not exercised at all.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -131,7 +143,11 @@ async def healthz() -> dict:
 
 
 for _prefix, _module in APPS:
-    app.include_router(_module.router, prefix=_prefix)
+    # Tagged with the app's own url name, so the generated api description groups
+    # each app's operations together rather than listing them flat. Derived from
+    # the prefix rather than written out, so a new entry in APPS above needs
+    # nothing here.
+    app.include_router(_module.router, prefix=_prefix, tags=[_prefix[len("/api/") :]])
 
 
 # --- web client assets ------------------------------------------------------

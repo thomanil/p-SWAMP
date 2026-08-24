@@ -15,10 +15,10 @@ import { useIslandingSocket } from './useIslandingSocket'
  * rates.
  */
 export function IslandingData({ children }: { children: ReactNode }) {
-  const { state, status, connected, send } = useIslandingSocket()
+  const { state, status, connected, acknowledge, silence, annotate } = useIslandingSocket()
   const value = useMemo(
-    () => ({ state, status, connected, send }),
-    [state, status, connected, send],
+    () => ({ state, status, connected, acknowledge, silence, annotate }),
+    [state, status, connected, acknowledge, silence, annotate],
   )
 
   return <IslandingContext value={value}>{children}</IslandingContext>

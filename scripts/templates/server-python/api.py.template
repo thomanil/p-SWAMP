@@ -5,13 +5,21 @@ reset, the smallest thing that proves the wiring. Replace it with what this app
 really does, keeping the shape — state per client_id, in memory only, and one
 message pushed on connect and after every change.
 
-server.py owns the prefix, so the "/ws" below is served at:
+**Commands come up over REST, state goes down over the socket.** That split is
+the convention in this repo, not an accident of this template: a POST is a named
+operation with a schema, a status code and an access-log line, while the socket
+carries the state the server decides to push — including pushes nobody asked for.
+Keep both halves when you replace the counter.
 
-    /api/__SLUG__/ws
+server.py owns the prefix, so the paths below are served at:
+
+    POST /api/__SLUG__/count/bump
+    POST /api/__SLUG__/count/reset
+    WS   /api/__SLUG__/ws
 """
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from shared import ConnectionManager, make_logger
+from shared import ClientId, CommandAck, ConnectionManager, make_logger
 
 from .model import __NAME__Model
 
@@ -44,23 +52,49 @@ def state_message(model: __NAME__Model) -> dict:
     return {"type": "state", "count": model.count}
 
 
-async def handle_command(client_id: int, msg: dict) -> None:
+# --- REST commands ----------------------------------------------------------
+#
+# One POST per operation, rather than one endpoint taking an action name: each
+# command is then its own named, documented operation, which is what a log line
+# and an api description key off. `ClientId` and `CommandAck` come from shared.py
+# so every app declares its caller and its reply the same way.
+
+
+async def applied(client_id: int, action: str) -> CommandAck:
+    """The tail every command shares: log it, push this client its new state,
+    acknowledge the request.
+
+    `manager.send_to_client` is what carries the result of an HTTP command back
+    to the browser — it addresses a client id, and it runs on the same event loop
+    as this handler.
+    """
     model = get_state(client_id)
-    action = msg.get("action")
-    if action == "bump":
-        model.bump()
-    elif action == "reset":
-        model.reset()
-    else:
-        logger.warning("client %s unknown action: %r", client_id, action)
-        return  # unknown action -> no state change, no send
     logger.info("client %s: %s (count=%s)", client_id, action, model.count)
     await manager.send_to_client(client_id, state_message(model))
+    return CommandAck(applied=action)
+
+
+@router.post("/count/bump", operation_id="__PKG___bump")
+async def bump(client_id: ClientId) -> CommandAck:
+    """Add one to this client's count."""
+    get_state(client_id).bump()
+    return await applied(client_id, "bump")
+
+
+@router.post("/count/reset", operation_id="__PKG___reset")
+async def reset(client_id: ClientId) -> CommandAck:
+    """Put this client's count back to zero."""
+    get_state(client_id).reset()
+    return await applied(client_id, "reset")
+
+
+# --- websocket endpoint (downstream only) -----------------------------------
 
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    # The client identifies itself with an integer seed: ?client_id=<seed>.
+    # The client identifies itself with an integer seed: ?client_id=<seed>. The
+    # commands above take the same id as a query parameter.
     try:
         client_id = int(ws.query_params.get("client_id"))
     except (TypeError, ValueError):
@@ -71,8 +105,11 @@ async def ws_endpoint(ws: WebSocket) -> None:
     logger.info("client %s: connected", client_id)
     try:
         await ws.send_json(state_message(get_state(client_id)))
+        # Nothing is sent up this socket; the receive loop is what surfaces a
+        # disconnect. Without it a closed socket is only noticed on the next
+        # send, so an idle client would linger indefinitely.
         while True:
-            await handle_command(client_id, await ws.receive_json())
+            await ws.receive_text()
     except WebSocketDisconnect:
         pass
     except Exception:

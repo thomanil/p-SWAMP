@@ -15,11 +15,12 @@ import {
 
 /**
  * The __LABEL__ page (route `/__SLUG__`), scaffolded by
- * scripts/generate-new-subapp.sh: the buttons send commands, the server owns the
- * count and pushes it back, and this component only renders what it is handed.
+ * scripts/generate-new-subapp.sh: the buttons POST commands, the server owns the
+ * count and pushes it back down the socket, and this component only renders what
+ * it is handed.
  */
 export function __NAME__Page() {
-  const { state, status, connected, send } = use__NAME__Socket()
+  const { state, status, connected, bump, reset } = use__NAME__Socket()
 
   return (
     <Card className="w-full max-w-xl gap-0">
@@ -59,12 +60,14 @@ export function __NAME__Page() {
       </CardContent>
 
       <CardFooter className="flex-col gap-4 border-t pt-6">
-        {/* Disabled until connected: with no socket there is nothing to send to. */}
+        {/* Disabled until connected. The commands are POSTs and would in fact
+            reach the server without a socket — but the result comes back *on*
+            the socket, so a click with none open would appear to do nothing. */}
         <div className="flex items-center justify-center gap-2">
-          <Button disabled={!connected} onClick={() => send('bump')}>
+          <Button disabled={!connected} onClick={bump}>
             Bump
           </Button>
-          <Button variant="outline" disabled={!connected} onClick={() => send('reset')}>
+          <Button variant="outline" disabled={!connected} onClick={reset}>
             Reset
           </Button>
         </div>

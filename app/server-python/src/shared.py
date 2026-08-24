@@ -5,13 +5,16 @@ just the home for pieces every app would otherwise copy. Keep it strictly
 domain-free; anything that knows about timelines, PMU records, or any one app's
 state belongs in that app's own package.
 
-Currently: WebSocket connection bookkeeping and the stdout logger setup.
+Currently: WebSocket connection bookkeeping, the stdout logger setup, and the
+two pieces every REST command endpoint needs (`ClientId` and `CommandAck`).
 """
 
 import logging
 import sys
+from typing import Annotated, Literal
 
-from fastapi import WebSocket
+from fastapi import Query, WebSocket
+from pydantic import BaseModel
 
 
 def make_logger(name: str) -> logging.Logger:
@@ -76,3 +79,56 @@ class ConnectionManager:
                 dead.append(ws)
         for ws in dead:
             self.disconnect(ws, client_id)
+
+
+# --- REST command plumbing --------------------------------------------------
+#
+# Commands travel upstream as POSTs; state comes back down the socket. See the
+# "commands up, state down" invariant in AGENTS.md for why the two directions are
+# split across two transports.
+#
+# Both names below exist so that every command endpoint declares its caller and
+# its reply the same way -- which is also what makes the whole command surface
+# describable, when the OpenAPI/Swagger layer goes in on top of this.
+#
+# The pswamp_web package deliberately keeps its own twin of both in
+# pswamp_web/wire.py: it may not import anything from the rest of the web backend,
+# because it is written to move into the desktop package as pswamp/web/. Change
+# one of these and change the other.
+
+
+ClientId = Annotated[
+    int,
+    Query(
+        alias="client_id",
+        ge=1,
+        description=(
+            "The browser's client id -- the same value its WebSocket sends, "
+            "resolved once per browser profile in app/client-web/src/lib/clientId.ts."
+        ),
+    ),
+]
+"""The caller's identity, as a validated query parameter.
+
+Deliberately the same `?client_id=` the sockets already carry, rather than a
+header or a body field: it mirrors the WebSocket convention exactly, and it lands
+in the access log, which is half the reason these commands became HTTP requests.
+
+Not authentication and not pretending to be -- supply someone else's id and you
+drive their state. FastAPI rejects a missing or non-numeric one with a 422 before
+any handler runs, which is the whole validation story.
+"""
+
+
+class CommandAck(BaseModel):
+    """The reply to every command POST.
+
+    Deliberately NOT the resulting state. That arrives on the socket, on the
+    server's own schedule, so there is exactly one path for state and no ordering
+    for a client to reconcile between two of them. What this carries is
+    only "the command was understood and applied, and here is what it was" --
+    enough to log and to assert on, and nothing a page should render.
+    """
+
+    status: Literal["ok"] = "ok"
+    applied: str

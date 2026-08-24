@@ -8,7 +8,11 @@ export type IslandingValue = {
   state: IslandingPageState | null
   status: ConnStatus
   connected: boolean
-  send: (action: string, extra?: Record<string, unknown>) => void
+  /** Operator actions. POSTs to /api/islanding — the resulting alarm list comes
+   *  back down the shared socket, not from the call. */
+  acknowledge: (uuid: string) => void
+  silence: (uuid: string) => void
+  annotate: (uuid: string, message: string) => void
 }
 
 /**

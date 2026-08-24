@@ -1,0 +1,48 @@
+import { useCallback, useMemo } from 'react'
+
+import { __API_PATH_CONST__, __WS_PATH_CONST__ } from '@/lib/servers'
+import { postCommand } from '@/lib/commands'
+import { useServerSocket } from '@/hooks/useServerSocket'
+
+/** What the server pushes (see `state_message` in
+ *  app/server-python/src/__PKG__/api.py), before and after camelCasing. */
+type __NAME__Message = { count: number }
+export type __NAME__State = { count: number }
+
+/** Fire a command and carry on. A failure is logged and nothing else happens:
+ *  the page renders only what the server pushes, so a command that did not land
+ *  simply produces no change — which is what the user already sees. */
+function fire(promise: Promise<void>): void {
+  promise.catch((error) => console.error('__SLUG__ command failed', error))
+}
+
+/** The app's two halves: state down the socket, commands up over REST.
+ *
+ *  Connection handling — identifying this browser, reconnects, status — comes
+ *  from useServerSocket, and this adds the mapping to __NAME__State plus the
+ *  commands. Note nothing is *sent* on the socket: a command is a POST to
+ *  /api/__SLUG__, and its result comes back as the next pushed state.
+ *
+ *  The client id is not in here either. It is one value for the whole app
+ *  (src/lib/clientId.ts), attached to every socket and every command by the
+ *  layers below, so a page neither receives it nor renders it. */
+export function use__NAME__Socket() {
+  const { message, status, connected } =
+    useServerSocket<__NAME__Message>(__WS_PATH_CONST__)
+
+  const state = useMemo<__NAME__State | null>(
+    () => (message === null ? null : { count: message.count }),
+    [message],
+  )
+
+  const bump = useCallback(
+    () => fire(postCommand(`${__API_PATH_CONST__}/count/bump`)),
+    [],
+  )
+  const reset = useCallback(
+    () => fire(postCommand(`${__API_PATH_CONST__}/count/reset`)),
+    [],
+  )
+
+  return { state, status, connected, bump, reset }
+}

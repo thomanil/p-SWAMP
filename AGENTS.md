@@ -232,26 +232,58 @@ Key invariants to preserve:
   would show five different instants. Only `…-local.yaml` also sets `strategy: Recreate`, so that the
   old pod is gone before the new one serves; `…-rndp.yaml` still defaults to
   `RollingUpdate` and briefly runs two pods with separate state during a rollout.
-- **One message shape.** The server pushes `state_message()` on connect and every
-  change; the client renders it. Changing the protocol means touching both sides.
+- **Commands go up over REST, state comes down over the socket.** Every operation
+  a user can trigger is a `POST` under `/api/<app>/`, with a pydantic body and its
+  own `operation_id`; the socket carries only what the server decides to push.
+  `doc/api-architecture.md` traces both directions hop by hop, if you need the
+  machinery rather than the rule.
+  What the split is for: a POST is a row in the Network tab, a line in the access
+  log with a status code, and a describable operation, none of which a frame
+  inside a long-lived socket can be. The upstream half is what an OpenAPI/Swagger
+  layer will describe; the socket stays out of it by nature.
+  - **A command never answers with state.** It returns a small `CommandAck`
+    (`{status, applied}`) and the resulting state arrives on the socket like any
+    other change — so there is exactly one path for state and no ordering to
+    reconcile between two of them. Don't be tempted to return the new state
+    "to save a round trip": that is the whole design being undone.
+  - **`ClientId` and `CommandAck` are how every endpoint declares itself**, from
+    `shared.py` — or from `pswamp_web/wire.py`, which keeps deliberate twins of
+    both because that package may not import the rest of the backend. Change one
+    pair, change the other.
+  - **A socket that receives nothing still needs its receive loop.** Every WS
+    handler ends in `while True: await ws.receive_text()`. It is not vestigial:
+    without a pending receive, a closed socket is only noticed on the next send,
+    so an idle client lingers for ever.
+- **One message shape, downstream.** The server pushes `state_message()` on
+  connect and every change; the client renders it. Changing that shape means
+  touching both sides.
 - **CORS is enabled, but nothing depends on it any more.** The middleware in
   `server.py` dates from when the dev client called this process directly on
   another port. It is what made the first plain HTTP fetch (the grid topology)
   work: WebSockets are exempt from the same-origin policy but `fetch` is not, so
   the browser silently discarded the response and the panel sat waiting for data
   that had already arrived. Every request is now same-origin in both modes —
-  served by this process in the image, proxied through Vite in dev. It is wide
-  open (`allow_origins=["*"]`); keep it that way only while every endpoint is a
-  read of replayed sample data.
+  served by this process in the image, proxied through Vite in dev.
+  It is wide open (`allow_origins=["*"]`), and that is a *decision*, not a free
+  pass: this server mutates — every command is a POST — so a page on any origin
+  can drive a client's replay if it knows that client's id. It stays open because
+  of what those mutations touch: a per-client replay of a committed sample
+  recording, no auth, no secrets, nothing persisted, and a reload undoes any of
+  it. Narrow it to the dev origins the moment anything real sits behind an
+  endpoint — live PMU data, a store that outlives the process, or any notion of a
+  user.
 - **One cheap probe.** `GET /healthz` is both the liveness and readiness probe (and
   the compose healthcheck). The server has no external dependencies, so "is the
   process serving?" is the whole health story; there is no `/readyz`. It stays at
   the root, not under `/api`: it is the process's health, not any one app's.
 - **Every api lives under `/api/<app>/`.** The prefix comes from `APPS` in
-  `server.py`, not from the package, so a router declares plain paths (`"/ws"`)
-  and is reachable at `/api/timeline/ws`. Keep the prefix aligned with the web
-  client's route for the same app. `/api` is also the only thing the Vite dev
-  proxy forwards, so an endpoint outside it won't reach the backend in dev.
+  `server.py`, not from the package, so a router declares plain paths (`"/ws"`,
+  `"/playback/play"`) and is reachable at `/api/timeline/ws`. Keep the prefix
+  aligned with the web client's route for the same app. `/api` is also the only
+  thing the Vite dev proxy forwards, so an endpoint outside it won't reach the
+  backend in dev. The `include_router` loop tags each app with its own url name,
+  so the generated api description groups a package's operations together for
+  free — a new entry in `APPS` needs nothing extra.
 
 - **The client always talks to the origin it was served from.** There is no backend
   picker and no address table: `resolveServerUrl(wsPath)` in
@@ -403,7 +435,10 @@ Client side, four edits:
    force its column wider than the viewport.
 3. Add the focused `<Route>` in `App.tsx` rendering the same component with
    `variant="focused"`.
-4. Add a `*_WS_PATH` const in `src/lib/servers.ts`.
+4. Add a `*_WS_PATH` const in `src/lib/servers.ts` — and, if the panel has
+   controls, an `*_API_PATH` const beside it in the second block. Commands go up
+   as POSTs through `postCommand` (`src/lib/commands.ts`); the socket is
+   downstream only, and `useServerSocket` has no `send`.
 
 The backend needs no wiring — every socket resolves against the serving origin, so
 all panels on a screen are views of the same server by construction.
@@ -428,6 +463,25 @@ Decide which of the two delivery patterns fits:
 Either way the endpoint opens with `async with connected_hub(ws) as hub:` and
 reads everything off that `hub`, never a module-level singleton.
 
+**A panel with controls adds a third piece: the commands.** They are POSTs, and
+they arrive on no connection, which is what makes them different from the socket
+handler beside them:
+
+- **Reach the client's pipeline with `live_hub(client_id)`, never `acquire`.** A
+  command must not *build* a pipeline — four threads and ~30 MB against
+  `MAX_PIPELINES`, for a replay nobody is watching. No pipeline is a 404.
+- **If the command changes per-connection view state, publish that state.** The
+  handler's local `ClientState` is unreachable from a request, so register it in a
+  `SessionRegistry` (`pswamp_web/sessions.py`) for the life of the socket and let
+  the command apply to every session the client has open. `time_window/` is the
+  worked example.
+- **Then decide how the result reaches the screen**, which follows from the
+  delivery pattern above: a ticker-driven page needs *nothing* — the next tick
+  sees the changed state (`time_window` sets `needs_full` and stops there). An
+  event-driven page must wake its push task explicitly, because an operator
+  action is not an application event; `islanding/`'s `_nudge` is that, and it is
+  why its sessions carry the queue.
+
 ## Adding a page
 
 **`./scripts/generate-new-subapp.sh grid-overview "Grid Overview"` does all of
@@ -435,8 +489,8 @@ this**, plus the backend section below: from the url-name it derives the other
 spellings (`grid_overview`, `GridOverview`, `GRID_OVERVIEW`), renders
 `scripts/templates/` into both folders, inserts into the four registries by
 anchor, and runs `error_check.sh` on the result (`NO_CHECK=1` skips that). What it
-leaves is a working per-client counter over a WebSocket — a placeholder to
-replace, not a stub to fill in; change what that is by editing the templates, not
+leaves is a working per-client counter — POST to bump it, socket to see it — a
+placeholder to replace, not a stub to fill in; change what that is by editing the templates, not
 the script. Both arguments are required, and it writes nothing if the name is
 taken. The steps it performs, which stay the reference for doing it by hand:
 
@@ -460,6 +514,15 @@ A page that talks to a backend adds a fourth edit: a hook wrapping
 `useServerSocket(<APP>_WS_PATH)` (copy `usePmuStreamSocket.ts`) with a
 `*_WS_PATH` const in `src/lib/servers.ts`. Nothing to configure beyond that path —
 the socket always points at the serving origin.
+
+**A page with controls adds its commands to that same hook.** Each is a POST: an
+`*_API_PATH` const in `src/lib/servers.ts` (second block), and one `useCallback`
+per operation wrapping `postCommand` from `src/lib/commands.ts`, which attaches
+the client id and raises on a non-2xx. The hook exports one named function per
+operation (`play`, `setSequence`) and swallows a failure with a log — a command
+that did not land produces no state change, which is what the user already sees. Keep controls `disabled={!connected}`: the POST
+would reach the server without a socket, but its result would have nowhere to
+arrive.
 
 **Promote to a shared folder only on the second user.** A component or hook lives in
 its page folder until another page needs it, at which point it moves to
@@ -536,7 +599,20 @@ underlying tech). Start the server first, then the client:
 The server script's own terminal is the local log view — it streams the
 container's output already, so there is no separate Compose follow script (the
 minikube path still has `logs-minikube.sh`, since `kubectl` logs aren't attached
-to the deploy).
+to the deploy). Every command a user triggers is a `POST` line in there with its
+status code.
+
+The upstream api describes itself, since FastAPI generates it from the endpoints:
+
+```
+curl -s localhost:8000/openapi.json | jq '.paths | keys'   # every command path
+```
+
+`/docs` and `/redoc` render the same thing (Swagger UI fetches its own assets
+from a CDN, so it needs the browser to have internet). The socket endpoints are
+*absent* by nature — OpenAPI describes HTTP operations, and the command surface is
+the half that is HTTP. Fuller OpenAPI/Swagger integration is a separate, later
+step; what exists today is what the endpoints declare on their own.
 
 Scaffolding (see "Adding a page" above for what it writes):
 

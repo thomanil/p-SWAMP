@@ -1,16 +1,20 @@
 """The PMU test streamer's backend: WebSocket api, per-client position, ticker.
 
 Streams sample grid records line by line. Structurally the twin of
-src/timeline/api.py — same message shape, same command dispatch, same per-client
+src/timeline/api.py — same message shape, same command endpoints, same per-client
 state keyed by an integer seed — differing only in what is being streamed and that
 there is nothing to pick (no set_sequence: one data file, one stream).
+
+Commands come up over REST and state goes down over the socket, exactly as they
+do there; the reasoning is in that module's docstring and in AGENTS.md.
 
 server.py mounts this `router` under /api/pmu-test-streamer, so the endpoint below
 is reachable at /api/pmu-test-streamer/ws. Nothing here knows about that prefix.
 
 Like the timeline, all state is in memory and dies with the process, and everything
-runs on the one asyncio event loop — the WS handlers, the ticker, and broadcasts are
-cooperatively scheduled and never truly parallel, so no locking is needed.
+runs on the one asyncio event loop — the WS handlers, the request handlers, the
+ticker, and broadcasts are cooperatively scheduled and never truly parallel, so no
+locking is needed.
 """
 
 import asyncio
@@ -19,7 +23,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from fastapi import APIRouter, FastAPI, WebSocket, WebSocketDisconnect
-from shared import ConnectionManager, make_logger
+from shared import ClientId, CommandAck, ConnectionManager, make_logger
 
 from .model import LINES, TICKS_PER_SECOND, PmuStreamModel
 
@@ -156,37 +160,65 @@ async def lifespan(app: FastAPI):
         task.cancel()
 
 
-# --- command dispatch + websocket endpoint ---------------------------------
+# --- REST commands ----------------------------------------------------------
 #
-# Paths here are relative to wherever server.py mounts this router
-# (/api/pmu-test-streamer), so "/ws" is served as /api/pmu-test-streamer/ws.
+# One POST per operation. Same shape as the timeline's, minus the sequence picker;
+# see that module for why the upstream half is HTTP and the downstream half is not.
+#
+# Paths are relative to wherever server.py mounts this router
+# (/api/pmu-test-streamer), so "/playback/play" is served as
+# /api/pmu-test-streamer/playback/play.
 
 router = APIRouter()
 
 
-async def handle_command(client_id: int, msg: dict) -> None:
-    state = get_state(client_id)
-    action = msg.get("action")
-    if action == "forward":
-        state.model.step_forward()
-    elif action == "back":
-        state.model.step_back()
-    elif action == "play":
-        state.playing = True
-    elif action == "stop":
-        state.playing = False
-    else:
-        logger.warning("client %s unknown action: %r", client_id, action)
-        return  # unknown action -> no state change, no send
+async def applied(client_id: int, state: ClientState, action: str) -> CommandAck:
+    """Log the command, push this client its new state, acknowledge the request."""
     log_event(action, client_id)
     await manager.send_to_client(client_id, state_message(state))
+    return CommandAck(applied=action)
+
+
+@router.post("/playback/play", operation_id="pmu_test_streamer_play")
+async def play(client_id: ClientId) -> CommandAck:
+    """Start advancing this client through the recorded stream."""
+    state = get_state(client_id)
+    state.playing = True
+    return await applied(client_id, state, "play")
+
+
+@router.post("/playback/stop", operation_id="pmu_test_streamer_stop")
+async def stop(client_id: ClientId) -> CommandAck:
+    """Pause this client where it is in the stream."""
+    state = get_state(client_id)
+    state.playing = False
+    return await applied(client_id, state, "stop")
+
+
+@router.post("/playback/forward", operation_id="pmu_test_streamer_forward")
+async def forward(client_id: ClientId) -> CommandAck:
+    """Step one record forward, independently of the play/pause flag."""
+    state = get_state(client_id)
+    state.model.step_forward()
+    return await applied(client_id, state, "forward")
+
+
+@router.post("/playback/back", operation_id="pmu_test_streamer_back")
+async def back(client_id: ClientId) -> CommandAck:
+    """Step one record back, independently of the play/pause flag."""
+    state = get_state(client_id)
+    state.model.step_back()
+    return await applied(client_id, state, "back")
+
+
+# --- websocket endpoint (downstream only) -----------------------------------
 
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     # The client identifies itself with an integer seed in the URL
     # (ws://.../api/pmu-test-streamer/ws?client_id=<seed>); reject a connection
-    # without a valid one.
+    # without a valid one. The commands above take the same id as a query param.
     try:
         client_id = int(ws.query_params.get("client_id"))
     except (TypeError, ValueError):
@@ -201,9 +233,11 @@ async def ws_endpoint(ws: WebSocket) -> None:
     try:
         # Initial full state for this client (resumes prior position if known).
         await ws.send_json(state_message(state))
+        # Nothing is sent up this socket; the receive loop is what surfaces a
+        # disconnect. Without it a closed socket is only noticed on the next
+        # send, so a paused client would linger for ever.
         while True:
-            msg = await ws.receive_json()
-            await handle_command(client_id, msg)
+            await ws.receive_text()
     except WebSocketDisconnect:
         pass
     except Exception:

@@ -33,7 +33,7 @@ import threading
 import time
 from collections.abc import AsyncIterator
 
-from fastapi import WebSocket
+from fastapi import HTTPException, WebSocket
 
 from pswamp.monitoring.islanding import IslandingApp
 from pswamp.monitoring.line_outage_detection import LineOutageDetectionApp
@@ -330,6 +330,16 @@ class HubRegistry:
     def live(self) -> int:
         return len(self._entries)
 
+    def peek(self, client_id: str) -> Hub | None:
+        """This client's pipeline if it already has one, else None.
+
+        A pure read: no socket count, no idle timer, nothing constructed. It is
+        what a *command* uses, and the distinction from :meth:`acquire` is the
+        point -- see :func:`live_hub` below.
+        """
+        entry = self._entries.get(client_id)
+        return None if entry is None else entry.hub
+
     @contextlib.asynccontextmanager
     async def session(self, client_id: str) -> AsyncIterator[Hub]:
         """Hold a client's pipeline for the life of one WebSocket.
@@ -482,6 +492,31 @@ class HubRegistry:
 
 
 REGISTRY = HubRegistry()
+
+
+def live_hub(client_id: str) -> Hub:
+    """The pipeline a command applies to, or 404.
+
+    The REST counterpart of :func:`connected_hub`, and deliberately the weaker
+    one: a command **must never build a pipeline**. Four threads and ~30 MB
+    against MAX_PIPELINES is a cost only a viewer should be able to incur, and a
+    POST has no socket to deliver the results to anyway -- it would start a replay
+    that nobody is watching and that would then have to idle out.
+
+    So a command to a client with no live pipeline is a 404, not an implicit
+    start. In practice that means "you have no page open", which is exactly what
+    it should mean.
+    """
+    hub = REGISTRY.peek(client_id)
+    if hub is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no live pipeline for client {client_id}; "
+                "open the page (and its WebSocket) before sending commands"
+            ),
+        )
+    return hub
 
 
 @contextlib.asynccontextmanager

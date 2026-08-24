@@ -1,7 +1,8 @@
 import { useCallback, useRef, useState } from 'react'
 
 import { useServerSocket } from '@/hooks/useServerSocket'
-import { TIME_WINDOW_WS_PATH } from '@/lib/servers'
+import { postCommand } from '@/lib/commands'
+import { TIME_WINDOW_API_PATH, TIME_WINDOW_WS_PATH } from '@/lib/servers'
 
 export type ChannelInfo = {
   idx: number
@@ -97,7 +98,7 @@ export function useTimeWindowSocket() {
     listeners.current.forEach((notify) => notify())
   }, [])
 
-  const { status, connected, send } = useServerSocket<TimeWindowMessage>(TIME_WINDOW_WS_PATH, {
+  const { status, connected } = useServerSocket<TimeWindowMessage>(TIME_WINDOW_WS_PATH, {
     onMessage: apply,
   })
 
@@ -109,10 +110,14 @@ export function useTimeWindowSocket() {
     }
   }, [])
 
-  const selectChannels = useCallback(
-    (indices: number[]) => send('select_channels', { channels: indices }),
-    [send],
-  )
+  /** Change what this view plots. The POST only records the choice server-side;
+   *  the new traces arrive on the socket as the next `mode: 'full'` message, at
+   *  the pusher's next tick — so nothing here waits on the response. */
+  const selectChannels = useCallback((indices: number[]) => {
+    postCommand(`${TIME_WINDOW_API_PATH}/selection`, { channels: indices }).catch(
+      (error) => console.error('channel selection failed', error),
+    )
+  }, [])
 
   return {
     buffer,

@@ -12,6 +12,12 @@ layer -- pickles Python objects inside a JSON envelope, which no browser can rea
 So this module is where the shapes get named. Every message a page receives is
 declared here, and every page sends through :func:`send_state`.
 
+It also holds the two names every REST command endpoint in this package declares
+itself with -- :data:`ClientId` and :class:`CommandAck`. Those are deliberate
+twins of the ones in ``src/shared.py``: this package may not import anything from
+the rest of the web backend, because it is written to move into the desktop
+package as ``pswamp/web/``. Change one pair and change the other.
+
 Two conventions worth knowing before adding a message:
 
 **snake_case on the wire.** The client hook converts to camelCase at the point it
@@ -28,9 +34,9 @@ for a gap, so nothing is lost on the way in.
 """
 
 import math
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import WebSocket
+from fastapi import Query, WebSocket
 from pydantic import BaseModel
 
 # A measurement that may be missing. NaN and infinities become null on the wire.
@@ -74,6 +80,37 @@ def series(values, ndigits: int = 6) -> list[Sample]:
             else round(value, ndigits)
         )
     return out
+
+
+ClientId = Annotated[
+    str,
+    Query(
+        alias="client_id",
+        pattern=r"^\d{1,20}$",
+        description=(
+            "The browser's client id -- the same value its WebSockets send, which "
+            "is what makes a command apply to the pipeline the page is watching."
+        ),
+    ),
+]
+"""The caller's identity on a command request.
+
+A *string* here, not an int as in ``shared.py``: pipeline keys are strings, and
+the pattern is the exact rule :func:`..hub.read_client_id` applies to the socket's
+query parameter. The two must agree, or a page's commands would address a
+different pipeline from its sockets.
+"""
+
+
+class CommandAck(BaseModel):
+    """The reply to every command POST in this package.
+
+    Not the resulting state: that arrives on whichever socket the page has open,
+    on the server's own schedule. See the twin in shared.py.
+    """
+
+    status: Literal["ok"] = "ok"
+    applied: str
 
 
 async def send_state(ws: WebSocket, message: BaseModel) -> None:

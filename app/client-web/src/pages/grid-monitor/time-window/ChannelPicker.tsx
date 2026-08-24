@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { resolveServerUrl } from '@/lib/servers'
+import { resolveApiUrl, TIME_WINDOW_API_PATH } from '@/lib/servers'
 import { cn } from '@/lib/utils'
 
 import type { ChannelInfo } from './useTimeWindowSocket'
@@ -11,9 +11,9 @@ import type { ChannelInfo } from './useTimeWindowSocket'
  *  readable, and the Qt plot draws the same line at 50. */
 const MAX_SELECTED = 12
 
-/** The catalogue endpoint is HTTP, on the same origin the socket resolves to. */
+/** The catalogue endpoint is HTTP, on the same origin everything else resolves to. */
 function channelsUrl(): string {
-  return resolveServerUrl('/api/time-window/channels').replace(/^ws/, 'http')
+  return resolveApiUrl(`${TIME_WINDOW_API_PATH}/channels`)
 }
 
 export function ChannelPicker({

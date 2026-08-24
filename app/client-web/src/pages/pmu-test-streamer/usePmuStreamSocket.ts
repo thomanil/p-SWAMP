@@ -1,6 +1,7 @@
-import { useMemo } from 'react'
+import { useCallback, useMemo } from 'react'
 
-import { PMU_STREAM_WS_PATH } from '@/lib/servers'
+import { postCommand } from '@/lib/commands'
+import { PMU_STREAM_API_PATH, PMU_STREAM_WS_PATH } from '@/lib/servers'
 import { useServerSocket } from '@/hooks/useServerSocket'
 
 /** One record in the visible window, or null where the window runs off either end
@@ -24,13 +25,19 @@ type PmuStreamMessage = {
   playing: boolean
 }
 
+/** Fire a command and carry on; a failure is logged and nothing else happens.
+ *  See the same helper in useTimelineSocket for why that is the right default. */
+function fire(promise: Promise<void>): void {
+  promise.catch((error) => console.error('pmu-test-streamer command failed', error))
+}
+
 /**
- * The PMU test streamer's socket — the twin of useTimelineSocket: connection
- * handling comes from useServerSocket, this adds only the mapping to
- * PmuStreamState.
+ * The PMU test streamer — the twin of useTimelineSocket, minus the sequence
+ * picker: state arrives on the socket, commands go up as POSTs to
+ * /api/pmu-test-streamer.
  */
 export function usePmuStreamSocket() {
-  const { message, status, connected, send } = useServerSocket<PmuStreamMessage>(PMU_STREAM_WS_PATH)
+  const { message, status, connected } = useServerSocket<PmuStreamMessage>(PMU_STREAM_WS_PATH)
 
   const state = useMemo<PmuStreamState | null>(
     () =>
@@ -47,5 +54,22 @@ export function usePmuStreamSocket() {
     [message],
   )
 
-  return { state, status, connected, send }
+  const play = useCallback(
+    () => fire(postCommand(`${PMU_STREAM_API_PATH}/playback/play`)),
+    [],
+  )
+  const stop = useCallback(
+    () => fire(postCommand(`${PMU_STREAM_API_PATH}/playback/stop`)),
+    [],
+  )
+  const forward = useCallback(
+    () => fire(postCommand(`${PMU_STREAM_API_PATH}/playback/forward`)),
+    [],
+  )
+  const back = useCallback(
+    () => fire(postCommand(`${PMU_STREAM_API_PATH}/playback/back`)),
+    [],
+  )
+
+  return { state, status, connected, play, stop, forward, back }
 }

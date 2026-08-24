@@ -36,7 +36,8 @@ import {
  * controls) whenever it isn't connected.
  */
 export function TimelinePage() {
-  const { state, status, connected, send } = useTimelineSocket()
+  const { state, status, connected, play, stop, forward, back, setSequence } =
+    useTimelineSocket()
 
   return (
     <Card className="w-full max-w-xl gap-0">
@@ -81,7 +82,7 @@ export function TimelinePage() {
           <label className="text-right text-sm text-muted-foreground">Sequence</label>
           <Select
             value={state?.sequenceName ?? ''}
-            onValueChange={(name) => send('set_sequence', { name })}
+            onValueChange={setSequence}
             disabled={!connected || !state}
           >
             <SelectTrigger className="w-full">
@@ -104,7 +105,7 @@ export function TimelinePage() {
             size="icon"
             aria-label="Step back"
             disabled={!connected}
-            onClick={() => send('back')}
+            onClick={back}
           >
             <SkipBackIcon />
           </Button>
@@ -113,7 +114,7 @@ export function TimelinePage() {
             size="icon"
             aria-label="Play"
             disabled={!connected}
-            onClick={() => send('play')}
+            onClick={play}
           >
             <PlayIcon />
           </Button>
@@ -122,7 +123,7 @@ export function TimelinePage() {
             size="icon"
             aria-label="Stop"
             disabled={!connected}
-            onClick={() => send('stop')}
+            onClick={stop}
           >
             <SquareIcon />
           </Button>
@@ -131,7 +132,7 @@ export function TimelinePage() {
             size="icon"
             aria-label="Step forward"
             disabled={!connected}
-            onClick={() => send('forward')}
+            onClick={forward}
           >
             <SkipForwardIcon />
           </Button>

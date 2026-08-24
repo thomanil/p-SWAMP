@@ -27,12 +27,14 @@ import contextlib
 import functools
 from dataclasses import dataclass, field
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
 
 from .. import channels as channel_utils
-from ..hub import Hub, connected_hub
+from ..hub import Hub, connected_hub, live_hub, read_client_id
 from ..replay import load_recording
-from ..wire import TimeWindowSlice, send_state, series
+from ..sessions import SessionRegistry
+from ..wire import ClientId, CommandAck, TimeWindowSlice, send_state, series
 
 # How often a client is updated. Fast enough to read as live, and slow enough
 # that each message carries a handful of samples rather than one.
@@ -44,7 +46,11 @@ router = APIRouter()
 @dataclass
 class ClientState:
     """Per-connection *view* state. The data lives in the client's own Hub;
-    what varies between clients is only what they are looking at."""
+    what varies between clients is only what they are looking at.
+
+    Published in SESSIONS below for the life of the socket, so the commands
+    that change it -- HTTP requests, on no connection at all -- can find it.
+    """
 
     selection: list[int] = field(default_factory=list)
     # Value of the window's append counter at the last message, which is how the
@@ -52,6 +58,11 @@ class ClientState:
     last_appended: int = 0
     seq: int = 0
     needs_full: bool = True
+
+
+# The open views of this endpoint, so POST /selection can find the one (or more)
+# a browser has on screen. See ../sessions.py.
+SESSIONS: SessionRegistry[ClientState] = SessionRegistry()
 
 
 @functools.lru_cache(maxsize=1)
@@ -113,19 +124,68 @@ def build_message(hub: Hub, state: ClientState) -> TimeWindowSlice | None:
     )
 
 
-async def handle_command(hub: Hub, state: ClientState, message: dict) -> None:
-    action = message.get("action")
-    if action == "select_channels":
-        selection = channel_utils.sanitise(
-            message.get("channels"), hub.store_app.tw.n_cols
+# --- REST commands ----------------------------------------------------------
+#
+# Neither of these pushes anything itself. Both only set state the pusher task
+# below already reads on its next tick, so a selection change lands within a
+# tenth of a second and the send path stays in exactly one place.
+
+
+class ChannelSelection(BaseModel):
+    """Body of POST /selection."""
+
+    channels: list[int] = Field(
+        description="Channel indices, as listed by GET /channels.",
+        examples=[[3, 17, 204]],
+    )
+
+
+def _sessions_or_404(client_id: str) -> list[ClientState]:
+    """This browser's open views of this endpoint.
+
+    A command with no view open is a 404: there is no selection to change, and
+    silently accepting it would report success for something that did nothing.
+    """
+    sessions = SESSIONS.of(client_id)
+    if not sessions:
+        raise HTTPException(
+            status_code=404,
+            detail=f"client {client_id} has no open time-window view",
         )
-        if selection:
-            state.selection = selection
-            # The client's existing traces are for different channels entirely,
-            # so the next message has to be a full one.
-            state.needs_full = True
-    elif action == "resync":
+    return sessions
+
+
+@router.post("/selection", operation_id="time_window_select_channels")
+async def select_channels(client_id: ClientId, body: ChannelSelection) -> CommandAck:
+    """Choose which channels this browser's measurement view plots."""
+    hub = live_hub(client_id)
+    sessions = _sessions_or_404(client_id)
+
+    selection = channel_utils.sanitise(body.channels, hub.store_app.tw.n_cols)
+    if not selection:
+        raise HTTPException(
+            status_code=422,
+            detail="no usable channel indices in the request",
+        )
+
+    for state in sessions:
+        state.selection = selection
+        # The client's existing traces are for different channels entirely, so
+        # the next message has to be a full one.
         state.needs_full = True
+    return CommandAck(applied=f"select_channels ({len(selection)})")
+
+
+@router.post("/resync", operation_id="time_window_resync")
+async def resync(client_id: ClientId) -> CommandAck:
+    """Ask for the whole window again rather than the next delta.
+
+    The escape hatch for a client whose buffer no longer matches what the server
+    thinks it has -- a dropped append, a chart remounted mid-stream.
+    """
+    for state in _sessions_or_404(client_id):
+        state.needs_full = True
+    return CommandAck(applied="resync")
 
 
 @router.websocket("/ws")
@@ -133,6 +193,10 @@ async def ws_endpoint(ws: WebSocket) -> None:
     async with connected_hub(ws) as hub:
         if hub is None:
             return
+
+        # connected_hub has already validated this, so it cannot be None here;
+        # we need the value itself to publish the session under it.
+        client_id = read_client_id(ws)
 
         all_channels = _channels()
         state = ClientState(selection=channel_utils.default_selection(all_channels))
@@ -150,18 +214,21 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     await send_state(ws, message)
                 await asyncio.sleep(interval)
 
-        pusher = asyncio.create_task(push())
-        try:
-            while True:
-                await handle_command(hub, state, await ws.receive_json())
-        except WebSocketDisconnect:
-            pass
-        except Exception:
-            pass
-        finally:
-            pusher.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await pusher
+        with SESSIONS.registered(client_id, state):
+            pusher = asyncio.create_task(push())
+            try:
+                # Nothing comes up this socket -- the commands above are HTTP
+                # -- but the receive loop is what surfaces a disconnect.
+                while True:
+                    await ws.receive_text()
+            except WebSocketDisconnect:
+                pass
+            except Exception:
+                pass
+            finally:
+                pusher.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pusher
 
 
 @router.get("/channels")

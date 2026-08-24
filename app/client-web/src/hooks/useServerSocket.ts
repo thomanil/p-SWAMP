@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { CLIENT_ID } from '@/lib/clientId'
 import { resolveServerUrl } from '@/lib/servers'
@@ -53,6 +53,10 @@ export type ServerSocketOptions<M> = {
  * The connection half of every app's socket: one WebSocket to `wsPath` on the
  * serving origin (see resolveServerUrl), auto-reconnecting every 2s while down —
  * except after a refusal the server meant, see TERMINAL_CLOSE_CODES.
+ *
+ * **Downstream only.** Nothing is sent up this socket; commands are POSTs, made
+ * through lib/commands.ts. So this hook hands back what the server pushed and a
+ * connection status, and deliberately offers no way to write to the socket.
  *
  * Every socket identifies itself with the same browser-wide CLIENT_ID, which is
  * what makes the grid monitor's five panels views of *one* server-side pipeline
@@ -115,8 +119,8 @@ export function useServerSocket<M = unknown>(
         // Only retract the shared ref if it still points at THIS socket. A closing
         // socket's onclose can fire *after* its replacement is already installed
         // (a re-run of this effect, e.g. StrictMode's double-mount); nulling
-        // unconditionally would wipe the new socket's ref, leaving send() with
-        // nothing to write to — live connection, dead controls, no error banner.
+        // unconditionally would wipe the new socket's ref, so the cleanup below
+        // would close nothing and the replacement would outlive the component.
         if (wsRef.current === ws) wsRef.current = null
         if (disposed) return
 
@@ -156,12 +160,5 @@ export function useServerSocket<M = unknown>(
     }
   }, [wsPath])
 
-  const send = useCallback((action: string, extra?: Record<string, unknown>) => {
-    const ws = wsRef.current
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'command', action, ...extra }))
-    }
-  }, [])
-
-  return { message, status, connected: status.kind === 'online', send }
+  return { message, status, connected: status.kind === 'online' }
 }

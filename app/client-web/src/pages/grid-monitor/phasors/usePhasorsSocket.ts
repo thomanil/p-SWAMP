@@ -37,7 +37,7 @@ type PhasorsMessage = {
 }
 
 export function usePhasorsSocket() {
-  const { message, status, connected, send } = useServerSocket<PhasorsMessage>(PHASORS_WS_PATH)
+  const { message, status, connected } = useServerSocket<PhasorsMessage>(PHASORS_WS_PATH)
 
   const state = useMemo<PhasorsState | null>(
     () =>
@@ -52,5 +52,5 @@ export function usePhasorsSocket() {
     [message],
   )
 
-  return { state, status, connected, send }
+  return { state, status, connected }
 }
