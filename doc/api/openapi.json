@@ -1098,7 +1098,7 @@
     }
   },
   "info": {
-    "description": "The api between the p-SWAMP web client and its state server.\n\n**Two directions, two transports.** Anything a user triggers goes up as an HTTP\n`POST` under `/api/<app>/`; everything the server has to say comes down a\nWebSocket at `/api/<app>/ws`, which is downstream only. A command's reply is a\nsmall `CommandAck`, never state, so state has exactly one path and there is no\nordering to reconcile between two of them.\n\n**The operations below are therefore only half the api.** The socket half is\ndescribed by the `x-websocket-channels` extension at the root of this document,\nwhose message schemas are ordinary `components.schemas` entries \u2014 so a code\ngenerator picks them up like any other model even though OpenAPI itself has no\nnotion of a socket.\n\n**The first path segment after `/api/` is the routing key.** The server itself\nholds no domain logic: it mounts one self-contained backend package under each\n`/api/<app>` prefix, so `/api/pmu-test-streamer/...` is served by\n`src/pmu_test_streamer/`, `/api/time-window/...` by\n`src/pswamp_web/time_window/`, and so on for every tag listed below \u2014 the paths\na package declares are relative to its own prefix.\n`/healthz` sits outside `/api` because it is the process's health rather than any\none app's, and everything else is the built web client, served from the same\norigin with unknown paths falling back to its `index.html` so deep links work.\n\n**Every request carries `?client_id=`**, a numeric string the browser resolves\nonce per profile and persists. It is the sharding key for all server state and\nall of a browser's sockets must send the same one. It is *not* authentication and\ndoes not pretend to be: supply someone else's id and you drive their session.\n\nThis document is generated from the server and committed at `doc/api/openapi.json`;\n`scripts/error_check.sh` fails if the two disagree. See `doc/the-client-server-api.md`.\n",
+    "description": "The api between the p-SWAMP web client and its state server.\n\n**Two directions, two transports.** Anything a user triggers goes up as an HTTP\n`POST` under `/api/<app>/`; everything the server has to say comes down a\nWebSocket at `/api/<app>/ws`, which is downstream only. A command's reply is a\nsmall `CommandAck`, never state, so state has exactly one path and there is no\nordering to reconcile between two of them.\n\n**The operations below are therefore only half the api.** The socket half is\ndescribed by the `x-websocket-channels` extension at the root of this document,\nwhose message schemas are ordinary `components.schemas` entries \u2014 so a code\ngenerator picks them up like any other model even though OpenAPI itself has no\nnotion of a socket.\n\n**The `Schemas` block at the bottom holds both directions**, and that heading is\nSwagger UI's own \u2014 nothing in this document sets it. Alongside the downstream\nsocket messages (`TimeWindowSlice`, `IslandingState`, \u2026) it lists the upstream\ncommand bodies (`ChannelSelection`, `AlarmNote`), the `CommandAck` every command\nreplies with, and the validation errors. `x-websocket-channels` above is what\nsays which of them is a channel message, and which channel carries it.\n\n**The first path segment after `/api/` is the routing key.** The server itself\nholds no domain logic: it mounts one self-contained backend package under each\n`/api/<app>` prefix, so `/api/pmu-test-streamer/...` is served by\n`src/pmu_test_streamer/`, `/api/time-window/...` by\n`src/pswamp_web/time_window/`, and so on for every tag listed below \u2014 the paths\na package declares are relative to its own prefix.\n`/healthz` sits outside `/api` because it is the process's health rather than any\none app's, and everything else is the built web client, served from the same\norigin with unknown paths falling back to its `index.html` so deep links work.\n\n**Every request carries `?client_id=`**, a numeric string the browser resolves\nonce per profile and persists. It is the sharding key for all server state and\nall of a browser's sockets must send the same one. It is *not* authentication and\ndoes not pretend to be: supply someone else's id and you drive their session.\n\nThis document is generated from the server and committed at `doc/api/openapi.json`;\n`scripts/error_check.sh` fails if the two disagree. See `doc/the-client-server-api.md`.\n",
     "title": "p-SWAMP api",
     "version": "1.0.0"
   },
@@ -1635,7 +1635,7 @@
       "name": "pmu-test-streamer"
     },
     {
-      "description": "Health and status of the running p-SWAMP monitoring applications.",
+      "description": "Health and status of the running p-SWAMP monitoring applications. Only downstream status overview, no upstream commands to it yet.",
       "name": "app-status"
     },
     {
@@ -1651,11 +1651,11 @@
       "name": "islanding"
     },
     {
-      "description": "Detected line disconnect/reconnect events.",
+      "description": "Detected line disconnect/reconnect events. Only downstream event log, no upstream commands to it yet.",
       "name": "line-outage"
     },
     {
-      "description": "Voltage phasors, referred to a rotating reference.",
+      "description": "Voltage phasors, referred to a rotating reference. Only downstream snapshots, no upstream commands to it yet.",
       "name": "phasors"
     }
   ],

@@ -116,12 +116,21 @@ This document is generated from the server and committed at `doc/api/openapi.jso
 # but an untagged-looking group in Swagger UI.
 TAG_DESCRIPTIONS = {
     "pmu-test-streamer": "Scaffold demo: replays sample PMU records line by line.",
-    "app-status": "Health and status of the running p-SWAMP monitoring applications.",
+    "app-status": (
+        "Health and status of the running p-SWAMP monitoring applications. "
+        "Only downstream status overview, no upstream commands to it yet."
+    ),
     "grid": "The static Nordic 44 topology. HTTP only — no socket.",
     "time-window": "The measurement window: channel selection and the sample stream.",
     "islanding": "Islanding detection results and the alarms derived from them.",
-    "line-outage": "Detected line disconnect/reconnect events.",
-    "phasors": "Voltage phasors, referred to a rotating reference.",
+    "line-outage": (
+        "Detected line disconnect/reconnect events. "
+        "Only downstream event log, no upstream commands to it yet."
+    ),
+    "phasors": (
+        "Voltage phasors, referred to a rotating reference. "
+        "Only downstream snapshots, no upstream commands to it yet."
+    ),
 }
 
 
