@@ -138,8 +138,15 @@ once per profile and persists. It is the sharding key for all server state and
 all of a browser's sockets must send the same one. It is *not* authentication and
 does not pretend to be: supply someone else's id and you drive their session.
 
+**The web client's types are generated from api contract** `openapi-typescript` 
+compiles it into `app/client-web/src/api/schema.ts`,
+which is commited in git, and a page hook takes its
+downstream type from there rather than hand-copying the Python model's fields —
+`Wire['ReferenceSubappState']` for `/api/reference-subapp/ws`. Field names stay as
+the server sends them, snake_case and all, all the way to the frontend components.
+
 This document is generated from the server and committed at `doc/api/openapi.json`;
-`scripts/error_check.sh` fails if the two disagree. See `doc/the-client-server-api.md`.
+`scripts/error_check.sh` fails if the two disagree. See `doc/the-client-server-api.md for more detail.`.
 """
 
 
