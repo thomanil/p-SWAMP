@@ -37,7 +37,7 @@ at least for a "reference app" to ensure the basic structure of the repo/project
 
 # How to onboard when you are new to the project
 
-- Get Statnett and RND platform user/access
+- Get RND platform user/access
 - Get org/repo access in Github
 - Clone this repo
 - Make sure you are able to run the two scripts that launches the project locally: 
@@ -358,9 +358,9 @@ Authentication
 For the foreseeable future, the pswamp project itself does not implement its own 
 authentication in the web->backend strata of the architecture. 
 
-The project runs in the RND platform in Statnett infra, and its web/http ingresses are not exposed outside
-Statnett. Therefore auth is implicit for pSwamp: when you are inside the Statnett intranet/infra, you can reach the 
-pswamp web frontend at f.ex https://rndpsvc.statnett.no/p-swamp/, otherwise cannot.
+The project runs in the RND platform in Statnett infra, and its web/http ingresses are only available to autenticated rndp users. 
+Therefore auth is implicit for pSwamp: when you are inside an oauth rndp session, you can reach the 
+pswamp web frontend at f.ex https://rndpsvc.statnett.no/p-swamp/, otherwise it is not available.
 
 The only client identifier/identity we implement at the moment is an integer clientId that frontend persists in localstorage in 
 the browser. 
