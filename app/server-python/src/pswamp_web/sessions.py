@@ -4,9 +4,16 @@
 """Live per-connection view state, addressable by client id.
 
 A socket handler naturally keeps its per-connection state in a local variable --
-which channels this view has selected, what it last sent. Commands arrive as HTTP
-requests, on no connection at all, so that state has to be reachable from outside
-the handler that owns it. This is how.
+which channels this view has selected, what it last sent, the socket itself.
+Commands arrive as HTTP requests, on no connection at all, so that state has to
+be reachable from outside the handler that owns it. This is how.
+
+**One structure, two uses.** A page package registers whatever a command needs to
+reach: `time_window` its selection, `islanding` its wake-up queue, and the
+scaffold apps under `src/` the WebSocket itself -- see `shared.SocketRegistry`,
+which is this class with `T = WebSocket` and a `send_to_client` on top. Those were
+two separate implementations of the same dict until they were merged; if you find
+yourself writing a third, this is it.
 
 Note what this is *not*: it is not where a client's data lives. That is the Hub
 (see hub.py), which the registry there already addresses by client id. This holds
@@ -61,3 +68,10 @@ class SessionRegistry(Generic[T]):
     def of(self, client_id: str) -> list[T]:
         """This client's open views, as a snapshot safe to iterate and mutate."""
         return list(self._by_client.get(client_id, ()))
+
+    def clients(self) -> list[str]:
+        """Every client with at least one view open. The *live* roster: a client
+        whose sockets have all closed is gone from here, even where the app kept
+        its state (which the scaffold apps deliberately do, so a reconnect
+        resumes)."""
+        return list(self._by_client)

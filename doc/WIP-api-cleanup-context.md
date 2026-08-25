@@ -19,7 +19,7 @@ step rather than code making the copies impossible.
 | # | Step | Status |
 |---|------|--------|
 | 1 | Collapse the `shared.py` / `pswamp_web` twins | done |
-| 2 | One send path, one per-client view registry | todo |
+| 2 | One send path, one per-client view registry | done |
 | 3 | Extract the repeated WebSocket endpoint tail | todo |
 | 4 | Drop the hand-written snake→camel mapping in the client hooks | todo |
 | 5 | Move the panel `variant` convention into `<Panel>` | todo |

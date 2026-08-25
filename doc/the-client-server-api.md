@@ -38,7 +38,7 @@ client never reconciles the order of two.
         │    lib/commands.ts   ?client_id=…       │      mutates that client's state
         │                      ◄── CommandAck ────┤      then pushes ↓
         │                                         │
-        └──► useServerSocket() ◄══ WS frames ═════┴──◄ push task / ConnectionManager
+        └──► useServerSocket() ◄══ WS frames ═════┴──◄ push task / SocketRegistry
              hooks/useServerSocket.ts   {type:"state",…}
 ```
 
@@ -309,9 +309,11 @@ the checks — commit them along with the rest.
 
 One rule keeps this working: **push a pydantic model, never a bare dict.** A bare
 dict drops the app out of the contract silently — the page keeps working, the type
-safety disappears, and nothing says so. `ConnectionManager.send_to_client` and
-`wire.send_state` therefore both take a `BaseModel` (and because `json.dumps`
-emits bare `NaN`, which `JSON.parse` rejects).
+safety disappears, and nothing says so. Every push therefore goes through
+`wire.send_state`, which takes a `BaseModel` — the one serialiser in the backend,
+and the reason a bare `NaN` (which `JSON.parse` rejects) can never reach the
+wire. `SocketRegistry.send_to_client` is that same call, fanned out to whatever
+sockets one client has open.
 
 
 Changing the api
@@ -426,8 +428,10 @@ From there the two families of app part ways.
 
 - `states: dict[str, ReferenceSubappModel]` — the entire store, keyed by client
   id;
-- `ConnectionManager` (`src/shared.py`) — client id → the set of live sockets,
-  pure transport, one instance per app;
+- `SocketRegistry` (`src/shared.py`) — client id → this client's live sockets,
+  pure transport, one instance per app. It is `SessionRegistry` (see
+  `pswamp_web/sessions.py`) with the socket itself as the session, which is the
+  same structure the page packages register their view state in;
 - a command handler that mutates one client's state and pushes it, and a socket
   handler that pushes on connect and then only waits.
 
@@ -598,7 +602,7 @@ arrangements.
 
 **1. State in a module dict** — `reference_subapp`, `pmu_test_streamer`, and
 anything the scaffold generates. The simplest case, and it needs no new plumbing:
-`ConnectionManager` already addresses a client id and already runs on this same
+`SocketRegistry` already addresses a client id and already runs on this same
 event loop.
 
 ```
@@ -714,7 +718,7 @@ Where the pieces live
 | `app/client-web/src/hooks/useServerSocket.ts` | The connection half, shared by every page |
 | `app/client-web/src/lib/servers.ts` | `resolveApiUrl` / `resolveServerUrl` and the path consts |
 | `app/server-python/src/server.py` | Wiring: mounts routers from `APPS`, composes lifespans |
-| `app/server-python/src/shared.py` | `ClientId`, `CommandAck`, `ConnectionManager`, `read_client_id` |
+| `app/server-python/src/shared.py` | `SocketRegistry`, and `ClientId` / `CommandAck` / `read_client_id` re-exported from `pswamp_web/wire.py` |
 | `app/server-python/src/pswamp_web/wire.py` | Every p-SWAMP message model, and `send_state` |
 | `app/server-python/src/pswamp_web/hub.py` | One pipeline per client, and the registry over them |
 

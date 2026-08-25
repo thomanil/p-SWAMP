@@ -20,15 +20,16 @@ from pydantic import BaseModel, Field
 from shared import (
     ClientId,
     CommandAck,
-    ConnectionManager,
+    SocketRegistry,
     get_logger,
     read_client_id,
+    send_state,
 )
 
 from .model import ReferenceSubappModel
 
 logger = get_logger("reference-subapp")
-manager = ConnectionManager()
+sockets = SocketRegistry()
 router = APIRouter()
 
 
@@ -75,7 +76,7 @@ async def applied(client_id: str, action: str) -> CommandAck:
     """Log the command, push this client its new state, acknowledge the request."""
     model = get_state(client_id)
     logger.info("client %s: %s (count=%s)", client_id, action, model.count)
-    await manager.send_to_client(client_id, state_message(model))
+    await sockets.send_to_client(client_id, state_message(model))
     return CommandAck(applied=action)
 
 
@@ -108,19 +109,23 @@ async def ws_endpoint(ws: WebSocket) -> None:
         await ws.close(code=1008)  # policy violation
         return
 
-    await manager.connect(ws, client_id)
-    logger.info("client %s: connected", client_id)
-    try:
-        await ws.send_text(state_message(get_state(client_id)).model_dump_json())
-        # Nothing is sent up this socket; the receive loop is what surfaces a
-        # disconnect. Without it a closed socket is only noticed on the next
-        # send, so an idle client would linger for ever.
-        while True:
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
-    finally:
-        manager.disconnect(ws, client_id)
-        logger.info("client %s: disconnected", client_id)
+    async with sockets.connected(ws, client_id):
+        logger.info("client %s: connected", client_id)
+        try:
+            # Straight down this socket, not through the registry: the opening
+            # message is for the connection that just arrived, while a command's
+            # result goes to every socket the client has open. Both go through
+            # `send_state`, which is the one serialiser -- see shared.py.
+            await send_state(ws, state_message(get_state(client_id)))
+            # Nothing is sent up this socket; the receive loop is what surfaces a
+            # disconnect. Without it a closed socket is only noticed on the next
+            # send, so an idle client would linger for ever.
+            while True:
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+    # Outside the block, so the socket is already out of the registry: an app
+    # that prints a roster on disconnect must not list the client that left.
+    logger.info("client %s: disconnected", client_id)

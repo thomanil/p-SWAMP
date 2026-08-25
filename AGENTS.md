@@ -154,7 +154,7 @@ Two deployables, one wire protocol:
   runs the desktop package's code; the streamer does not, and should not start.)
   Don't add tooling or deps to regenerate it unless asked;
   replacing it is a file swap, since no code parses the contents. **`src/shared.py`** is what an app
-  package imports its domain-free helpers from — `ConnectionManager`, plus
+  package imports its domain-free helpers from — `SocketRegistry`, plus
   `ClientId`, `CommandAck`, `read_client_id`, `get_logger` re-exported from
   `pswamp_web/` (see "The p-SWAMP web layer" for why the definitions live down
   there and the import runs inward); it is *not* an app package and never appears
@@ -290,6 +290,19 @@ Key invariants to preserve:
     hand and reunified in the contract by ~90 lines of `api_contract.py`; see the
     import-direction note under "The p-SWAMP web layer" for why that was never
     necessary.
+  - **`send_state` is the only serialiser, and a message is always a model.**
+    Every push in the backend ends at `pswamp_web/wire.py:send_state` — a page's
+    push task calls it directly, a scaffold app's command calls it through
+    `SocketRegistry.send_to_client`, and an opening message calls it on the one
+    socket that just arrived. Don't reach for `ws.send_json` or hand-roll
+    `model_dump_json`: the NaN guard and the "it must be a model, or it drops out
+    of the contract" rule then exist in one place instead of three, which is
+    where they were.
+  - **A client's live views are one structure.** `SessionRegistry[T]` in
+    `pswamp_web/sessions.py`, keyed by client id and scoped to the connection.
+    The page packages register what a command has to reach (a selection, a
+    wake-up queue); the scaffold apps register the socket itself, via
+    `SocketRegistry`. One dict, not two implementations of it.
   - **A socket that receives nothing still needs its receive loop.** Every WS
     handler ends in `while True: await ws.receive_text()`. It is not vestigial:
     without a pending receive, a closed socket is only noticed on the next send,
@@ -645,8 +658,8 @@ whatever each package exports under the name — the identical `getattr` trick
 `server.py` uses for `lifespan`. So the socket payload **must be a pydantic
 model**: return a bare dict from `state_message()` and the app silently drops out
 of the contract, the page keeps working, and nothing says the type safety is gone.
-`ConnectionManager.send_to_client` takes a `BaseModel` for that reason (and
-because `json.dumps` emits bare `NaN`, which `JSON.parse` rejects). An app with no
+`SocketRegistry.send_to_client` takes a `BaseModel` for that reason (and because
+`json.dumps` emits bare `NaN`, which `JSON.parse` rejects). An app with no
 socket — `pswamp_web/grid/` — just omits the name.
 
 `src/reference_subapp/` is the one to copy: the smallest complete api, and
