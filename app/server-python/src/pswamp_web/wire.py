@@ -12,11 +12,13 @@ layer -- pickles Python objects inside a JSON envelope, which no browser can rea
 So this module is where the shapes get named. Every message a page receives is
 declared here, and every page sends through :func:`send_state`.
 
-It also holds the two names every REST command endpoint in this package declares
-itself with -- :data:`ClientId` and :class:`CommandAck`. Those are deliberate
-twins of the ones in ``src/shared.py``: this package may not import anything from
-the rest of the web backend, because it is written to move into the desktop
-package as ``pswamp/web/``. Change one pair and change the other.
+It also holds the names every REST command endpoint declares itself with --
+:data:`ClientId`, :class:`CommandAck`, :func:`read_client_id` -- for the whole
+backend, not just this package. They live here rather than in ``src/shared.py``
+because the import may only run one way: this package is written to move into the
+desktop package as ``pswamp/web/``, so nothing in it may import from the rest of
+the web backend, while ``shared.py`` importing *inward* costs nothing and stays
+legal after the move. It re-exports them for the app packages beside it.
 
 Two conventions worth knowing before adding a message:
 
@@ -34,10 +36,11 @@ for a gap, so nothing is lost on the way in.
 """
 
 import math
+import re
 from typing import Annotated, Literal
 
 from fastapi import Query, WebSocket
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 # A measurement that may be missing. NaN and infinities become null on the wire.
 Sample = float | None
@@ -82,11 +85,34 @@ def series(values, ndigits: int = 6) -> list[Sample]:
     return out
 
 
+# The one spelling of a client id, shared by the query parameter below, the
+# socket parser beside it, and the ``client_id`` the web client persists per
+# browser profile (app/client-web/src/lib/clientId.ts). Numeric and bounded: the
+# value ends up in log lines and in thread names.
+CLIENT_ID_PATTERN = r"^\d{1,20}$"
+
+
+def read_client_id(ws: WebSocket) -> str | None:
+    """The client id from a socket's ``?client_id=``, or None if unusable.
+
+    Applies :data:`CLIENT_ID_PATTERN` -- the very rule :data:`ClientId` applies
+    to a command's query parameter -- so a page's socket and its commands can
+    never address different state. One regex, not two hand-kept-equal checks.
+
+    This is not authentication and does not pretend to be: supply someone else's
+    id and you share their stream.
+    """
+    raw = ws.query_params.get("client_id")
+    if raw is None:
+        return None
+    return raw.strip() if re.match(CLIENT_ID_PATTERN, raw.strip()) else None
+
+
 ClientId = Annotated[
     str,
     Query(
         alias="client_id",
-        pattern=r"^\d{1,20}$",
+        pattern=CLIENT_ID_PATTERN,
         description=(
             "The browser's client id -- the same value its WebSockets send, which "
             "is what makes a command apply to the pipeline the page is watching."
@@ -95,27 +121,34 @@ ClientId = Annotated[
 ]
 """The caller's identity on a command request.
 
-A *string* here, not an int as in ``shared.py``: pipeline keys are strings, and
-the pattern is the exact rule :func:`..hub.read_client_id` applies to the socket's
-query parameter. The two must agree, or a page's commands would address a
-different pipeline from its sockets.
+Deliberately the same ``?client_id=`` the sockets already carry rather than a
+header or a body field: it mirrors the WebSocket convention exactly, and it lands
+in the access log, which is half the reason these commands became HTTP requests.
+
+A *string*, because pipeline keys are strings and because "0" and "007" are then
+one identity rather than three. :func:`read_client_id` applies the same pattern
+to the socket's query parameter, so the two cannot disagree.
+
+Not authentication -- see :func:`read_client_id`. FastAPI rejects a missing or
+malformed one with a 422 before any handler runs, which is the whole validation
+story.
+
+The scaffold app packages under ``src/`` import this (and :class:`CommandAck`)
+through ``shared.py``, which re-exports both. The import direction is one-way:
+nothing in here may import from the rest of the web backend, because this package
+is written to move into the desktop package as ``pswamp/web/``.
 """
 
 
 class CommandAck(BaseModel):
-    """The reply to every command POST in this package.
+    """The reply to every command POST.
 
-    Not the resulting state: that arrives on whichever socket the page has open,
-    on the server's own schedule. See the twin in shared.py.
-
-    The explicit title is what keeps that twin from colliding with this one in the
-    generated contract: two classes of the same name would otherwise be
-    disambiguated into machine-chosen spellings that change with the module
-    layout. Both are titled "CommandAck" and both describe the same shape, so
-    api_contract.py's duplicate check accepts them as one schema.
+    Deliberately NOT the resulting state. That arrives on whichever socket the
+    page has open, on the server's own schedule, so state has exactly one path
+    and there is no ordering for a client to reconcile between two of them. What
+    this carries is only "the command was understood and applied, and here is
+    what it was" -- enough to log and to assert on, and nothing a page renders.
     """
-
-    model_config = ConfigDict(title="CommandAck")
 
     status: Literal["ok"] = "ok"
     applied: str

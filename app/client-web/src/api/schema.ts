@@ -440,16 +440,13 @@ export interface components {
         };
         /**
          * CommandAck
-         * @description The reply to every command POST in this package.
+         * @description The reply to every command POST.
          *
-         *     Not the resulting state: that arrives on whichever socket the page has open,
-         *     on the server's own schedule. See the twin in shared.py.
-         *
-         *     The explicit title is what keeps that twin from colliding with this one in the
-         *     generated contract: two classes of the same name would otherwise be
-         *     disambiguated into machine-chosen spellings that change with the module
-         *     layout. Both are titled "CommandAck" and both describe the same shape, so
-         *     api_contract.py's duplicate check accepts them as one schema.
+         *     Deliberately NOT the resulting state. That arrives on whichever socket the
+         *     page has open, on the server's own schedule, so state has exactly one path
+         *     and there is no ordering for a client to reconcile between two of them. What
+         *     this carries is only "the command was understood and applied, and here is
+         *     what it was" -- enough to log and to assert on, and nothing a page renders.
          */
         CommandAck: {
             /** Applied */
@@ -994,7 +991,7 @@ export interface operations {
     pmu_test_streamer_back: {
         parameters: {
             query: {
-                /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
                 client_id: string;
             };
             header?: never;
@@ -1026,7 +1023,7 @@ export interface operations {
     pmu_test_streamer_forward: {
         parameters: {
             query: {
-                /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
                 client_id: string;
             };
             header?: never;
@@ -1058,7 +1055,7 @@ export interface operations {
     pmu_test_streamer_play: {
         parameters: {
             query: {
-                /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
                 client_id: string;
             };
             header?: never;
@@ -1090,7 +1087,7 @@ export interface operations {
     pmu_test_streamer_stop: {
         parameters: {
             query: {
-                /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
                 client_id: string;
             };
             header?: never;
@@ -1122,7 +1119,7 @@ export interface operations {
     reference_subapp_bump: {
         parameters: {
             query: {
-                /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
                 client_id: string;
             };
             header?: never;
@@ -1154,7 +1151,7 @@ export interface operations {
     reference_subapp_reset: {
         parameters: {
             query: {
-                /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
                 client_id: string;
             };
             header?: never;

@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from ..hub import ISLANDING_RESULT_TOPIC, Hub, connected_hub, live_hub, read_client_id
+from ..hub import ISLANDING_RESULT_TOPIC, Hub, connected_hub, live_hub
 from ..sessions import SessionRegistry
 from ..wire import (
     AlarmList,
@@ -33,6 +33,7 @@ from ..wire import (
     CommandAck,
     IslandingResult,
     IslandingState,
+    read_client_id,
     send_state,
 )
 from .adapt import to_wire

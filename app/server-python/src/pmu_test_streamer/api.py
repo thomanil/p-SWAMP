@@ -27,7 +27,7 @@ from shared import (
     ClientId,
     CommandAck,
     ConnectionManager,
-    make_logger,
+    get_logger,
     read_client_id,
 )
 
@@ -35,7 +35,7 @@ from .model import LINES, TICKS_PER_SECOND, PmuStreamModel
 
 # Discrete client events only — never the ticker's auto-advance, which fires
 # TICKS_PER_SECOND times a second per playing client.
-logger = make_logger("pmu")
+logger = get_logger("pmu")
 
 
 # --- authoritative in-memory state ------------------------------------------

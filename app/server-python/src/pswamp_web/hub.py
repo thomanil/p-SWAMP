@@ -49,7 +49,7 @@ from .replay import (
     load_recording,
 )
 from .stores import AlarmStore, AppStatusStore, IslandStore, LineOutageStore
-from .wire import ReplayStatus
+from .wire import ReplayStatus, read_client_id
 
 logger = get_logger("pswamp_web.hub")
 
@@ -257,28 +257,6 @@ class Hub:
             position=(cursor % recording.n_samples) / recording.data_rate,
             duration=recording.duration,
         )
-
-
-def read_client_id(ws: WebSocket) -> str | None:
-    """The pipeline key from ``?client_id=``, or None if it is unusable.
-
-    The web client persists one integer per browser profile in localStorage and
-    sends it on every socket, so all of a page's panels resolve to the same
-    pipeline. Kept numeric and bounded because the value ends up in thread names
-    and log lines. ``shared.read_client_id`` is the twin the scaffold apps use and
-    applies the identical rule, so one browser addresses one identity everywhere.
-
-    This is not authentication and does not pretend to be: supply someone else's
-    id and you share their stream.
-    """
-    raw = ws.query_params.get("client_id")
-    if raw is None:
-        return None
-    raw = raw.strip()
-    # Bounded and numeric: this string ends up in thread names and log lines.
-    if not raw.isdigit() or len(raw) > 20:
-        return None
-    return raw
 
 
 class _Entry:

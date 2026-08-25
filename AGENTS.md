@@ -153,9 +153,12 @@ Two deployables, one wire protocol:
   fixture and nothing generates it. (The *grid monitor* is the one that really
   runs the desktop package's code; the streamer does not, and should not start.)
   Don't add tooling or deps to regenerate it unless asked;
-  replacing it is a file swap, since no code parses the contents. **`src/shared.py`** holds the
-  domain-free helpers the app packages use — `ConnectionManager` and
-  `make_logger(name)`; it is *not* an app package and never appears in `APPS`.
+  replacing it is a file swap, since no code parses the contents. **`src/shared.py`** is what an app
+  package imports its domain-free helpers from — `ConnectionManager`, plus
+  `ClientId`, `CommandAck`, `read_client_id`, `get_logger` re-exported from
+  `pswamp_web/` (see "The p-SWAMP web layer" for why the definitions live down
+  there and the import runs inward); it is *not* an app package and never appears
+  in `APPS`.
   Note the spelling split: a package dir must be a Python identifier
   (`reference_subapp`) while its URL prefix is hyphenated to match the page route
   (`/api/reference-subapp`). The image mirrors the **repo root** —
@@ -278,10 +281,15 @@ Key invariants to preserve:
     other change — so there is exactly one path for state and no ordering to
     reconcile between two of them. Don't be tempted to return the new state
     "to save a round trip": that is the whole design being undone.
-  - **`ClientId` and `CommandAck` are how every endpoint declares itself**, from
-    `shared.py` — or from `pswamp_web/wire.py`, which keeps deliberate twins of
-    both because that package may not import the rest of the backend. Change one
-    pair, change the other.
+  - **`ClientId` and `CommandAck` are how every endpoint declares itself.** Both
+    are defined once, in `pswamp_web/wire.py`, and re-exported by `shared.py` for
+    the app packages beside it — so a command's caller and its reply have one
+    spelling across the whole backend, and the client id one regex
+    (`CLIENT_ID_PATTERN`, which both the query parameter and `read_client_id`
+    apply). These used to be deliberate twins, one pair per side, kept equal by
+    hand and reunified in the contract by ~90 lines of `api_contract.py`; see the
+    import-direction note under "The p-SWAMP web layer" for why that was never
+    necessary.
   - **A socket that receives nothing still needs its receive loop.** Every WS
     handler ends in `while True: await ws.receive_text()`. It is not vestigial:
     without a pending receive, a closed socket is only noticed on the next send,
@@ -356,7 +364,18 @@ Qt-free core. So the package obeys two rules that are otherwise unusual here:
 *nothing inside it imports from the rest of the web backend* (not `shared.py`, not
 `server.py`), and *every import between its own modules is relative*. Moving it is
 then a `git mv` plus the handful of import lines in `server.py` that name it.
-Don't add a dependency that breaks that. Note this is only **one of two**
+Don't add a dependency that breaks that.
+
+**The rule is one-way, and that matters.** It forbids importing *outward*; the
+rest of the backend importing *inward* is fine, and stays fine after the move —
+the web backend already depends on `p-swamp`, so `from pswamp_web.wire import …`
+simply becomes `from pswamp.web.wire import …`. So anything both sides need is
+**defined here and re-exported by `shared.py`**, never declared twice:
+`ClientId`, `CommandAck`, `CLIENT_ID_PATTERN`/`read_client_id`, `send_state` and
+`get_logger`. Reading the rule as "duplicate it, then keep the copies equal" is
+what produced four twins and the `collapse_titled_twins` machinery that used to
+sit in `api_contract.py` to hide them from the published contract. Don't
+reintroduce that: add to `wire.py` (or `log.py`) and re-export. Note this is only **one of two**
 possible directions: §7 of `doc/WIP-context-port-from-qt-to-web-frontend.md` sets
 it against the opposite move — root `src/` under `app/server-python/` — and argues
 the choice follows from whether the Qt front end is being retired, not from

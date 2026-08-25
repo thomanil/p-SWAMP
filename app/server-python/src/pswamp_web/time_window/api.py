@@ -31,7 +31,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from .. import channels as channel_utils
-from ..hub import Hub, connected_hub, live_hub, read_client_id
+from ..hub import Hub, connected_hub, live_hub
 from ..replay import load_recording
 from ..sessions import SessionRegistry
 from ..wire import (
@@ -39,6 +39,7 @@ from ..wire import (
     ClientId,
     CommandAck,
     TimeWindowSlice,
+    read_client_id,
     send_state,
     series,
 )

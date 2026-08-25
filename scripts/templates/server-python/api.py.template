@@ -21,13 +21,13 @@ from shared import (
     ClientId,
     CommandAck,
     ConnectionManager,
-    make_logger,
+    get_logger,
     read_client_id,
 )
 
 from .model import __NAME__Model
 
-logger = make_logger("__SLUG__")
+logger = get_logger("__SLUG__")
 manager = ConnectionManager()
 router = APIRouter()
 

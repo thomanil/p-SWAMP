@@ -21,13 +21,13 @@ from shared import (
     ClientId,
     CommandAck,
     ConnectionManager,
-    make_logger,
+    get_logger,
     read_client_id,
 )
 
 from .model import ReferenceSubappModel
 
-logger = make_logger("reference-subapp")
+logger = get_logger("reference-subapp")
 manager = ConnectionManager()
 router = APIRouter()
 
