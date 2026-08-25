@@ -65,3 +65,10 @@ package.json        @thomanil
 package-lock.json   @thomanil
 pyproject.toml      @thomanil
 uv.lock             @thomanil
+
+# The reference subapp -- the scaffold example both AGENTS.md and
+# doc/the-client-server-api.md point at, and the end-to-end smoke test of the
+# client-server stack. It is meant to stay boring and current, so a change to
+# either half is worth a look.
+/app/client-web/src/pages/reference-subapp/  @thomanil
+/app/server-python/src/reference_subapp/     @thomanil
