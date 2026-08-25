@@ -92,6 +92,15 @@ whose message schemas are ordinary `components.schemas` entries — so a code
 generator picks them up like any other model even though OpenAPI itself has no
 notion of a socket.
 
+**The first path segment after `/api/` is the routing key.** The server itself
+holds no domain logic: it mounts one self-contained backend package under each
+`/api/<app>` prefix, so `/api/timeline/...` is served by `src/timeline/`,
+`/api/time-window/...` by `src/pswamp_web/time_window/`, and so on for every tag
+listed below — the paths a package declares are relative to its own prefix.
+`/healthz` sits outside `/api` because it is the process's health rather than any
+one app's, and everything else is the built web client, served from the same
+origin with unknown paths falling back to its `index.html` so deep links work.
+
 **Every request carries `?client_id=`**, a numeric string the browser resolves
 once per profile and persists. It is the sharding key for all server state and
 all of a browser's sockets must send the same one. It is *not* authentication and

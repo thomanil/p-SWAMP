@@ -1,6 +1,6 @@
 # The client/server api
 
-Everything about the seam between the web client and the state server: the rule it
+Everything about the seam between the web client and the state server: the rules it
 follows, the contract that describes it, and the machinery underneath.
 
 Read as much as you need:
@@ -14,8 +14,7 @@ Read as much as you need:
 | understand how state reaches the screen | [Downstream](#downstream-how-state-reaches-the-screen) |
 | know what a failure looks like | [Error and refusal semantics](#error-and-refusal-semantics) |
 
-`AGENTS.md` states the rules in brief; this explains them. `client-server-rig.md`
-is the shorter tour of the whole rig, of which this api is one part.
+`client-server-rig.md` is the shorter tour of the whole rig, of which this api is one part.
 
 The shape in one paragraph
 ==
