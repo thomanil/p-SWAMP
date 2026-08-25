@@ -17,6 +17,8 @@ from ..wire import GridModel
 router = APIRouter()
 
 
-@router.get("/model", response_model=GridModel)
+@router.get("/model", operation_id="grid_model")
 async def grid_model() -> GridModel:
+    """The static Nordic 44 topology: buses, branches, PMU sites and a bounding
+    box. Fetched once per page mount and cacheable, as above."""
     return load_grid_model()

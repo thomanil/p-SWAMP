@@ -27,24 +27,17 @@ from pydantic import BaseModel, Field
 
 from ..hub import ISLANDING_RESULT_TOPIC, Hub, connected_hub, live_hub, read_client_id
 from ..sessions import SessionRegistry
-from ..wire import AlarmList, ClientId, CommandAck, IslandingResult, send_state
+from ..wire import (
+    AlarmList,
+    ClientId,
+    CommandAck,
+    IslandingResult,
+    IslandingState,
+    send_state,
+)
 from .adapt import to_wire
 
 router = APIRouter()
-
-
-class IslandingState(BaseModel):
-    """Both halves of this page in one message.
-
-    Detection and alarms are separate concerns upstream -- different topics, one
-    derived from the other -- but they change together and are read together, so
-    splitting them across two sockets would only mean the page could render them
-    inconsistently.
-    """
-
-    type: str = "state"
-    islanding: IslandingResult | None = None
-    alarms: AlarmList
 
 
 def current_message(hub: Hub, latest: IslandingResult | None) -> IslandingState:

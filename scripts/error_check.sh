@@ -13,8 +13,11 @@
 # auto-fix the fixable lint/formatting issues it surfaces, run the sibling
 # scripts/autofix_lint_formatting.sh.
 #
-# It never starts the app or hits the network for app state; it only reads the
-# source. Two halves:
+# It never starts the app — nothing here binds a port or serves a request. The api
+# contract check does *import* the FastAPI app to ask it for its own description,
+# and unlike every other check it needs the full server environment rather than
+# just the pinned linter, so a cold run may sync it. Everything else only reads
+# the source. Three parts:
 #
 #   Web client (app/client-web, TypeScript/React)
 #     - tsc -b ........ full type-check (project refs, noEmit) — catches type
@@ -30,6 +33,13 @@
 #                       style errors). Run from the locked `dev` dependency
 #                       group, so nothing to pre-install.
 #     - ruff format ... formatting drift (check-only, never rewrites here).
+#
+#   The api contract (doc/api/openapi.json + app/client-web/src/api/schema.ts)
+#     - generate-api-contract.sh --check — both artifacts are generated from the
+#                       server and committed, so this fails if either is stale.
+#                       That is what makes a changed endpoint a failing check
+#                       here rather than a runtime surprise in another team's
+#                       browser. Fix with: scripts/generate-api-contract.sh
 #
 # All checks run even if an earlier one fails, so you see every problem in one
 # pass; the script exits non-zero if any check failed.
@@ -140,6 +150,21 @@ else
   run "ruff format (Python style)" "${RUFF[@]}" format --check app
 fi
 
+# --- The published api contract ---------------------------------------------
+#
+# doc/api/openapi.json describes both directions of the client/server api, and
+# app/client-web/src/api/schema.ts is the TypeScript generated from it. Both are
+# committed, so a change to an endpoint or a socket message shows up as a
+# reviewable diff — and this check is what stops one being forgotten.
+#
+# Last, and deliberately: it is the one most often fixed by regenerating rather
+# than by editing anything. Not slow in itself -- ~0.6 s warm, since importing the
+# app touches neither the recorded dataset nor the grid model (both are lazy) --
+# but it is the only check needing the full server env, so a COLD run pays for uv
+# to sync numpy/scipy/pandas first.
+
+run "api contract (spec matches code)" scripts/generate-api-contract.sh --check
+
 # --- Summary ----------------------------------------------------------------
 section "Summary"
 if [ "${#FAILURES[@]}" -eq 0 ]; then
@@ -150,4 +175,6 @@ printf '\033[31m%d check(s) failed:\033[0m\n' "${#FAILURES[@]}"
 printf '  - %s\n' "${FAILURES[@]}"
 printf '\nTo auto-fix the fixable lint/formatting issues, run:\n'
 printf '  scripts/autofix_lint_formatting.sh\n'
+printf 'If it was the api contract, regenerate and commit it:\n'
+printf '  scripts/generate-api-contract.sh\n'
 exit 1

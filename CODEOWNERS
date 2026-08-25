@@ -41,6 +41,13 @@
 # TODO Add more unicus people on the integration/architecture paths
 # TODO Add in more SINTEF, IFE etc people
 
+# The generated api contract between the web client and the server. Both files are
+# machine-written and committed, and a diff here is the visible form of "the shape
+# other teams code against just changed" -- which is exactly the change worth a
+# second pair of eyes. Add yourself if you consume this api.
+/doc/api/                            @thomanil
+/app/server-python/src/api_contract.py  @thomanil
+
 # Deploy manifests for the local minikube and remote rndp clusters.
 /k8s/          @thomanil
 

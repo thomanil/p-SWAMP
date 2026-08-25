@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 
 import { useServerSocket } from '@/hooks/useServerSocket'
 import { PHASORS_WS_PATH } from '@/lib/servers'
+import type { Wire } from '@/api/wire'
 
 export type Phasor = {
   station: string
@@ -23,18 +24,7 @@ export type PhasorsState = {
   angRef: number | null
 }
 
-type PhasorsMessage = {
-  t: number
-  phasors: {
-    station: string
-    channel: string
-    mag: number | null
-    ang: number | null
-    island: number | null
-  }[]
-  mag_ref: number | null
-  ang_ref: number | null
-}
+type PhasorsMessage = Wire['PhasorSnapshot']
 
 export function usePhasorsSocket() {
   const { message, status, connected } = useServerSocket<PhasorsMessage>(PHASORS_WS_PATH)

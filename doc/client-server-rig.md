@@ -158,6 +158,12 @@ What hot-reloads:
   container and the server reloads itself in place.
 - Any `.ts/.tsx` file in `app/client-web/**` → Vite patches the running page instantly (HMR).
 
+What does **not**: the generated api contract. Change an endpoint or a socket
+message and the server reloads with it, but `doc/api/openapi.json` and the web
+client's generated types stay as they were until you run
+`./scripts/generate-api-contract.sh`. Vite does not type-check, so a mismatch is
+invisible in the browser — `scripts/error_check.sh` is what catches it.
+
 
 Running it as a kubernetes service
 ==
@@ -308,8 +314,9 @@ The api between client and backend
 ==
 
 **The two directions use two transports: commands up over REST, state down over
-the WebSocket.** (`api-architecture.md`, beside this file, traces both end to end
-— every hop, both layers. This section is the summary.)
+the WebSocket.** `the-client-server-api.md`, beside this file, is the full
+account — the contract, both call paths, and the failure semantics. This is the
+one-screen version.
 
 Each subapp exposes a WebSocket at `/api/<app>/ws`, which is downstream only: the
 server pushes `{type: 'state', ...}` on connect and after every change — including
@@ -335,23 +342,18 @@ nothing to reconcile.
 
 What the split buys, and why it is worth a round trip per click: every operation
 is a row in the browser's Network tab and a line in the server's access log with a
-status code; a rejected command says *why* (422 for a bad sequence name, 404 for
-an unknown alarm) rather than failing quietly; and the whole upstream surface is
-described by `/openapi.json` rather than only documented. Sockets are absent from
-that description by nature, which is the point — the describable half is the half
-worth describing. (Fuller OpenAPI/Swagger integration is a later step; what is
-there today is what FastAPI generates from the endpoints themselves.)
+status code, and a rejected command says *why* (422 for a bad sequence name, 404
+for an unknown alarm) rather than failing quietly.
+
+**Both halves are described by a generated contract** — `doc/api/openapi.json`,
+committed, with the web client's TypeScript generated from it and
+`scripts/error_check.sh` failing if the two drift. Socket messages are in there
+too, which OpenAPI has no native notion of; how that works, and how to change the
+api without breaking anyone, is in `the-client-server-api.md`.
 
 Same origin in both dev and prod, for both transports: the shipped image serves
 the frontend itself, and Vite proxies `/api` to the backend in dev.
 
-The two directions are validated differently, which is worth knowing. Upstream is
-covered: request bodies are pydantic models, so a malformed command is a 422
-before any handler runs. Downstream is not — the TypeScript message types are
-hand-written mirrors of Python dicts, so a renamed field in a state message fails
-at runtime, not in any check.
-
-TODO harden the downstream (state) wire format too?
 
 Authentication
 --
@@ -522,7 +524,9 @@ Needed only for the checks and the alternative run modes, not for the two script
   `./scripts/error_check.sh`. Install with
   `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 - **minikube + kubectl** — only for `./scripts/start-pswamp-in-local-minikube-cluster.sh`, which tests the
-  real container image on a local Kubernetes cluster.
+  real container image on a local Kubernetes cluster. That script also preflights
+  the api contract, so it wants `uv` and `npx` too (`NO_CHECK=1` skips both the
+  check and the requirement).
 
 
 How to collab/merge changes between public partner repo of p-swamp and internal repo of it

@@ -14,6 +14,11 @@
 # to change what a new subapp starts life as. Each is named <filename>.template;
 # the suffix is stripped on render and exists so editors leave them alone.
 #
+# The new subapp joins the published api contract with no registry entry: its
+# package exports WS_MESSAGE, api_contract.py collects it, and this script
+# regenerates doc/api/openapi.json plus the web client's generated types at the
+# end. Commit those two artifacts with the rest.
+#
 # NO_CHECK=1 skips the scripts/error_check.sh run at the end.
 set -euo pipefail
 
@@ -197,7 +202,17 @@ for path in patched:
 
 print(f"\n\033[1m{label}: page /{slug}, socket /api/{slug}/ws, "
       f"commands POST /api/{slug}/count/…\033[0m")
+print("  the api contract is regenerated next — commit doc/api/openapi.json and")
+print("  app/client-web/src/api/schema.ts along with the new subapp.")
 PY
+
+# Regenerate the api contract BEFORE the checks below, not after. The new backend
+# package exports a WS_MESSAGE that belongs in doc/api/openapi.json, and the page
+# this script just wrote imports its wire type from the TypeScript generated off
+# that file -- so until this runs, the new subapp does not type-check. Runs even
+# under NO_CHECK=1: skipping the *checks* is a time saver, leaving the contract
+# stale would just be a broken tree.
+scripts/generate-api-contract.sh
 
 [ "${NO_CHECK:-0}" = 1 ] || scripts/error_check.sh
 

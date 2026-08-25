@@ -15,6 +15,10 @@
 # It also means Ctrl-C actually STOPS the server here, instead of merely
 # detaching and leaving the container bound to port 8000.
 #
+# NOT hot-reloaded: the generated api contract. An endpoint or message change
+# reloads the server, but doc/api/openapi.json and the web client's generated
+# types only move when you run scripts/generate-api-contract.sh.
+#
 # `--build` is not optional: without it Compose reuses whatever
 # p-swamp:latest already exists and only *builds* when the image
 # is missing entirely. `watch` then syncs edits made while it runs — but every

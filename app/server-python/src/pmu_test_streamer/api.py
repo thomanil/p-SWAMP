@@ -21,9 +21,17 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from typing import Literal
 
 from fastapi import APIRouter, FastAPI, WebSocket, WebSocketDisconnect
-from shared import ClientId, CommandAck, ConnectionManager, make_logger
+from pydantic import BaseModel, Field
+from shared import (
+    ClientId,
+    CommandAck,
+    ConnectionManager,
+    make_logger,
+    read_client_id,
+)
 
 from .model import LINES, TICKS_PER_SECOND, PmuStreamModel
 
@@ -46,10 +54,10 @@ class ClientState:
     playing: bool = False
 
 
-states: dict[int, ClientState] = {}
+states: dict[str, ClientState] = {}
 
 
-def get_state(client_id: int) -> ClientState:
+def get_state(client_id: str) -> ClientState:
     """The single place per-client state is born; called on connect and on every
     command, so a command can never hit a missing client."""
     state = states.get(client_id)
@@ -58,27 +66,48 @@ def get_state(client_id: int) -> ClientState:
     return state
 
 
-def state_message(state: ClientState) -> dict:
+class PmuRecord(BaseModel):
+    """One record in the visible window: a 1-based line number and its text."""
+
+    line_number: int = Field(description="1-based, matching how `wc -l` counts.")
+    text: str = Field(description="The raw record, verbatim from sample_data.txt.")
+
+
+class PmuStreamState(BaseModel):
     """The single message shape pushed to a client on connect and every change.
+
+    A declared model rather than a loose dict, because this IS the downstream half
+    of the published contract — see the note on `timeline.TimelineState`.
 
     `total_lines` lets the client show "record N of M" — which is also how the
     wrap-around at the end of the file becomes visible in the UI.
     """
-    return {
-        "type": "state",
-        "window": state.model.visible_window(),
-        "index": state.model.index,
-        "total_lines": len(LINES),
-        "playing": state.playing,
-    }
+
+    type: Literal["state"] = "state"
+    window: list[PmuRecord | None] = Field(
+        description="Records around the cursor; null where it runs off an end.",
+    )
+    index: int = Field(description="0-based cursor into the sample file.")
+    total_lines: int = Field(description="How many records the sample file holds.")
+    playing: bool = Field(description="Whether the server is advancing this client.")
 
 
-def roster_table(acting_id: int | None = None) -> str:
+def state_message(state: ClientState) -> PmuStreamState:
+    """The single message shape pushed to a client on connect and every change."""
+    return PmuStreamState(
+        window=state.model.visible_window(),
+        index=state.model.index,
+        total_lines=len(LINES),
+        playing=state.playing,
+    )
+
+
+def roster_table(acting_id: str | None = None) -> str:
     """An aligned table of every currently connected client: where it is in the
     stream and whether it's playing. Disconnected-but-remembered seeds are excluded
     — this is the live roster, not the state table. The client that triggered the
     current event is flagged with an arrow."""
-    ids = sorted(manager.conns)
+    ids = sorted(manager.conns, key=int)
     if not ids:
         return "    (no clients connected)"
     headers = ("", "CLIENT", "RECORD", "STATE")
@@ -102,7 +131,7 @@ def roster_table(acting_id: int | None = None) -> str:
     return "\n".join([fmt(headers), rule, *(fmt(row) for row in rows[1:])])
 
 
-def log_event(action: str, client_id: int) -> None:
+def log_event(action: str, client_id: str) -> None:
     """The single logging entry point: the triggering client + action, then the full
     live roster, so the console always shows the complete picture after any
     operation."""
@@ -172,7 +201,7 @@ async def lifespan(app: FastAPI):
 router = APIRouter()
 
 
-async def applied(client_id: int, state: ClientState, action: str) -> CommandAck:
+async def applied(client_id: str, state: ClientState, action: str) -> CommandAck:
     """Log the command, push this client its new state, acknowledge the request."""
     log_event(action, client_id)
     await manager.send_to_client(client_id, state_message(state))
@@ -216,12 +245,13 @@ async def back(client_id: ClientId) -> CommandAck:
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    # The client identifies itself with an integer seed in the URL
+    # The client identifies itself with a numeric seed in the URL
     # (ws://.../api/pmu-test-streamer/ws?client_id=<seed>); reject a connection
-    # without a valid one. The commands above take the same id as a query param.
-    try:
-        client_id = int(ws.query_params.get("client_id"))
-    except (TypeError, ValueError):
+    # without a valid one. `read_client_id` applies the very rule the `ClientId`
+    # query parameter enforces, so a page's socket and its commands can never
+    # address different state.
+    client_id = read_client_id(ws)
+    if client_id is None:
         await ws.close(code=1008)  # policy violation
         return
 
@@ -232,7 +262,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     log_event("reconnected" if known else "connected", client_id)
     try:
         # Initial full state for this client (resumes prior position if known).
-        await ws.send_json(state_message(state))
+        await ws.send_text(state_message(state).model_dump_json())
         # Nothing is sent up this socket; the receive loop is what surfaces a
         # disconnect. Without it a closed socket is only noticed on the next
         # send, so a paused client would linger for ever.

@@ -4,13 +4,19 @@
 # For more rapid local dev with live reloads etc, use start-local-hotloaded-pswamp-server.sh instead (docker compose)
 #
 # This is the stable entrypoint for "run the server in kubernetes locally". It
-# builds the image straight into minikube (no registry/push), applies the
-# manifests in k8s/, forces a rollout so a rebuilt :latest image is actually
-# picked up, waits for readiness, and prints the WebSocket URL the desktop
-# client should use.
+# checks the committed api contract still matches the code, builds the image
+# straight into minikube (no registry/push), applies the manifests in k8s/, forces
+# a rollout so a rebuilt :latest image is actually picked up, waits for readiness,
+# and prints the WebSocket URL the desktop client should use.
 #
-# Prerequisites: minikube and kubectl. If either is missing the script stops
-# and tells you where to get it — it does not install anything for you.
+# Prerequisites: minikube and kubectl, plus uv and npx for the contract check
+# (NO_CHECK=1 drops that requirement along with the check). If any is missing the
+# script stops and tells you where to get it — it does not install anything for
+# you.
+#
+# Environment flags: NO_CHECK=1 skips the api-contract preflight, NO_BROWSER=1
+# skips opening the web client, NO_LOGS=1 returns to the prompt instead of
+# tailing logs.
 set -euo pipefail
 
 # Run from the repo root regardless of where the script is invoked from.
@@ -24,6 +30,41 @@ fi
 if ! command -v kubectl >/dev/null 2>&1; then
   echo "kubectl not found. Install it: https://kubernetes.io/docs/tasks/tools/" >&2
   exit 1
+fi
+
+# --- Preflight: the api contract is not stale -------------------------------
+#
+# Read-only, and deliberately BEFORE the cluster start and the image build: this
+# is the one failure mode this path cannot otherwise catch, and failing here costs
+# seconds instead of a minute of image build followed by a wrong deployment.
+#
+# Why it cannot be caught later: the image build does run `tsc -b`, so a client
+# that disagrees with the committed schema.ts fails the build. But a *stale*
+# schema.ts agrees with the client perfectly -- they are both simply behind the
+# Python. tsc only ever compares TypeScript to TypeScript, so it sees nothing
+# wrong, the image builds clean, and the pod serves a client expecting fields the
+# server no longer sends. Regenerating and diffing is the only thing that notices.
+#
+# Unlike minikube/kubectl above, this needs uv and npx (it imports the app to ask
+# for its own api description, then generates TypeScript from it). The script
+# itself says so and exits non-zero if either is missing, so this stays a loud
+# failure rather than a skipped check -- see the note in AGENTS.md about checks
+# that silently do nothing being worse than checks that fail.
+#
+# NO_CHECK=1 skips it, matching generate-new-subapp.sh and update-dependencies.sh.
+# Reach for that when you are knowingly deploying a work-in-progress contract, not
+# to get past a red check.
+if [ "${NO_CHECK:-0}" != 1 ]; then
+  echo "Checking the api contract is up to date..."
+  if ! scripts/generate-api-contract.sh --check; then
+    echo >&2
+    echo "Refusing to deploy: the committed api contract does not match the code." >&2
+    echo "The image would build fine and serve a web client built from stale types." >&2
+    echo >&2
+    echo "  scripts/generate-api-contract.sh      # regenerate, then commit both files" >&2
+    echo "  NO_CHECK=1 $0   # or deploy anyway" >&2
+    exit 1
+  fi
 fi
 
 # --- Ensure the cluster is running -----------------------------------------
@@ -118,6 +159,7 @@ echo "p-swamp is up. Point the client's 'Local minikube' entry at:"
 echo "    ws://${WS_HOST}/api/timeline/ws"
 echo
 echo "Web client:    ${BASE_URL}/"
+echo "API docs:      ${BASE_URL}/docs  (ReDoc at /redoc, raw document at /openapi.json)"
 echo "Health check:  curl -fsS ${BASE_URL}/healthz"
 
 # --- Open the web client ----------------------------------------------------

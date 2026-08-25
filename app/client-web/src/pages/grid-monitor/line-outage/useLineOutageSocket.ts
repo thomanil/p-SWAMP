@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 
 import { useServerSocket } from '@/hooks/useServerSocket'
 import { LINE_OUTAGE_WS_PATH } from '@/lib/servers'
+import type { Wire } from '@/api/wire'
 
 export type LineOutageEvent = {
   t: number
@@ -20,17 +21,7 @@ export type LineOutageState = {
   events: LineOutageEvent[]
 } | null
 
-type LineOutageMessage = {
-  app_uuid: string | null
-  app_name: string | null
-  window_length: number | null
-  events: {
-    t: number
-    kind: 'disconnect' | 'connect'
-    stations: string[]
-    measurements: string[]
-  }[]
-}
+type LineOutageMessage = Wire['LineOutageLog']
 
 /**
  * The detector reports the *channels* that changed, e.g.

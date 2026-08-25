@@ -3,6 +3,7 @@ import { useCallback, useMemo } from 'react'
 import { postCommand } from '@/lib/commands'
 import { TIMELINE_API_PATH, TIMELINE_WS_PATH } from '@/lib/servers'
 import { useServerSocket } from '@/hooks/useServerSocket'
+import type { Wire } from '@/api/wire'
 
 /** The single state message the server pushes on connect and every change
  *  (see `state_message` in app/server-python/src/timeline/api.py). `window`
@@ -14,13 +15,7 @@ export type TimelineState = {
   playing: boolean
 }
 
-/** The raw wire shape, before snake_case → camelCase. */
-type TimelineMessage = {
-  window: (number | null)[]
-  sequence_name: string
-  sequences: string[]
-  playing: boolean
-}
+type TimelineMessage = Wire['TimelineState']
 
 export type { ConnStatus } from '@/hooks/useServerSocket'
 
@@ -72,7 +67,7 @@ export function useTimelineSocket() {
     [],
   )
   const setSequence = useCallback(
-    (name: string) => fire(postCommand(`${TIMELINE_API_PATH}/sequence`, { name })),
+    (name: string) => fire(postCommand(`${TIMELINE_API_PATH}/sequence`, { body: { name } })),
     [],
   )
 

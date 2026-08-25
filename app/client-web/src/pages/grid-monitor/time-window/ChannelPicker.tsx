@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 
+import type { Wire } from '@/api/wire'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { resolveApiUrl, TIME_WINDOW_API_PATH } from '@/lib/servers'
@@ -33,9 +34,9 @@ export function ChannelPicker({
     // effect body — the same reason useServerSocket defers its first setState.
     fetch(channelsUrl())
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((body) => {
+      .then((body: Wire['ChannelCatalogue']) => {
         if (cancelled) return
-        setAll(body.channels as ChannelInfo[])
+        setAll(body.channels)
         setError(null)
       })
       .catch(() => {

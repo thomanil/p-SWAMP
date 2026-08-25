@@ -1,0 +1,2034 @@
+{
+  "components": {
+    "schemas": {
+      "Alarm": {
+        "properties": {
+          "app_name": {
+            "title": "App Name",
+            "type": "string"
+          },
+          "app_uuid": {
+            "title": "App Uuid",
+            "type": "string"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/AlarmEvent"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "unseen",
+              "acknowledged",
+              "silenced",
+              "not_critical"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "t_end": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "T End"
+          },
+          "t_start": {
+            "title": "T Start",
+            "type": "number"
+          },
+          "uuid": {
+            "title": "Uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "app_uuid",
+          "app_name",
+          "t_start",
+          "status",
+          "events"
+        ],
+        "title": "Alarm",
+        "type": "object"
+      },
+      "AlarmEvent": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "t": {
+            "title": "T",
+            "type": "number"
+          },
+          "type": {
+            "enum": [
+              "init",
+              "not_critical",
+              "acknowledge",
+              "silence",
+              "user_message"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "t",
+          "type",
+          "message"
+        ],
+        "title": "AlarmEvent",
+        "type": "object"
+      },
+      "AlarmList": {
+        "properties": {
+          "alarms": {
+            "items": {
+              "$ref": "#/components/schemas/Alarm"
+            },
+            "title": "Alarms",
+            "type": "array"
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "alarms"
+        ],
+        "title": "AlarmList",
+        "type": "object"
+      },
+      "AlarmNote": {
+        "description": "Body of POST /alarms/{alarm_uuid}/annotate.",
+        "properties": {
+          "message": {
+            "description": "The operator's note. Longer than 500 characters is truncated rather than rejected, so a slip cannot lose what was typed.",
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "AlarmNote",
+        "type": "object"
+      },
+      "AppStatus": {
+        "properties": {
+          "app_name": {
+            "title": "App Name",
+            "type": "string"
+          },
+          "received_at": {
+            "title": "Received At",
+            "type": "number"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "OK",
+              "Alert",
+              "Emergency",
+              "Initializing...",
+              "Undefined"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "t": {
+            "title": "T",
+            "type": "number"
+          },
+          "uuid": {
+            "title": "Uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uuid",
+          "app_name",
+          "status",
+          "t",
+          "received_at",
+          "stale"
+        ],
+        "title": "AppStatus",
+        "type": "object"
+      },
+      "AppStatusTable": {
+        "properties": {
+          "apps": {
+            "items": {
+              "$ref": "#/components/schemas/AppStatus"
+            },
+            "title": "Apps",
+            "type": "array"
+          },
+          "replay": {
+            "$ref": "#/components/schemas/ReplayStatus"
+          },
+          "server_time": {
+            "title": "Server Time",
+            "type": "number"
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "apps",
+          "server_time",
+          "replay"
+        ],
+        "title": "AppStatusTable",
+        "type": "object"
+      },
+      "Channel": {
+        "description": "One column of a labelled time window.\n\nFlattened from p-SWAMP's three-row header, plus a precomputed display label so\nthe client never has to join the parts itself.",
+        "properties": {
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
+          "idx": {
+            "title": "Idx",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "measurement": {
+            "title": "Measurement",
+            "type": "string"
+          },
+          "station": {
+            "title": "Station",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idx",
+          "station",
+          "channel",
+          "measurement",
+          "label"
+        ],
+        "title": "Channel",
+        "type": "object"
+      },
+      "ChannelCatalogue": {
+        "description": "Body of ``GET /api/time-window/channels``: every selectable channel.\n\nStatic for the life of the process, which is why it is a plain GET rather than\nsomething pushed down the socket. Declared as a model so the catalogue is in\nthe contract -- it used to be built as a hand-dumped dict, which published as\na bare `object` and left the client casting an implicitly-`any` response.",
+        "properties": {
+          "channels": {
+            "items": {
+              "$ref": "#/components/schemas/Channel"
+            },
+            "title": "Channels",
+            "type": "array"
+          }
+        },
+        "required": [
+          "channels"
+        ],
+        "title": "ChannelCatalogue",
+        "type": "object"
+      },
+      "ChannelSelection": {
+        "description": "Body of POST /selection.",
+        "properties": {
+          "channels": {
+            "description": "Channel indices, as listed by GET /channels.",
+            "examples": [
+              [
+                3,
+                17,
+                204
+              ]
+            ],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Channels",
+            "type": "array"
+          }
+        },
+        "required": [
+          "channels"
+        ],
+        "title": "ChannelSelection",
+        "type": "object"
+      },
+      "CommandAck": {
+        "description": "The reply to every command POST in this package.\n\nNot the resulting state: that arrives on whichever socket the page has open,\non the server's own schedule. See the twin in shared.py.\n\nThe explicit title is what keeps that twin from colliding with this one in the\ngenerated contract: two classes of the same name would otherwise be\ndisambiguated into machine-chosen spellings that change with the module\nlayout. Both are titled \"CommandAck\" and both describe the same shape, so\napi_contract.py's duplicate check accepts them as one schema.",
+        "properties": {
+          "applied": {
+            "title": "Applied",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "applied"
+        ],
+        "title": "CommandAck",
+        "type": "object"
+      },
+      "GridBranch": {
+        "properties": {
+          "from_bus": {
+            "title": "From Bus",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "line",
+              "trafo"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "to_bus": {
+            "title": "To Bus",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "from_bus",
+          "to_bus",
+          "kind"
+        ],
+        "title": "GridBranch",
+        "type": "object"
+      },
+      "GridBus": {
+        "properties": {
+          "area": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Area"
+          },
+          "lat": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lat"
+          },
+          "lon": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lon"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "v_nom": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "V Nom"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "GridBus",
+        "type": "object"
+      },
+      "GridModel": {
+        "description": "Static topology. Served over HTTP rather than a socket: it never changes,\nit is worth caching, and putting it on the socket would make every page's\nhook handle a second message shape for no benefit.",
+        "properties": {
+          "bbox": {
+            "maxItems": 4,
+            "minItems": 4,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Bbox",
+            "type": "array"
+          },
+          "branches": {
+            "items": {
+              "$ref": "#/components/schemas/GridBranch"
+            },
+            "title": "Branches",
+            "type": "array"
+          },
+          "buses": {
+            "items": {
+              "$ref": "#/components/schemas/GridBus"
+            },
+            "title": "Buses",
+            "type": "array"
+          },
+          "pmus": {
+            "items": {
+              "$ref": "#/components/schemas/PmuSite"
+            },
+            "title": "Pmus",
+            "type": "array"
+          }
+        },
+        "required": [
+          "buses",
+          "branches",
+          "pmus",
+          "bbox"
+        ],
+        "title": "GridModel",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthStatus": {
+        "description": "Reply to `GET /healthz`, the liveness/readiness probe.",
+        "properties": {
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "HealthStatus",
+        "type": "object"
+      },
+      "Island": {
+        "properties": {
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "mean_freq": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mean Freq"
+          },
+          "stations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Stations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "index",
+          "stations",
+          "mean_freq"
+        ],
+        "title": "Island",
+        "type": "object"
+      },
+      "IslandingParameters": {
+        "properties": {
+          "eval_freq": {
+            "title": "Eval Freq",
+            "type": "number"
+          },
+          "mean_threshold": {
+            "title": "Mean Threshold",
+            "type": "number"
+          },
+          "window_length": {
+            "title": "Window Length",
+            "type": "number"
+          }
+        },
+        "required": [
+          "window_length",
+          "mean_threshold",
+          "eval_freq"
+        ],
+        "title": "IslandingParameters",
+        "type": "object"
+      },
+      "IslandingResult": {
+        "properties": {
+          "app_name": {
+            "title": "App Name",
+            "type": "string"
+          },
+          "app_uuid": {
+            "title": "App Uuid",
+            "type": "string"
+          },
+          "islands": {
+            "items": {
+              "$ref": "#/components/schemas/Island"
+            },
+            "title": "Islands",
+            "type": "array"
+          },
+          "parameters": {
+            "$ref": "#/components/schemas/IslandingParameters"
+          },
+          "status": {
+            "enum": [
+              "OK",
+              "Alert",
+              "Emergency",
+              "Initializing...",
+              "Undefined"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "t": {
+            "title": "T",
+            "type": "number"
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "t",
+          "app_uuid",
+          "app_name",
+          "status",
+          "islands",
+          "parameters"
+        ],
+        "title": "IslandingResult",
+        "type": "object"
+      },
+      "IslandingState": {
+        "description": "Both halves of the islanding page in one message.\n\nDetection and alarms are separate concerns upstream -- different topics, one\nderived from the other -- but they change together and are read together, so\nsplitting them across two sockets would only mean the page could render them\ninconsistently.\n\nDeclared here rather than in islanding/api.py, where it used to live: this\nmodule's whole job is to be the one place a message shape is named, and a\nshape defined next to its endpoint was the one exception.",
+        "properties": {
+          "alarms": {
+            "$ref": "#/components/schemas/AlarmList"
+          },
+          "islanding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IslandingResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "alarms"
+        ],
+        "title": "IslandingState",
+        "type": "object"
+      },
+      "LineOutageEvent": {
+        "description": "One branch changing connection state, as the detector reports it.\n\n``stations`` and ``measurements`` come straight from the time window's\nheader for the channels that flipped, so a single physical line trip\nnormally appears with the station at each end -- the current on that branch\ngoes to zero as seen from both.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "disconnect",
+              "connect"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "measurements": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Measurements",
+            "type": "array"
+          },
+          "stations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Stations",
+            "type": "array"
+          },
+          "t": {
+            "title": "T",
+            "type": "number"
+          }
+        },
+        "required": [
+          "t",
+          "kind",
+          "stations",
+          "measurements"
+        ],
+        "title": "LineOutageEvent",
+        "type": "object"
+      },
+      "LineOutageLog": {
+        "description": "Newest first. The detector is silent unless something changes, so this is\na log of transitions rather than a snapshot of present state.",
+        "properties": {
+          "app_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "App Name"
+          },
+          "app_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "App Uuid"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/LineOutageEvent"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          },
+          "window_length": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Window Length"
+          }
+        },
+        "required": [
+          "events"
+        ],
+        "title": "LineOutageLog",
+        "type": "object"
+      },
+      "Phasor": {
+        "properties": {
+          "ang": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ang"
+          },
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
+          "island": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Island"
+          },
+          "mag": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mag"
+          },
+          "station": {
+            "title": "Station",
+            "type": "string"
+          }
+        },
+        "required": [
+          "station",
+          "channel",
+          "mag",
+          "ang"
+        ],
+        "title": "Phasor",
+        "type": "object"
+      },
+      "PhasorSnapshot": {
+        "description": "The most recent phasor per station.\n\n``mag_ref`` and ``ang_ref`` are sent rather than applied, so the client can\noffer per-unit and mean-angle-relative views as toggles -- which is what the\nQt phasor plot does -- without the server having to guess which is wanted.",
+        "properties": {
+          "ang_ref": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Ang Ref"
+          },
+          "mag_ref": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mag Ref"
+          },
+          "phasors": {
+            "items": {
+              "$ref": "#/components/schemas/Phasor"
+            },
+            "title": "Phasors",
+            "type": "array"
+          },
+          "t": {
+            "title": "T",
+            "type": "number"
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "t",
+          "phasors"
+        ],
+        "title": "PhasorSnapshot",
+        "type": "object"
+      },
+      "PmuRecord": {
+        "description": "One record in the visible window: a 1-based line number and its text.",
+        "properties": {
+          "line_number": {
+            "description": "1-based, matching how `wc -l` counts.",
+            "title": "Line Number",
+            "type": "integer"
+          },
+          "text": {
+            "description": "The raw record, verbatim from sample_data.txt.",
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "line_number",
+          "text"
+        ],
+        "title": "PmuRecord",
+        "type": "object"
+      },
+      "PmuSite": {
+        "properties": {
+          "lat": {
+            "title": "Lat",
+            "type": "number"
+          },
+          "lon": {
+            "title": "Lon",
+            "type": "number"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "lon",
+          "lat"
+        ],
+        "title": "PmuSite",
+        "type": "object"
+      },
+      "PmuStreamState": {
+        "description": "The single message shape pushed to a client on connect and every change.\n\nA declared model rather than a loose dict, because this IS the downstream half\nof the published contract \u2014 see the note on `timeline.TimelineState`.\n\n`total_lines` lets the client show \"record N of M\" \u2014 which is also how the\nwrap-around at the end of the file becomes visible in the UI.",
+        "properties": {
+          "index": {
+            "description": "0-based cursor into the sample file.",
+            "title": "Index",
+            "type": "integer"
+          },
+          "playing": {
+            "description": "Whether the server is advancing this client.",
+            "title": "Playing",
+            "type": "boolean"
+          },
+          "total_lines": {
+            "description": "How many records the sample file holds.",
+            "title": "Total Lines",
+            "type": "integer"
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          },
+          "window": {
+            "description": "Records around the cursor; null where it runs off an end.",
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/PmuRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Window",
+            "type": "array"
+          }
+        },
+        "required": [
+          "window",
+          "index",
+          "total_lines",
+          "playing"
+        ],
+        "title": "PmuStreamState",
+        "type": "object"
+      },
+      "ReplayStatus": {
+        "description": "State of the PMU source feeding every application.",
+        "properties": {
+          "cursor": {
+            "title": "Cursor",
+            "type": "integer"
+          },
+          "data_rate": {
+            "title": "Data Rate",
+            "type": "number"
+          },
+          "duration": {
+            "title": "Duration",
+            "type": "number"
+          },
+          "n_channels": {
+            "title": "N Channels",
+            "type": "integer"
+          },
+          "n_samples": {
+            "title": "N Samples",
+            "type": "integer"
+          },
+          "playing": {
+            "title": "Playing",
+            "type": "boolean"
+          },
+          "position": {
+            "title": "Position",
+            "type": "number"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "playing",
+          "data_rate",
+          "n_samples",
+          "n_channels",
+          "cursor",
+          "position",
+          "duration"
+        ],
+        "title": "ReplayStatus",
+        "type": "object"
+      },
+      "SequenceSelection": {
+        "description": "Body of POST /sequence.",
+        "properties": {
+          "name": {
+            "description": "One of the sequence names the state message lists.",
+            "examples": [
+              "Fibonacci"
+            ],
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "SequenceSelection",
+        "type": "object"
+      },
+      "TimeWindowSlice": {
+        "description": "A slice of the client's measurement window.\n\n``series`` is column-major -- one list per channel, parallel to ``channels``.\nThat is the layout a streaming chart wants; row-major would force the client\nto transpose a matrix of a few hundred thousand numbers on every update.\n\n``mode`` is what keeps this affordable. A full window is tens of thousands of\nnumbers and re-sending it several times a second is megabytes per second per\nclient; an \"append\" carries only the samples added since the last message.\nThe server sends \"full\" on connect and whenever the selection changes, and\n\"append\" the rest of the time. ``seq`` counts messages so a client can tell\nit missed one and ask for a fresh \"full\".",
+        "properties": {
+          "channels": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/Channel"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Channels"
+          },
+          "mode": {
+            "enum": [
+              "full",
+              "append"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "n_samples": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "N Samples"
+          },
+          "sampling_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sampling Rate"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "series": {
+            "items": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "title": "Series",
+            "type": "array"
+          },
+          "t": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "T",
+            "type": "array"
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "seq",
+          "t",
+          "series"
+        ],
+        "title": "TimeWindowSlice",
+        "type": "object"
+      },
+      "TimelineState": {
+        "description": "The single message shape pushed to a client on connect and every change.\n\nA declared model rather than a loose dict, because this IS the downstream\nhalf of the published contract: api_contract.py collects it from this\npackage's `WS_MESSAGE` export and the web client generates its wire type from\nthe result, so the browser can no longer drift from what this sends.\n\nsnake_case on the wire, as everywhere in this repo; the page's hook maps it to\ncamelCase. Changing a field here changes the generated TypeScript, so\nscripts/error_check.sh fails until the contract is regenerated.",
+        "properties": {
+          "playing": {
+            "description": "Whether the server is advancing this client.",
+            "title": "Playing",
+            "type": "boolean"
+          },
+          "sequence_name": {
+            "description": "Which sequence this client is on.",
+            "title": "Sequence Name",
+            "type": "string"
+          },
+          "sequences": {
+            "description": "Every sequence that can be picked.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Sequences",
+            "type": "array"
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          },
+          "window": {
+            "description": "The visible slice of the sequence; null before its start.",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Window",
+            "type": "array"
+          }
+        },
+        "required": [
+          "window",
+          "sequence_name",
+          "sequences",
+          "playing"
+        ],
+        "title": "TimelineState",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "The api between the p-SWAMP web client and its state server.\n\n**Two directions, two transports.** Anything a user triggers goes up as an HTTP\n`POST` under `/api/<app>/`; everything the server has to say comes down a\nWebSocket at `/api/<app>/ws`, which is downstream only. A command's reply is a\nsmall `CommandAck`, never state, so state has exactly one path and there is no\nordering to reconcile between two of them.\n\n**The operations below are therefore only half the api.** The socket half is\ndescribed by the `x-websocket-channels` extension at the root of this document,\nwhose message schemas are ordinary `components.schemas` entries \u2014 so a code\ngenerator picks them up like any other model even though OpenAPI itself has no\nnotion of a socket.\n\n**Every request carries `?client_id=`**, a numeric string the browser resolves\nonce per profile and persists. It is the sharding key for all server state and\nall of a browser's sockets must send the same one. It is *not* authentication and\ndoes not pretend to be: supply someone else's id and you drive their session.\n\nThis document is generated from the server and committed at `doc/api/openapi.json`;\n`scripts/error_check.sh` fails if the two disagree. See `doc/the-client-server-api.md`.\n",
+    "title": "p-SWAMP api",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/grid/model": {
+      "get": {
+        "description": "The static Nordic 44 topology: buses, branches, PMU sites and a bounding\nbox. Fetched once per page mount and cacheable, as above.",
+        "operationId": "grid_model",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GridModel"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Grid Model",
+        "tags": [
+          "grid"
+        ]
+      }
+    },
+    "/api/islanding/alarms/{alarm_uuid}/acknowledge": {
+      "post": {
+        "description": "Mark an alarm as seen by an operator.",
+        "operationId": "islanding_acknowledge",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "alarm_uuid",
+            "required": true,
+            "schema": {
+              "title": "Alarm Uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Acknowledge",
+        "tags": [
+          "islanding"
+        ]
+      }
+    },
+    "/api/islanding/alarms/{alarm_uuid}/annotate": {
+      "post": {
+        "description": "Attach a free-text operator note to an alarm.\n\nThe Qt dialogue's \"Annotate\" button. Upstream records this as a\n``user_message`` event on the alarm rather than as a state change, so the\nsame event type is used here and the two agree on the wire.",
+        "operationId": "islanding_annotate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "alarm_uuid",
+            "required": true,
+            "schema": {
+              "title": "Alarm Uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlarmNote"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Annotate",
+        "tags": [
+          "islanding"
+        ]
+      }
+    },
+    "/api/islanding/alarms/{alarm_uuid}/silence": {
+      "post": {
+        "description": "Stop an alarm from asserting itself, without resolving it.",
+        "operationId": "islanding_silence",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "alarm_uuid",
+            "required": true,
+            "schema": {
+              "title": "Alarm Uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Silence",
+        "tags": [
+          "islanding"
+        ]
+      }
+    },
+    "/api/pmu-test-streamer/playback/back": {
+      "post": {
+        "description": "Step one record back, independently of the play/pause flag.",
+        "operationId": "pmu_test_streamer_back",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Back",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
+    "/api/pmu-test-streamer/playback/forward": {
+      "post": {
+        "description": "Step one record forward, independently of the play/pause flag.",
+        "operationId": "pmu_test_streamer_forward",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Forward",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
+    "/api/pmu-test-streamer/playback/play": {
+      "post": {
+        "description": "Start advancing this client through the recorded stream.",
+        "operationId": "pmu_test_streamer_play",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Play",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
+    "/api/pmu-test-streamer/playback/stop": {
+      "post": {
+        "description": "Pause this client where it is in the stream.",
+        "operationId": "pmu_test_streamer_stop",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
+    "/api/time-window/channels": {
+      "get": {
+        "description": "Every selectable channel, for the picker. Static for the process, so it is\na plain GET rather than part of the socket protocol.",
+        "operationId": "time_window_channels",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelCatalogue"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Channels",
+        "tags": [
+          "time-window"
+        ]
+      }
+    },
+    "/api/time-window/resync": {
+      "post": {
+        "description": "Ask for the whole window again rather than the next delta.\n\nThe escape hatch for a client whose buffer no longer matches what the server\nthinks it has -- a dropped append, a chart remounted mid-stream.",
+        "operationId": "time_window_resync",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resync",
+        "tags": [
+          "time-window"
+        ]
+      }
+    },
+    "/api/time-window/selection": {
+      "post": {
+        "description": "Choose which channels this browser's measurement view plots.",
+        "operationId": "time_window_select_channels",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChannelSelection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Select Channels",
+        "tags": [
+          "time-window"
+        ]
+      }
+    },
+    "/api/timeline/playback/back": {
+      "post": {
+        "description": "Step one tick back, independently of the play/pause flag.",
+        "operationId": "timeline_back",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Back",
+        "tags": [
+          "timeline"
+        ]
+      }
+    },
+    "/api/timeline/playback/forward": {
+      "post": {
+        "description": "Step one tick forward, independently of the play/pause flag.",
+        "operationId": "timeline_forward",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Forward",
+        "tags": [
+          "timeline"
+        ]
+      }
+    },
+    "/api/timeline/playback/play": {
+      "post": {
+        "description": "Start advancing this client's timeline on the server-side ticker.",
+        "operationId": "timeline_play",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Play",
+        "tags": [
+          "timeline"
+        ]
+      }
+    },
+    "/api/timeline/playback/stop": {
+      "post": {
+        "description": "Pause this client's timeline where it is.",
+        "operationId": "timeline_stop",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop",
+        "tags": [
+          "timeline"
+        ]
+      }
+    },
+    "/api/timeline/sequence": {
+      "post": {
+        "description": "Switch which sequence this client is watching.\n\nEach sequence keeps its own index, so switching back resumes where it was.\nAn unknown name is a 422 naming the valid ones, not a quiet no-op.",
+        "operationId": "timeline_set_sequence",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SequenceSelection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Sequence",
+        "tags": [
+          "timeline"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "description": "Liveness probe for Docker/k8s, and the compose healthcheck. Cheap and\nside-effect-free: the server has no external dependencies, so \"the process is\nup and serving\" is the whole health story \u2014 there is nothing a separate\nreadiness probe could usefully check. Deliberately at the root rather than\nunder /api: it is the process's health, not any one app's.",
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Healthz"
+      }
+    }
+  },
+  "tags": [
+    {
+      "description": "Scaffold demo: a scrolling number sequence with playback controls.",
+      "name": "timeline"
+    },
+    {
+      "description": "Scaffold demo: replays sample PMU records line by line.",
+      "name": "pmu-test-streamer"
+    },
+    {
+      "description": "Health and status of the running p-SWAMP monitoring applications.",
+      "name": "app-status"
+    },
+    {
+      "description": "The static Nordic 44 topology. HTTP only \u2014 no socket.",
+      "name": "grid"
+    },
+    {
+      "description": "The measurement window: channel selection and the sample stream.",
+      "name": "time-window"
+    },
+    {
+      "description": "Islanding detection results and the alarms derived from them.",
+      "name": "islanding"
+    },
+    {
+      "description": "Detected line disconnect/reconnect events.",
+      "name": "line-outage"
+    },
+    {
+      "description": "Voltage phasors, referred to a rotating reference.",
+      "name": "phasors"
+    }
+  ],
+  "x-websocket-channels": [
+    {
+      "app": "timeline",
+      "direction": "server-to-client",
+      "message": {
+        "$ref": "#/components/schemas/TimelineState"
+      },
+      "path": "/api/timeline/ws"
+    },
+    {
+      "app": "pmu-test-streamer",
+      "direction": "server-to-client",
+      "message": {
+        "$ref": "#/components/schemas/PmuStreamState"
+      },
+      "path": "/api/pmu-test-streamer/ws"
+    },
+    {
+      "app": "app-status",
+      "direction": "server-to-client",
+      "message": {
+        "$ref": "#/components/schemas/AppStatusTable"
+      },
+      "path": "/api/app-status/ws"
+    },
+    {
+      "app": "time-window",
+      "direction": "server-to-client",
+      "message": {
+        "$ref": "#/components/schemas/TimeWindowSlice"
+      },
+      "path": "/api/time-window/ws"
+    },
+    {
+      "app": "islanding",
+      "direction": "server-to-client",
+      "message": {
+        "$ref": "#/components/schemas/IslandingState"
+      },
+      "path": "/api/islanding/ws"
+    },
+    {
+      "app": "line-outage",
+      "direction": "server-to-client",
+      "message": {
+        "$ref": "#/components/schemas/LineOutageLog"
+      },
+      "path": "/api/line-outage/ws"
+    },
+    {
+      "app": "phasors",
+      "direction": "server-to-client",
+      "message": {
+        "$ref": "#/components/schemas/PhasorSnapshot"
+      },
+      "path": "/api/phasors/ws"
+    }
+  ]
+}

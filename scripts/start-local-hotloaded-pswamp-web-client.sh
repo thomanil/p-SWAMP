@@ -6,6 +6,11 @@
 # a save to any source under app/client-web instantly patches the running page, no
 # manual restart). Open the printed http://localhost:5173 URL in a browser.
 #
+# One thing HMR does not cover: the generated api types in src/api/schema.ts. They
+# are rebuilt by scripts/generate-api-contract.sh, not by a save, and Vite strips
+# types rather than checking them — so a client built against a stale contract
+# looks fine here and fails in scripts/error_check.sh.
+#
 # Vite proxies /api to the backend on :8000 (see app/client-web/vite.config.ts),
 # so run start-local-hotloaded-pswamp-server.sh in another terminal and the web
 # client talks to it on the same origin — exactly as it will in the baked image,
@@ -45,5 +50,14 @@ URL="http://localhost:5173/"
   done
   echo "Vite did not come up within 30s; open $URL manually."
 ) &
+
+# The api doc is served by the BACKEND, not by Vite: the dev proxy forwards only
+# /api (see vite.config.ts), so /docs on :5173 is a 404 that falls through to the
+# SPA. Point at the server's own origin instead — it has to be running for the
+# client to work anyway.
+echo
+echo "API docs:      http://localhost:8000/docs  (ReDoc at /redoc, raw document at /openapi.json)"
+echo "               served by start-local-hotloaded-pswamp-server.sh, not by Vite on :5173"
+echo
 
 exec npm run dev
