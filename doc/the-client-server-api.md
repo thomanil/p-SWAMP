@@ -82,7 +82,7 @@ assembles the document, and adds the socket half OpenAPI has no notion of.
 Two things follow, and they are the whole reason it is arranged this way:
 
 - **Don't edit the two generated files.** A change to the api goes into the
-  Python — a route, a model, or the metadata in `api_contract.py` — then
+  Python — a route, a model, or the metadata in `api_contract.py` — then run
   `./scripts/generate-api-contract.sh`, then commit all of it together. Hand-edit
   `openapi.json` or `schema.ts` and the next regeneration silently discards you.
   See [Changing the api](#changing-the-api).
@@ -201,13 +201,6 @@ field is not breaking and needs no bump. See "Versioning" below.
 
 Yes. Docstrings become operation descriptions in the document, so they are part of
 the generated artifacts and the check notices. It is the same one command.
-
-### Where are the full checklists?
-
-`AGENTS.md` has them — "Adding a page", "Adding a backend api", "Adding a p-SWAMP
-view" — covering the parts that are not about the api itself (the route table, the
-nav entry, which panel goes where). The recipes above are the api-shaped subset.
-
 
 ------------------------------------------------------------------------------
 
@@ -748,15 +741,36 @@ Implementation notes
 ==
 
 **Duplicate schema names are collapsed.** `CommandAck` is declared twice on
-purpose — in `shared.py` and in `pswamp_web/wire.py`, because that package may not
-import the rest of the web backend (it is written to move into the desktop package
-as `pswamp/web/`). Pydantic disambiguates same-named classes by *module path*, so
-the reply to all fourteen commands would otherwise publish as `shared__CommandAck`
-and `pswamp_web__wire__CommandAck` — two names for one concept, one of them baking
-in a path that is documented to be moving. Both classes therefore set
+purpose — in `shared.py` and in `pswamp_web/wire.py` — and the reason is the
+repo's central compromise: **one analysis core, two front ends.** The p-SWAMP web
+layer is written to move into the desktop package as `pswamp/web/`, a third
+presentation adapter beside `gui/` (PySide6) and `visualization/`, so it may not
+import anything from the rest of the web backend — `shared.py` included, which is
+where the scaffold apps keep their copy. Two packages that may not share a module
+need two declarations of the same four-line model. The duplication is the price
+of the Qt and web front ends living over one core, paid here rather than in the
+core itself.
+
+The cost lands in the published contract, not in the code. Pydantic
+disambiguates same-named classes by *module path*, so the reply to all fourteen
+commands would otherwise publish as `shared__CommandAck` and
+`pswamp_web__wire__CommandAck` — two names for one concept, one of them baking in
+a path that is documented to be moving, which would rename a schema in every
+consumer's generated code the day that move happens. Both classes therefore set
 `model_config = ConfigDict(title="CommandAck")`, and `collapse_titled_twins` folds
 structurally identical twins back to that title. Twins that genuinely diverge keep
 their separate names, which is the correct outcome for two different shapes.
+
+**Don't expect this to expire on its own**, and note which half is the workaround.
+The *duplication* is the standing compromise; `collapse_titled_twins` is what
+keeps it out of the contract, and it is the piece consumers depend on. Whether the
+duplication ever goes away is decided by §7 of
+`WIP-context-port-from-qt-to-web-frontend.md`, and the answer is the opposite way
+round from the intuition: if **Qt stays**, `pswamp_web/` moves *into* the desktop
+package and still cannot import the web backend's `shared.py`, so the twin becomes
+permanent. Only if **Qt is retired** and the two Python projects merge could one
+`CommandAck` serve everything. Until that is settled, treat the twin as
+load-bearing and keep the two in step.
 
 **`openapi-typescript` declares a stale peer.** It wants `typescript@^5.x` while
 this project is on 6; it drives the TS 6 compiler API without complaint (checked),
