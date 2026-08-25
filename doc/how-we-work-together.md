@@ -8,9 +8,13 @@ we use to work effectively without tripping over each other.
 
 We cross over and help each other out where we can, but these are our core areas:
 
-*SINTEF*: Domain knowledge, core algorithms, core functionality
+*SINTEF*: Domain knowledge, core algorithms, core/backend functionality
+
+*SINTEF Digital*: TODO
 
 *IFE*: User experience, frontend implementation
+
+*RISE*: Domain knowledge, core/backend algorithms
 
 *STATNETT/UNICUS*: End to end architecture, integration, overall developer experience
 
