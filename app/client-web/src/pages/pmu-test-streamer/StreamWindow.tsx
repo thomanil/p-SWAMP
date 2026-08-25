@@ -3,8 +3,8 @@ import { cn } from '@/lib/utils'
 import type { StreamRecord } from './usePmuStreamSocket'
 
 /**
- * Renders the server-provided window of stream records — the vertical, textual
- * counterpart to TimelineWindow. The current record sits in the middle, bold and
+ * Renders the server-provided window of stream records, vertically and as text.
+ * The current record sits in the middle, bold and
  * accented, with a line-number gutter; neighbours fade with distance (nearer =
  * more opaque), which stays correct in dark mode where a literal grey ramp would
  * brighten instead of fade.

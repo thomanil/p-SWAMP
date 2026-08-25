@@ -150,8 +150,8 @@ USER app
 
 # Run from the source dir, so `server.py`, `server:app` (the form compose's
 # uvicorn --reload override uses) and the app packages it imports (`import
-# timeline`) all resolve off the working directory with no PYTHONPATH or --app-dir
-# plumbing. Deps were installed system-wide above, so nothing here depends on
+# pmu_test_streamer`) resolve off the working directory with no PYTHONPATH or
+# --app-dir plumbing. Deps were installed system-wide above, so nothing here depends on
 # where in the filesystem this sits.
 WORKDIR ${SERVER_DIR}/src
 

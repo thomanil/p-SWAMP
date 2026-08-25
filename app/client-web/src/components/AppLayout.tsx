@@ -19,7 +19,6 @@ const NAV_ITEMS = [
   // active link on every page.
   { to: '/', label: 'Monitor', end: true },
   { to: '/pmu-test-streamer', label: 'PMU Test Streamer', end: false },
-  { to: '/timeline', label: 'Timeline', end: false },
 ]
 
 export function AppLayout() {

@@ -233,109 +233,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/timeline/playback/back": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Back
-         * @description Step one tick back, independently of the play/pause flag.
-         */
-        post: operations["timeline_back"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/timeline/playback/forward": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Forward
-         * @description Step one tick forward, independently of the play/pause flag.
-         */
-        post: operations["timeline_forward"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/timeline/playback/play": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Play
-         * @description Start advancing this client's timeline on the server-side ticker.
-         */
-        post: operations["timeline_play"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/timeline/playback/stop": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Stop
-         * @description Pause this client's timeline where it is.
-         */
-        post: operations["timeline_stop"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/timeline/sequence": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Set Sequence
-         * @description Switch which sequence this client is watching.
-         *
-         *     Each sequence keeps its own index, so switching back resumes where it was.
-         *     An unknown name is a 422 naming the valid ones, not a quiet no-op.
-         */
-        post: operations["timeline_set_sequence"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -782,7 +679,8 @@ export interface components {
          * @description The single message shape pushed to a client on connect and every change.
          *
          *     A declared model rather than a loose dict, because this IS the downstream half
-         *     of the published contract — see the note on `timeline.TimelineState`.
+         *     of the published contract: api_contract.py collects it via this package's
+         *     WS_MESSAGE export, and a bare dict would silently drop the app out of it.
          *
          *     `total_lines` lets the client show "record N of M" — which is also how the
          *     wrap-around at the end of the file becomes visible in the UI.
@@ -838,18 +736,6 @@ export interface components {
             source: string;
         };
         /**
-         * SequenceSelection
-         * @description Body of POST /sequence.
-         */
-        SequenceSelection: {
-            /**
-             * Name
-             * @description One of the sequence names the state message lists.
-             * @example Fibonacci
-             */
-            name: string;
-        };
-        /**
          * TimeWindowSlice
          * @description A slice of the client's measurement window.
          *
@@ -897,47 +783,6 @@ export interface components {
              * @constant
              */
             type: "state";
-        };
-        /**
-         * TimelineState
-         * @description The single message shape pushed to a client on connect and every change.
-         *
-         *     A declared model rather than a loose dict, because this IS the downstream
-         *     half of the published contract: api_contract.py collects it from this
-         *     package's `WS_MESSAGE` export and the web client generates its wire type from
-         *     the result, so the browser can no longer drift from what this sends.
-         *
-         *     snake_case on the wire, as everywhere in this repo; the page's hook maps it to
-         *     camelCase. Changing a field here changes the generated TypeScript, so
-         *     scripts/error_check.sh fails until the contract is regenerated.
-         */
-        TimelineState: {
-            /**
-             * Playing
-             * @description Whether the server is advancing this client.
-             */
-            playing: boolean;
-            /**
-             * Sequence Name
-             * @description Which sequence this client is on.
-             */
-            sequence_name: string;
-            /**
-             * Sequences
-             * @description Every sequence that can be picked.
-             */
-            sequences: string[];
-            /**
-             * Type
-             * @default state
-             * @constant
-             */
-            type: "state";
-            /**
-             * Window
-             * @description The visible slice of the sequence; null before its start.
-             */
-            window: (number | null)[];
         };
         /** ValidationError */
         ValidationError: {
@@ -1280,170 +1125,6 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ChannelSelection"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CommandAck"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    timeline_back: {
-        parameters: {
-            query: {
-                /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */
-                client_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CommandAck"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    timeline_forward: {
-        parameters: {
-            query: {
-                /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */
-                client_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CommandAck"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    timeline_play: {
-        parameters: {
-            query: {
-                /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */
-                client_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CommandAck"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    timeline_stop: {
-        parameters: {
-            query: {
-                /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */
-                client_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CommandAck"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    timeline_set_sequence: {
-        parameters: {
-            query: {
-                /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */
-                client_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SequenceSelection"];
             };
         };
         responses: {

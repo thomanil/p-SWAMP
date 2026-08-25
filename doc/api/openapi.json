@@ -857,7 +857,7 @@
         "type": "object"
       },
       "PmuStreamState": {
-        "description": "The single message shape pushed to a client on connect and every change.\n\nA declared model rather than a loose dict, because this IS the downstream half\nof the published contract \u2014 see the note on `timeline.TimelineState`.\n\n`total_lines` lets the client show \"record N of M\" \u2014 which is also how the\nwrap-around at the end of the file becomes visible in the UI.",
+        "description": "The single message shape pushed to a client on connect and every change.\n\nA declared model rather than a loose dict, because this IS the downstream half\nof the published contract: api_contract.py collects it via this package's\nWS_MESSAGE export, and a bare dict would silently drop the app out of it.\n\n`total_lines` lets the client show \"record N of M\" \u2014 which is also how the\nwrap-around at the end of the file becomes visible in the UI.",
         "properties": {
           "index": {
             "description": "0-based cursor into the sample file.",
@@ -952,24 +952,6 @@
           "duration"
         ],
         "title": "ReplayStatus",
-        "type": "object"
-      },
-      "SequenceSelection": {
-        "description": "Body of POST /sequence.",
-        "properties": {
-          "name": {
-            "description": "One of the sequence names the state message lists.",
-            "examples": [
-              "Fibonacci"
-            ],
-            "title": "Name",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name"
-        ],
-        "title": "SequenceSelection",
         "type": "object"
       },
       "TimeWindowSlice": {
@@ -1073,58 +1055,6 @@
         "title": "TimeWindowSlice",
         "type": "object"
       },
-      "TimelineState": {
-        "description": "The single message shape pushed to a client on connect and every change.\n\nA declared model rather than a loose dict, because this IS the downstream\nhalf of the published contract: api_contract.py collects it from this\npackage's `WS_MESSAGE` export and the web client generates its wire type from\nthe result, so the browser can no longer drift from what this sends.\n\nsnake_case on the wire, as everywhere in this repo; the page's hook maps it to\ncamelCase. Changing a field here changes the generated TypeScript, so\nscripts/error_check.sh fails until the contract is regenerated.",
-        "properties": {
-          "playing": {
-            "description": "Whether the server is advancing this client.",
-            "title": "Playing",
-            "type": "boolean"
-          },
-          "sequence_name": {
-            "description": "Which sequence this client is on.",
-            "title": "Sequence Name",
-            "type": "string"
-          },
-          "sequences": {
-            "description": "Every sequence that can be picked.",
-            "items": {
-              "type": "string"
-            },
-            "title": "Sequences",
-            "type": "array"
-          },
-          "type": {
-            "const": "state",
-            "default": "state",
-            "title": "Type",
-            "type": "string"
-          },
-          "window": {
-            "description": "The visible slice of the sequence; null before its start.",
-            "items": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "title": "Window",
-            "type": "array"
-          }
-        },
-        "required": [
-          "window",
-          "sequence_name",
-          "sequences",
-          "playing"
-        ],
-        "title": "TimelineState",
-        "type": "object"
-      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -1168,7 +1098,7 @@
     }
   },
   "info": {
-    "description": "The api between the p-SWAMP web client and its state server.\n\n**Two directions, two transports.** Anything a user triggers goes up as an HTTP\n`POST` under `/api/<app>/`; everything the server has to say comes down a\nWebSocket at `/api/<app>/ws`, which is downstream only. A command's reply is a\nsmall `CommandAck`, never state, so state has exactly one path and there is no\nordering to reconcile between two of them.\n\n**The operations below are therefore only half the api.** The socket half is\ndescribed by the `x-websocket-channels` extension at the root of this document,\nwhose message schemas are ordinary `components.schemas` entries \u2014 so a code\ngenerator picks them up like any other model even though OpenAPI itself has no\nnotion of a socket.\n\n**The first path segment after `/api/` is the routing key.** The server itself\nholds no domain logic: it mounts one self-contained backend package under each\n`/api/<app>` prefix, so `/api/timeline/...` is served by `src/timeline/`,\n`/api/time-window/...` by `src/pswamp_web/time_window/`, and so on for every tag\nlisted below \u2014 the paths a package declares are relative to its own prefix.\n`/healthz` sits outside `/api` because it is the process's health rather than any\none app's, and everything else is the built web client, served from the same\norigin with unknown paths falling back to its `index.html` so deep links work.\n\n**Every request carries `?client_id=`**, a numeric string the browser resolves\nonce per profile and persists. It is the sharding key for all server state and\nall of a browser's sockets must send the same one. It is *not* authentication and\ndoes not pretend to be: supply someone else's id and you drive their session.\n\nThis document is generated from the server and committed at `doc/api/openapi.json`;\n`scripts/error_check.sh` fails if the two disagree. See `doc/the-client-server-api.md`.\n",
+    "description": "The api between the p-SWAMP web client and its state server.\n\n**Two directions, two transports.** Anything a user triggers goes up as an HTTP\n`POST` under `/api/<app>/`; everything the server has to say comes down a\nWebSocket at `/api/<app>/ws`, which is downstream only. A command's reply is a\nsmall `CommandAck`, never state, so state has exactly one path and there is no\nordering to reconcile between two of them.\n\n**The operations below are therefore only half the api.** The socket half is\ndescribed by the `x-websocket-channels` extension at the root of this document,\nwhose message schemas are ordinary `components.schemas` entries \u2014 so a code\ngenerator picks them up like any other model even though OpenAPI itself has no\nnotion of a socket.\n\n**The first path segment after `/api/` is the routing key.** The server itself\nholds no domain logic: it mounts one self-contained backend package under each\n`/api/<app>` prefix, so `/api/pmu-test-streamer/...` is served by\n`src/pmu_test_streamer/`, `/api/time-window/...` by\n`src/pswamp_web/time_window/`, and so on for every tag listed below \u2014 the paths\na package declares are relative to its own prefix.\n`/healthz` sits outside `/api` because it is the process's health rather than any\none app's, and everything else is the built web client, served from the same\norigin with unknown paths falling back to its `index.html` so deep links work.\n\n**Every request carries `?client_id=`**, a numeric string the browser resolves\nonce per profile and persists. It is the sharding key for all server state and\nall of a browser's sockets must send the same one. It is *not* authentication and\ndoes not pretend to be: supply someone else's id and you drive their session.\n\nThis document is generated from the server and committed at `doc/api/openapi.json`;\n`scripts/error_check.sh` fails if the two disagree. See `doc/the-client-server-api.md`.\n",
     "title": "p-SWAMP api",
     "version": "1.0.0"
   },
@@ -1679,246 +1609,6 @@
         ]
       }
     },
-    "/api/timeline/playback/back": {
-      "post": {
-        "description": "Step one tick back, independently of the play/pause flag.",
-        "operationId": "timeline_back",
-        "parameters": [
-          {
-            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
-            "in": "query",
-            "name": "client_id",
-            "required": true,
-            "schema": {
-              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
-              "pattern": "^\\d{1,20}$",
-              "title": "Client Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommandAck"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Back",
-        "tags": [
-          "timeline"
-        ]
-      }
-    },
-    "/api/timeline/playback/forward": {
-      "post": {
-        "description": "Step one tick forward, independently of the play/pause flag.",
-        "operationId": "timeline_forward",
-        "parameters": [
-          {
-            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
-            "in": "query",
-            "name": "client_id",
-            "required": true,
-            "schema": {
-              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
-              "pattern": "^\\d{1,20}$",
-              "title": "Client Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommandAck"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Forward",
-        "tags": [
-          "timeline"
-        ]
-      }
-    },
-    "/api/timeline/playback/play": {
-      "post": {
-        "description": "Start advancing this client's timeline on the server-side ticker.",
-        "operationId": "timeline_play",
-        "parameters": [
-          {
-            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
-            "in": "query",
-            "name": "client_id",
-            "required": true,
-            "schema": {
-              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
-              "pattern": "^\\d{1,20}$",
-              "title": "Client Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommandAck"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Play",
-        "tags": [
-          "timeline"
-        ]
-      }
-    },
-    "/api/timeline/playback/stop": {
-      "post": {
-        "description": "Pause this client's timeline where it is.",
-        "operationId": "timeline_stop",
-        "parameters": [
-          {
-            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
-            "in": "query",
-            "name": "client_id",
-            "required": true,
-            "schema": {
-              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
-              "pattern": "^\\d{1,20}$",
-              "title": "Client Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommandAck"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Stop",
-        "tags": [
-          "timeline"
-        ]
-      }
-    },
-    "/api/timeline/sequence": {
-      "post": {
-        "description": "Switch which sequence this client is watching.\n\nEach sequence keeps its own index, so switching back resumes where it was.\nAn unknown name is a 422 naming the valid ones, not a quiet no-op.",
-        "operationId": "timeline_set_sequence",
-        "parameters": [
-          {
-            "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
-            "in": "query",
-            "name": "client_id",
-            "required": true,
-            "schema": {
-              "description": "The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts.",
-              "pattern": "^\\d{1,20}$",
-              "title": "Client Id",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SequenceSelection"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommandAck"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Set Sequence",
-        "tags": [
-          "timeline"
-        ]
-      }
-    },
     "/healthz": {
       "get": {
         "description": "Liveness probe for Docker/k8s, and the compose healthcheck. Cheap and\nside-effect-free: the server has no external dependencies, so \"the process is\nup and serving\" is the whole health story \u2014 there is nothing a separate\nreadiness probe could usefully check. Deliberately at the root rather than\nunder /api: it is the process's health, not any one app's.",
@@ -1940,10 +1630,6 @@
     }
   },
   "tags": [
-    {
-      "description": "Scaffold demo: a scrolling number sequence with playback controls.",
-      "name": "timeline"
-    },
     {
       "description": "Scaffold demo: replays sample PMU records line by line.",
       "name": "pmu-test-streamer"
@@ -1974,14 +1660,6 @@
     }
   ],
   "x-websocket-channels": [
-    {
-      "app": "timeline",
-      "direction": "server-to-client",
-      "message": {
-        "$ref": "#/components/schemas/TimelineState"
-      },
-      "path": "/api/timeline/ws"
-    },
     {
       "app": "pmu-test-streamer",
       "direction": "server-to-client",

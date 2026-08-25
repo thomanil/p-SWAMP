@@ -2,19 +2,19 @@
 # state server, with the web client baked in and served from the same origin).
 #
 # Single replica on purpose: the server holds per-client state in memory and
-# runs one ticker for everyone (see src/timeline/api.py), so it must never be
-# scaled past 1 — a second pod would have its own independent state and the
-# Service would split clients across them. The strategy is Recreate (not the
+# runs one ticker for everyone (see src/pmu_test_streamer/api.py), so it must
+# never be scaled past 1 — a second pod would have its own independent state and
+# the Service would split clients across them. The strategy is Recreate (not the
 # default RollingUpdate) so the old pod is gone before the new one serves, for
 # the same reason.
 #
-# Nothing is persisted: no DB, no volumes. A rollout resets every client's
-# timeline, which is the expected behavior for this stateless deployment.
+# Nothing is persisted: no DB, no volumes. A rollout resets every client's state,
+# which is the expected behavior for this stateless deployment.
 #
 # Apply with scripts/start-pswamp-in-local-minikube-cluster.sh, which builds the image straight into
 # minikube and forces a rollout. Clients reach this over the NodePort at
-# ws://<minikube-ip>:30081/api/timeline/ws (and the web client is served from the
-# same port).
+# ws://<minikube-ip>:30080/api/time-window/ws (and the web client is served from
+# the same port).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -112,4 +112,4 @@ spec:
       protocol: TCP
       port: 8000        # cluster-internal Service port
       targetPort: 8000  # container port
-      nodePort: 30081   # fixed external port (valid range 30000-32767)
+      nodePort: 30080   # fixed external port (valid range 30000-32767)

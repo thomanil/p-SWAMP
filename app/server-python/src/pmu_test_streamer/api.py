@@ -1,17 +1,15 @@
 """The PMU test streamer's backend: WebSocket api, per-client position, ticker.
 
-Streams sample grid records line by line. Structurally the twin of
-src/timeline/api.py — same message shape, same command endpoints, same per-client
-state keyed by an integer seed — differing only in what is being streamed and that
-there is nothing to pick (no set_sequence: one data file, one stream).
+Streams sample grid records line by line, keeping per-client state keyed by the
+client id. There is nothing to pick: one data file, one stream.
 
-Commands come up over REST and state goes down over the socket, exactly as they
-do there; the reasoning is in that module's docstring and in AGENTS.md.
+Commands come up over REST and state goes down over the socket; the reasoning is
+in AGENTS.md and doc/the-client-server-api.md.
 
 server.py mounts this `router` under /api/pmu-test-streamer, so the endpoint below
 is reachable at /api/pmu-test-streamer/ws. Nothing here knows about that prefix.
 
-Like the timeline, all state is in memory and dies with the process, and everything
+All state is in memory and dies with the process, and everything
 runs on the one asyncio event loop — the WS handlers, the request handlers, the
 ticker, and broadcasts are cooperatively scheduled and never truly parallel, so no
 locking is needed.
@@ -77,7 +75,8 @@ class PmuStreamState(BaseModel):
     """The single message shape pushed to a client on connect and every change.
 
     A declared model rather than a loose dict, because this IS the downstream half
-    of the published contract — see the note on `timeline.TimelineState`.
+    of the published contract: api_contract.py collects it via this package's
+    WS_MESSAGE export, and a bare dict would silently drop the app out of it.
 
     `total_lines` lets the client show "record N of M" — which is also how the
     wrap-around at the end of the file becomes visible in the UI.
@@ -191,8 +190,8 @@ async def lifespan(app: FastAPI):
 
 # --- REST commands ----------------------------------------------------------
 #
-# One POST per operation. Same shape as the timeline's, minus the sequence picker;
-# see that module for why the upstream half is HTTP and the downstream half is not.
+# One POST per operation; see doc/the-client-server-api.md for why the upstream
+# half is HTTP and the downstream half is not.
 #
 # Paths are relative to wherever server.py mounts this router
 # (/api/pmu-test-streamer), so "/playback/play" is served as

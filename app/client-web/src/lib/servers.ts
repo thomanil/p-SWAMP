@@ -24,7 +24,6 @@ import { BASE_PATH } from '@/lib/basePath'
 // own /api/<app> prefix (see APPS in app/server-python/src/server.py), so these
 // paths are the client-side half of that contract — one const per app, rather
 // than a literal repeated across the hooks that connect.
-export const TIMELINE_WS_PATH = '/api/timeline/ws'
 export const PMU_STREAM_WS_PATH = '/api/pmu-test-streamer/ws'
 export const APP_STATUS_WS_PATH = '/api/app-status/ws'
 export const TIME_WINDOW_WS_PATH = '/api/time-window/ws'
@@ -34,8 +33,7 @@ export const LINE_OUTAGE_WS_PATH = '/api/line-outage/ws'
 
 // Each app's REST prefix — where its commands are POSTed. Same value as the app's
 // mount prefix in APPS (app/server-python/src/server.py); an endpoint path is
-// appended by the caller, e.g. `${TIMELINE_API_PATH}/playback/play`.
-export const TIMELINE_API_PATH = '/api/timeline'
+// appended by the caller, e.g. `${PMU_STREAM_API_PATH}/playback/play`.
 export const PMU_STREAM_API_PATH = '/api/pmu-test-streamer'
 export const TIME_WINDOW_API_PATH = '/api/time-window'
 export const ISLANDING_API_PATH = '/api/islanding'

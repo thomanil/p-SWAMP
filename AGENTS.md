@@ -32,13 +32,13 @@ does not change, and "The p-SWAMP web layer" for the code itself.
 otherwise. The desktop package at the repo root has its own manifest and is
 covered by neither these conventions nor `error_check.sh` — see the next section.
 
-The web stack ships three things. The **grid monitor** at `/` is the real one: a
+The web stack ships two things. The **grid monitor** at `/` is the real one: a
 dashboard of panels — measurements, islanding, alarms, phasors, application
 status — over a recorded Nordic 44 PMU stream replayed through p-SWAMP's own
-monitoring applications. Beside it sit two deliberately trivial scaffold demos, a
-PMU record streamer and a scrolling-number timeline with playback controls (back /
-play / stop / forward); they predate the monitor, exist to keep the "adding a
-page" path honest, and are what `scripts/generate-new-subapp.sh` clones.
+monitoring applications. Beside it sits one deliberately trivial scaffold demo, a
+PMU record streamer with playback controls (back / play / stop / forward); it
+predates the monitor, exists to keep the "adding a page" path honest, and is
+what `scripts/generate-new-subapp.sh` clones.
 
 **The client-server stack is stateless on purpose.** There is no database and no
 persistent volume anywhere under `app/` or `k8s/`. Don't reintroduce one without
@@ -116,10 +116,10 @@ Two deployables, one wire protocol:
   **`src/pswamp_web/`** — see "The p-SWAMP web layer" below; it is a package of
   packages, contributing six entries to `APPS` plus the pipeline registry
   service.
-  Beside it sit the two scaffold demos:
-  **`src/timeline/`** and **`src/pmu_test_streamer/`**, each with `api.py` (WS
-  endpoint, per-client state, ticker, logging) and `model.py` (the pure domain
-  model), which `api.py` imports **relatively** (`from .model import ...`).
+  Beside it sits the one scaffold demo: **`src/pmu_test_streamer/`**, with
+  `api.py` (WS endpoint, per-client state, ticker, logging) and `model.py` (the
+  pure domain model), which `api.py` imports **relatively**
+  (`from .model import ...`).
   The streamer's `model.py` also owns its `sample_data.txt` (read once at import,
   one record per line): a **one-off sample committed for testing** — 300
   *simulated* PMU records extracted by hand from the Nordic 44 simulation that now
@@ -130,15 +130,15 @@ Two deployables, one wire protocol:
   runs the desktop package's code; the streamer does not, and should not start.)
   Don't add tooling or deps to regenerate it unless asked;
   replacing it is a file swap, since no code parses the contents. **`src/shared.py`** holds the
-  domain-free helpers both packages use — `ConnectionManager` and
+  domain-free helpers the app packages use — `ConnectionManager` and
   `make_logger(name)`; it is *not* an app package and never appears in `APPS`.
   Note the spelling split: a package dir must be a Python identifier
   (`pmu_test_streamer`) while its URL prefix is hyphenated to match the page route
   (`/api/pmu-test-streamer`). The image mirrors the **repo root** —
   `<repo>/` → `/workspace/p-SWAMP`, so this directory lands at
   `/workspace/p-SWAMP/app/server-python` with `WORKDIR …/src`, and `server.py`,
-  `server:app` and `import timeline` all resolve off the working directory. The
-  depth is not cosmetic: it is what makes `../../` in `[tool.uv.sources]` mean the
+  `server:app` and `import pmu_test_streamer` all resolve off the working
+  directory. The depth is not cosmetic: it is what makes `../../` in `[tool.uv.sources]` mean the
   same thing on a laptop and in the image (uv refuses to normalise a relative path
   above its base directory). Everything under `src/` shares the one
   `pyproject.toml` + `uv.lock` one level up.
@@ -167,24 +167,23 @@ Two deployables, one wire protocol:
   copies of them. Its
   subfolders are named after those routes, so the client↔server mirror holds one
   level down: `grid-monitor/time-window/` ↔ `/api/time-window` ↔
-  `pswamp_web/time_window/`. `/pmu-test-streamer` (`PmuTestStreamerPage`) and
-  `/timeline` (`TimelinePage`) remain standalone scaffold demos — thin players
-  over a WebSocket, where the connection half lives once in
-  `src/hooks/useServerSocket.ts` and each app adds only its snake_case →
-  camelCase mapping (`useTimelineSocket`, `usePmuStreamSocket`). See "Adding a
+  `pswamp_web/time_window/`. `/pmu-test-streamer` (`PmuTestStreamerPage`) remains
+  a standalone scaffold demo — a thin player over a WebSocket, where the
+  connection half lives once in `src/hooks/useServerSocket.ts` and the app adds
+  only its snake_case → camelCase mapping (`usePmuStreamSocket`). See "Adding a
   p-SWAMP view" and "Adding a page" below.
 
 Key invariants to preserve:
 
 - **State is per-client and in-memory only.** Each browser has one random integer
   id, persisted in `localStorage` and sent as `?client_id=` on every WebSocket URL;
-  the server keeps one `TimelineModel` + play flag per id in
+  the server keeps one `PmuStreamModel` + play flag per id in
   `states: dict[int, ClientState]` (never evicted — a bounded, acceptable leak
   here, since the value is an integer and not a pipeline). That dict is the only
   store: nothing is persisted, so a process/pod restart resets every client to the
-  start of the timeline. That reset is expected behavior, not a bug. Note the id
+  start of the stream. That reset is expected behavior, not a bug. Note the id
   became stable per browser rather than per page mount when the grid monitor
-  needed it to be, so these demos now resume across a reload too — not only across
+  needed it to be, so the demo now resumes across a reload too — not only across
   a socket-level reconnect.
 - **…and so is the grid data: one PMU pipeline per client.** The `pswamp_web/`
   pages give each client its own replay, its own measurement window, its own
@@ -283,8 +282,8 @@ Key invariants to preserve:
   the root, not under `/api`: it is the process's health, not any one app's.
 - **Every api lives under `/api/<app>/`.** The prefix comes from `APPS` in
   `server.py`, not from the package, so a router declares plain paths (`"/ws"`,
-  `"/playback/play"`) and is reachable at `/api/timeline/ws`. Keep the prefix
-  aligned with the web client's route for the same app. `/api` is also the only
+  `"/playback/play"`) and is reachable at `/api/pmu-test-streamer/ws`. Keep the
+  prefix aligned with the web client's route for the same app. `/api` is also the only
   thing the Vite dev proxy forwards, so an endpoint outside it won't reach the
   backend in dev. The `include_router` loop tags each app with its own url name,
   so the generated api description groups a package's operations together for
@@ -312,8 +311,8 @@ Key invariants to preserve:
   invariants it rests on, both spelled out in that file: built chunks stay under
   `assets/` (Vite's default, and what `SPAStaticFiles` special-cases), and
   **routes stay one segment deep** — `base: './'` makes asset urls resolve against
-  the current document's directory, so `/prefix/timeline/detail` would look for
-  `/prefix/timeline/assets/…`. Nested routes would mean switching to a build-time
+  the current document's directory, so `/prefix/phasors/detail` would look for
+  `/prefix/phasors/assets/…`. Nested routes would mean switching to a build-time
   `--base` or a server-injected `<base href>`.
 
 ## The p-SWAMP web layer
@@ -583,8 +582,8 @@ Dockerfile/compose change (both copy `src/` wholesale and watch the directory):
    package's public surface, at most three names — `router` (an `APIRouter`);
    `WS_MESSAGE` (the pydantic model it pushes down its socket), if it has one; and
    `lifespan` (an `asynccontextmanager`), only if it needs startup/shutdown work.
-   Copy `src/timeline/__init__.py`. Use **relative** imports inside the package
-   (`from .model import ...`).
+   Copy `src/pmu_test_streamer/__init__.py`. Use **relative** imports inside the
+   package (`from .model import ...`).
 2. Add one `("/api/<app>", <app>)` entry to `APPS` in `src/server.py`, with the
    matching `import <app>`.
 
@@ -602,9 +601,8 @@ of the contract, the page keeps working, and nothing says the type safety is gon
 because `json.dumps` emits bare `NaN`, which `JSON.parse` rejects). An app with no
 socket — `pswamp_web/grid/` — just omits the name.
 
-`src/pmu_test_streamer/` is the one to copy: it is the same player shape as the
-timeline minus the sequence picker, and shows how a package ships a **data file**
-beside its code (`Path(__file__).parent / "sample_data.txt"`, read once at import —
+`src/pmu_test_streamer/` is the one to copy: a minimal player, and it shows how a
+package ships a **data file** beside its code (`Path(__file__).parent / "sample_data.txt"`, read once at import —
 no Dockerfile change needed, since `COPY src/ ./src/` takes the whole tree). Put
 anything a second app would otherwise duplicate in `src/shared.py`; the per-app
 `states` dict, `state_message`, `ticker`, and command dispatch deliberately stay
@@ -766,7 +764,7 @@ Deploy / test the real artifact:
 checks the committed api contract still matches the code (`NO_CHECK=1` skips
 that), builds the image straight from your working tree into minikube, opens the
 web client once `/healthz` answers (`NO_BROWSER=1` skips that), then tails the
-pod's logs until Ctrl-C (`NO_LOGS=1` skips that). NodePort is 30081.
+pod's logs until Ctrl-C (`NO_LOGS=1` skips that). NodePort is 30080.
 
 **Why that contract preflight is here and not left to `error_check.sh`:** it is
 the one staleness this path cannot otherwise catch. The image build runs `tsc -b`,
@@ -794,14 +792,14 @@ identical from the browser.
 
 **The NodePort is only reachable on Linux.** With the `docker` driver — the default
 everywhere — the node is a container on a bridge network. Linux routes to that
-bridge directly, so `http://$(minikube ip):30081` works; on **macOS and Windows**
+bridge directly, so `http://$(minikube ip):30080` works; on **macOS and Windows**
 docker runs the bridge inside its own Linux VM and the host has no route to it, so
 that address hangs on connect while the pod is perfectly healthy. This is a
 host-networking gap, not a deploy failure — `kubectl get pods` shows Running and an
 in-pod `curl localhost:8000/healthz` answers.
 The script handles it by **probing the NodePort for ~8s and, if nothing answers,
-starting `kubectl port-forward service/p-swamp 30081:8000` and switching every URL
-it prints to `http://127.0.0.1:30081`** — so the browser, the WebSocket and the
+starting `kubectl port-forward service/p-swamp 30080:8000` and switching every URL
+it prints to `http://127.0.0.1:30080`** — so the browser, the WebSocket and the
 health check all behave the same on both platforms. Consequences worth keeping in
 mind when editing that script:
 
@@ -901,15 +899,14 @@ in this repo touches a remote cluster**, and CI does not deploy either.
   the project entry in `environ/development/users.yaml`, which lives in *another*
   repo, so that entry has to say `rndp-p-swamp` before an apply here can succeed;
   applying into a namespace that does not exist is rejected outright.
-- **The minikube NodePort is 30081**, not the usual 30080. It and the Deployment
-  name have to stay distinct from an older `timeline-server` sandbox whose resources
-  still live in the same local minikube cluster: a shared Deployment name means each
-  deploy silently overwrites the other's, and a shared nodePort makes the second
-  Service fail to allocate outright. Renaming a Deployment does **not** remove the
-  old objects either — `kubectl apply` creates the new name alongside the old, and
-  the stale Service keeps its nodePort claimed until deleted by name. (The Python
-  module names — `server.py`, `timeline/` — are internal to the image and collide
-  with nothing.)
+- **The minikube NodePort is 30080**, set in `k8s/p-swamp-local.yaml` and
+  repeated as `NODE_PORT` in `start-pswamp-in-local-minikube-cluster.sh`; keep
+  the two in sync. It assumes p-swamp is the only thing claiming that port in the
+  local cluster. If another Deployment ever shares this cluster, note that
+  `kubectl apply` under a new name creates objects *alongside* the old ones rather
+  than replacing them, and a stale Service keeps its nodePort claimed until it is
+  deleted by name. (The Python module names — `server.py`, `pmu_test_streamer/` —
+  are internal to the image and collide with nothing.)
 - **Scripts must run on bash 3.2.** They all start `#!/usr/bin/env bash`, but
   macOS still ships **bash 3.2** as `/bin/bash` (GPLv3 licensing), so a bash-4+
   builtin is a portability bug that only shows up on a Mac. `mapfile`/`readarray`

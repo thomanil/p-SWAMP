@@ -10,7 +10,7 @@
 [project]
 name = "pswamp-server"
 version = "0.1.0"
-description = "P-SWAMP state server: WebSocket timeline backend."
+description = "P-SWAMP state server: WebSocket backend for the web client."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.141.1,<0.142",
@@ -52,13 +52,13 @@ dev = ["ruff==0.16.4"]
 
 # Not an installable package: src/ is a plain source folder that the process runs
 # from, not a packaging layout. src/server.py is the one entrypoint and imports
-# each app package by name (`import timeline`), which resolves because the working
-# directory is src/ — locally via `uv run src/server.py`, and in the image via
-# WORKDIR /app/src. Inside an app package the modules use relative imports
-# (timeline/api.py does `from .model import ...`), so a package can be moved or
-# renamed without touching its internals. uv manages the dependencies and the venv
-# only — it builds no wheel — so adding a backend api is just a new folder under
-# src/, with no manifest change.
+# each app package by name (`import pmu_test_streamer`), which resolves because
+# the working directory is src/ — locally via `uv run src/server.py`, and in the
+# image via WORKDIR /app/src. Inside an app package the modules use relative
+# imports (pmu_test_streamer/api.py does `from .model import ...`), so a package
+# can be moved or renamed without touching its internals. uv manages the
+# dependencies and the venv only — it builds no wheel — so adding a backend api
+# is just a new folder under src/, with no manifest change.
 #
 # Deliberately no [tool.ruff] section: ruff treats a pyproject.toml as config only
 # when one is present, and the explicit `--select E,F` in scripts/error_check.sh is

@@ -4,7 +4,7 @@
 # root-level one — and this repo has neither at the root (they live under
 # app/server-python/). Without the prefix all three lines silently matched nothing:
 # the 67MB venv was shipped to the daemon on every build, and src/__pycache__ +
-# src/timeline/__pycache__ were copied into the image, carrying stale bytecode for
+# src/<app>/__pycache__ were copied into the image, carrying stale bytecode for
 # modules that no longer exist. Verified by building a probe image that COPYs the
 # whole context and lists it.
 **/__pycache__/

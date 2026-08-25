@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the timeline state server for local dev.
+# Start the p-SWAMP state server for local dev.
 #
 # This is the stable entrypoint for "run the server" — the dev workflow stays
 # the same even if the implementation changes. Today it's a containerized

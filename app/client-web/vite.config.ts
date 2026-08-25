@@ -24,7 +24,7 @@ export default defineConfig({
   // The whole /api prefix, not one endpoint: every backend app package is mounted
   // under it (see APPS in app/server-python/src/server.py), so a new api needs no
   // change here. An http:// target with `ws: true` carries both plain requests and
-  // WebSocket upgrades — /api/timeline/ws is a socket, later apis may not be.
+  // WebSocket upgrades — /api/phasors/ws is a socket, /api/grid/model is not.
   server: {
     proxy: {
       '/api': { target: 'http://localhost:8000', ws: true },

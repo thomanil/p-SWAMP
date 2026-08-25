@@ -14,7 +14,7 @@
 // already carries the answer:
 //
 //   https://host/p-swamp/assets/index-a1b2c3.js  →  '/p-swamp'
-//   http://localhost:30081/assets/index-a1b2c3.js                 →  ''
+//   http://localhost:30080/assets/index-a1b2c3.js                 →  ''
 //
 // Under `npm run dev` there is no build and no assets/ dir — the url is
 // `/src/lib/basePath.ts` — so the marker is absent and we fall through to '',
@@ -26,9 +26,9 @@
 //      same prefix `SPAStaticFiles` in server.py special-cases). Changing it
 //      means changing the marker below.
 //   2. **Routes stay one segment deep.** Relative asset urls resolve against the
-//      directory of the current document, so `/prefix/timeline` resolves
+//      directory of the current document, so `/prefix/phasors` resolves
 //      `./assets/x.js` to `/prefix/assets/x.js` — right. A nested route like
-//      `/prefix/timeline/detail` would resolve it to `/prefix/timeline/assets/…`
+//      `/prefix/phasors/detail` would resolve it to `/prefix/phasors/assets/…`
 //      — wrong. If nested routes are ever needed, this approach has to be
 //      replaced by a build-time `--base` or a server-injected `<base href>`.
 

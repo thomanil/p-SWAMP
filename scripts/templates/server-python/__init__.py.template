@@ -12,7 +12,7 @@ the web client's TypeScript is generated. Nothing to register anywhere; exportin
 the name is the whole of it.
 
 Add a `lifespan` asynccontextmanager here too if this app ever needs
-startup/shutdown work — see src/timeline/__init__.py.
+startup/shutdown work — see src/pmu_test_streamer/__init__.py.
 """
 
 from .api import __NAME__State, router

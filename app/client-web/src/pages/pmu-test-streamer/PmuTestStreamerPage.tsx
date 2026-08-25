@@ -22,9 +22,9 @@ import {
 } from '@/components/ui/card'
 
 /**
- * The PMU test streamer page (route `/pmu-test-streamer`) — the timeline player's
- * sibling, streaming sample grid records line by line instead of a number
- * sequence. A thin renderer over usePmuStreamSocket: it draws the server-pushed
+ * The PMU test streamer page (route `/pmu-test-streamer`) — a scaffold demo
+ * streaming sample grid records line by line. A thin renderer over
+ * usePmuStreamSocket: it draws the server-pushed
  * window of records, offers the transport controls, and shows a status banner
  * (disabling controls) whenever it isn't connected.
  *
@@ -58,7 +58,7 @@ export function PmuTestStreamerPage() {
 
       <CardContent className="px-6 py-0">
         {/* The record window, or the status banner in its place when not
-            connected — same treatment as the timeline page. */}
+            connected. */}
         {connected && state ? (
           <StreamWindow window={state.window} />
         ) : (
@@ -85,7 +85,7 @@ export function PmuTestStreamerPage() {
           </span>
         </div>
 
-        {/* Transport controls — disabled until connected, like the timeline. */}
+        {/* Transport controls — disabled until connected. */}
         <div className="flex items-center justify-center gap-2">
           <Button
             variant="outline"

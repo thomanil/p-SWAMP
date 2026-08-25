@@ -21,15 +21,15 @@ export type PmuStreamState = {
 type PmuStreamMessage = Wire['PmuStreamState']
 
 /** Fire a command and carry on; a failure is logged and nothing else happens.
- *  See the same helper in useTimelineSocket for why that is the right default. */
+ *  A command that did not land produces no state change, which is what the user
+ *  already sees. */
 function fire(promise: Promise<void>): void {
   promise.catch((error) => console.error('pmu-test-streamer command failed', error))
 }
 
 /**
- * The PMU test streamer — the twin of useTimelineSocket, minus the sequence
- * picker: state arrives on the socket, commands go up as POSTs to
- * /api/pmu-test-streamer.
+ * The PMU test streamer: state arrives on the socket, commands go up as POSTs
+ * to /api/pmu-test-streamer.
  */
 export function usePmuStreamSocket() {
   const { message, status, connected } = useServerSocket<PmuStreamMessage>(PMU_STREAM_WS_PATH)

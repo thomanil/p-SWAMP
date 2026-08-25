@@ -91,14 +91,12 @@ kubectl rollout restart deployment/p-swamp
 kubectl rollout status deployment/p-swamp --timeout=120s
 
 # --- Reach the Service ------------------------------------------------------
-# 30081, not the usual 30080: an older timeline-server sandbox still lives in the
-# same local cluster, and two Services can't share a nodePort. Keep it in sync
-# with k8s/p-swamp-local.yaml.
+# The nodePort is fixed at 30080 and must stay in sync with k8s/p-swamp-local.yaml.
 #
 # `rollout status` above only waits for the pod; the Service's nodePort can take
 # a moment longer to route, so poll /healthz before announcing a URL.
 MINIKUBE_IP="$(minikube ip)"
-NODE_PORT=30081
+NODE_PORT=30080
 BASE_URL="http://${MINIKUBE_IP}:${NODE_PORT}"
 
 # $1 = base url, $2 = attempts. Prints a dot per attempt and always closes the
@@ -156,7 +154,7 @@ fi
 WS_HOST="${BASE_URL#http://}"
 echo
 echo "p-swamp is up. Point the client's 'Local minikube' entry at:"
-echo "    ws://${WS_HOST}/api/timeline/ws"
+echo "    ws://${WS_HOST}/api/time-window/ws"
 echo
 echo "Web client:    ${BASE_URL}/"
 echo "API docs:      ${BASE_URL}/docs  (ReDoc at /redoc, raw document at /openapi.json)"

@@ -201,21 +201,20 @@ backend is one process that routes each api to its own package. One deployable
 serves all of it from one origin, so there is nothing per-page to deploy or
 configure.
 
-One real application and two scaffold demos:
+One real application and one scaffold demo:
 
 | Page URL | Api | What                                              |
 |---|---|---------------------------------------------------|
 | `/` (grid monitor) | `/api/time-window/ws`, `/api/islanding/ws`, `/api/phasors/ws`, `/api/app-status/ws`, `/api/grid/model` | Dashboard of panels over a recorded Nordic 44 PMU stream replayed through p-SWAMP's monitoring applications |
 | `/time-window`, `/phasors`, `/islanding`, `/app-status` | as above | The same panel components, full-size — focused views, not copies |
 | `/pmu-test-streamer` | `/api/pmu-test-streamer/ws` | Streams a canned sample of simulated PMU records line by line |
-| `/timeline` | `/api/timeline/ws` | Scrolling-number timeline with playback controls  |
 
 The Api column lists the *sockets* a page opens, which is where its state comes
 from. A page with controls also POSTs commands to its app's prefix — see "The api
 between client and backend" below.
 
-The grid monitor is the real one; the last two are scaffold demos that predate it
-and are what `generate-new-subapp.sh` clones. A new *p-SWAMP* view is a panel in
+The grid monitor is the real one; the last is a scaffold demo that predates it
+and is what `generate-new-subapp.sh` clones. A new *p-SWAMP* view is a panel in
 the monitor rather than a new page — see "Adding a p-SWAMP view" in `AGENTS.md`.
 
 
@@ -242,12 +241,12 @@ Layout under `app/client-web/src/`:
 
 ```
 pages/            one FOLDER per page — the thing you add
-  timeline/
-    TimelinePage.tsx       the page itself
-    useTimelineSocket.ts   its websocket hook
-    TimelineWindow.tsx     its view
   pmu-test-streamer/
-    PmuTestStreamerPage.tsx, usePmuStreamSocket.ts, StreamWindow.tsx
+    PmuTestStreamerPage.tsx  the page itself
+    usePmuStreamSocket.ts    its websocket hook
+    StreamWindow.tsx         its view
+  grid-monitor/
+    GridMonitorPage.tsx, plus one folder per panel
 App.tsx           the route table: which URL renders which page
 components/       shared across pages only
   AppLayout.tsx   nav bar + shell every page renders inside
@@ -283,14 +282,13 @@ Same idea, one folder per api. Layout under `app/server-python/src/`:
 server.py         the one entrypoint: which URL prefix goes to which package,
                   plus /healthz and serving the web client. No app logic here.
 shared.py         helpers the packages share. Not an api itself.
-timeline/         one package per api — the thing you add
+pmu_test_streamer/  one package per api — the thing you add
   __init__.py     what the package exposes: router (+ lifespan if it needs one)
   api.py          the endpoints (here: the /ws websocket)
   model.py        the app's own domain logic
-pmu_test_streamer/
-  __init__.py, api.py, model.py
   sample_data.txt  the streamed records — 300 lines of *simulated* PMU data
                    from the Nordic 44 sim, committed as a static test fixture
+pswamp_web/       the p-SWAMP web layer: a package of page packages
 ```
 
 **To add an api**, two small edits (again, both done by
@@ -300,8 +298,8 @@ pmu_test_streamer/
    `router`, plus `lifespan` if it needs to run something in the background.
 2. In `src/server.py`, add one line to `APPS`: `("/api/my-thing", my_thing)`.
 
-Everything the package declares is then served under that prefix — the timeline's
-`"/ws"` endpoint becomes `/api/timeline/ws`. Endpoints all live under `/api/`,
+Everything the package declares is then served under that prefix — the streamer's
+`"/ws"` endpoint becomes `/api/pmu-test-streamer/ws`. Endpoints all live under `/api/`,
 which keeps them clear of the page URLs and is what the dev setup forwards to the
 backend. Note the folder name is `my_thing` (underscores — Python has to import it)
 while the URL is `my-thing`, matching the page route.
@@ -328,8 +326,7 @@ Everything a user can trigger is a `POST` under the same `/api/<app>` prefix, on
 url per operation:
 
 ```
-POST /api/timeline/playback/play?client_id=…
-POST /api/timeline/sequence?client_id=…            {"name": "Fibonacci"}
+POST /api/pmu-test-streamer/playback/play?client_id=…
 POST /api/islanding/alarms/<uuid>/acknowledge?client_id=…
 POST /api/time-window/selection?client_id=…        {"channels": [5, 9]}
 ```

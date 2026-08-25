@@ -10,7 +10,7 @@
  * message shapes — those reach the document through the `x-websocket-channels`
  * extension, since OpenAPI itself has no notion of a socket. So a page hook says:
  *
- *     type TimelineMessage = Wire['TimelineState']
+ *     type PmuStreamMessage = Wire['PmuStreamState']
  *
  * instead of hand-copying the Python model's fields into TypeScript and hoping
  * the two stay in step. They are snake_case, as the server sends them; each hook

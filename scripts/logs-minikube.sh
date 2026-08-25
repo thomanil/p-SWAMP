@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Follow the timeline state server's logs from the minikube deployment.
+# Follow the p-SWAMP state server's logs from the minikube deployment.
 #
 # This is the stable entrypoint for "tail the server logs in k8s" — the rough
 # equivalent of `docker compose logs -f` for the minikube path. The server logs

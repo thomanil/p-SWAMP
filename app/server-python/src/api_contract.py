@@ -27,8 +27,8 @@ How a package joins the contract
 By exporting a name. `server.py` already discovers optional package features with
 `getattr(module, "lifespan", None)`; socket messages work the same way::
 
-    # timeline/__init__.py
-    WS_MESSAGE = TimelineState
+    # pmu_test_streamer/__init__.py
+    WS_MESSAGE = PmuStreamState
 
 `ws_channels` walks the very `APPS` list `server.py` mounts and picks up whatever
 each package exports under that name. There is no second registry to keep in
@@ -94,9 +94,10 @@ notion of a socket.
 
 **The first path segment after `/api/` is the routing key.** The server itself
 holds no domain logic: it mounts one self-contained backend package under each
-`/api/<app>` prefix, so `/api/timeline/...` is served by `src/timeline/`,
-`/api/time-window/...` by `src/pswamp_web/time_window/`, and so on for every tag
-listed below — the paths a package declares are relative to its own prefix.
+`/api/<app>` prefix, so `/api/pmu-test-streamer/...` is served by
+`src/pmu_test_streamer/`, `/api/time-window/...` by
+`src/pswamp_web/time_window/`, and so on for every tag listed below — the paths
+a package declares are relative to its own prefix.
 `/healthz` sits outside `/api` because it is the process's health rather than any
 one app's, and everything else is the built web client, served from the same
 origin with unknown paths falling back to its `index.html` so deep links work.
@@ -114,7 +115,6 @@ This document is generated from the server and committed at `doc/api/openapi.jso
 # the tag `server.py` applies). Purely descriptive: a missing entry costs nothing
 # but an untagged-looking group in Swagger UI.
 TAG_DESCRIPTIONS = {
-    "timeline": "Scaffold demo: a scrolling number sequence with playback controls.",
     "pmu-test-streamer": "Scaffold demo: replays sample PMU records line by line.",
     "app-status": "Health and status of the running p-SWAMP monitoring applications.",
     "grid": "The static Nordic 44 topology. HTTP only — no socket.",

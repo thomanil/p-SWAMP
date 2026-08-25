@@ -9,8 +9,8 @@ This module deliberately owns no domain logic. It does four things:
      origin as the api, so one image and one Service serve both.
 
 Each app under src/<app>/ is a self-contained package exposing `router` and
-optionally `lifespan` (see src/timeline/__init__.py). Adding a backend api is one
-new package plus one line in APPS; nothing else in this file changes.
+optionally `lifespan` (see src/pmu_test_streamer/__init__.py). Adding a backend
+api is one new package plus one line in APPS; nothing else in this file changes.
 
 The server is entirely stateless in the persistence sense: there is no database
 and nothing is written to disk. All state lives in the app packages' memory and is
@@ -39,7 +39,6 @@ import pswamp_web.islanding
 import pswamp_web.line_outage
 import pswamp_web.phasors
 import pswamp_web.time_window
-import timeline
 
 # --- shared services --------------------------------------------------------
 #
@@ -58,16 +57,15 @@ SERVICES = [pswamp_web]
 #
 # (url prefix, app package). One entry per backend api. The prefix namespaces
 # each package's endpoints, so several apps can each have a "ws" or a "status"
-# without colliding — the timeline's "/ws" is served as /api/timeline/ws. Keep the
-# prefix aligned with the web client's route for the same app so the two halves
-# read the same. Note that only the URL is hyphenated: the package must be a valid
-# Python identifier, hence pmu_test_streamer → /api/pmu-test-streamer.
+# without colliding — the streamer's "/ws" is served as /api/pmu-test-streamer/ws.
+# Keep the prefix aligned with the web client's route for the same app so the two
+# halves read the same. Note that only the URL is hyphenated: the package must be
+# a valid Python identifier, hence pmu_test_streamer → /api/pmu-test-streamer.
 #
 # src/shared.py is NOT an app package and never appears here — it holds the
 # domain-free helpers the packages import (see its docstring).
 
 APPS = [
-    ("/api/timeline", timeline),
     ("/api/pmu-test-streamer", pmu_test_streamer),
     ("/api/app-status", pswamp_web.app_status),
     ("/api/grid", pswamp_web.grid),
@@ -82,10 +80,10 @@ APPS = [
 async def lifespan(app: FastAPI):
     """Run every app package's own lifespan for as long as the process is up.
 
-    An app package may need startup/shutdown work — the timeline runs its
-    playback ticker task that way. AsyncExitStack composes however many there are
-    into this one context, and unwinds them in reverse on shutdown, so no package
-    has to know about any other. `lifespan` is optional: a package with only
+    An app package may need startup/shutdown work — the PMU test streamer runs
+    its playback ticker task that way. AsyncExitStack composes however many there
+    are into this one context, and unwinds them in reverse on shutdown, so no
+    package has to know about any other. `lifespan` is optional: a package with only
     request handlers just omits it.
     """
     async with AsyncExitStack() as stack:

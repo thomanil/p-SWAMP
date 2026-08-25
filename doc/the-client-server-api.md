@@ -32,7 +32,7 @@ client never reconciles the order of two.
    page component                            FastAPI app  (src/server.py)
         │  onClick                                │
         ▼                                         │  routers mounted per app
-   page hook  (useTimelineSocket)                 │  under /api/<app>
+   page hook  (usePmuStreamSocket)                 │  under /api/<app>
         │                                         │
         ├──► postCommand() ──── POST ─────────────┼──► command endpoint
         │    lib/commands.ts   ?client_id=…       │      mutates that client's state
@@ -76,7 +76,7 @@ document, and adds the socket half OpenAPI has no notion of.
         ▼
    app/client-web/src/api/schema.ts               generated, committed
         │
-        ├──► src/api/wire.ts      →  Wire['TimelineState']  in each page hook
+        ├──► src/api/wire.ts      →  Wire['PmuStreamState']  in each page hook
         └──► src/lib/commands.ts  →  postCommand, typed against the paths
 ```
 
@@ -106,7 +106,7 @@ Write it in that app's `api.py`. Give every operation its own url; never build o
 endpoint that takes an action name:
 
 ```python
-@router.post("/playback/pause", operation_id="timeline_pause")
+@router.post("/playback/pause", operation_id="pmu_test_streamer_pause")
 async def pause(client_id: ClientId) -> CommandAck:
     """One line saying what it does — this becomes the description in /docs."""
     ...
@@ -119,7 +119,7 @@ async def pause(client_id: ClientId) -> CommandAck:
 - **Import `ClientId` and `CommandAck`** from `shared` in a standalone app, or
   from `..wire` inside `pswamp_web/`, which may not import the rest of the backend.
 - **Taking a body?** Declare a pydantic model in the same file and take it as a
-  parameter — `body: SequenceSelection`. FastAPI then rejects a malformed command
+  parameter — `body: ChannelSelection`. FastAPI then rejects a malformed command
   with a 422 before your handler runs.
 - **Never return the new state.** `CommandAck` only; state goes down the socket.
 
@@ -128,7 +128,7 @@ the build:
 
 ```ts
 const pause = useCallback(
-  () => fire(postCommand(`${TIMELINE_API_PATH}/playback/pause`)),
+  () => fire(postCommand(`${PMU_STREAM_API_PATH}/playback/pause`)),
   [],
 )
 ```
@@ -263,7 +263,8 @@ Which subapp a request belongs to
 ==
 
 The contract follows the code's own organisation. Every operation carries its
-app's url name as a tag — `timeline`, `time-window`, `islanding` — and that name
+app's url name as a tag — `pmu-test-streamer`, `time-window`, `islanding` — and
+that name
 is the `/api/<app>` segment, the server package name with underscores, and the web
 client's page folder. So `/api/time-window/selection` lives in `time_window/` on
 the server and `pages/grid-monitor/time-window/` in the client, and Swagger UI
@@ -285,12 +286,12 @@ How a package joins the contract
 exports the model it pushes:
 
 ```python
-# app/server-python/src/timeline/__init__.py
-from .api import TimelineState, lifespan, router
+# app/server-python/src/pmu_test_streamer/__init__.py
+from .api import PmuStreamState, lifespan, router
 
-WS_MESSAGE = TimelineState
+WS_MESSAGE = PmuStreamState
 
-__all__ = ["WS_MESSAGE", "TimelineState", "lifespan", "router"]
+__all__ = ["WS_MESSAGE", "PmuStreamState", "lifespan", "router"]
 ```
 
 `api_contract.py` walks the same `APPS` list `server.py` mounts and collects
@@ -417,7 +418,7 @@ after it.
 
 From there the two families of app part ways.
 
-**The scaffold demos** (`timeline/`, `pmu_test_streamer/`) keep it minimal:
+**The scaffold demo** (`pmu_test_streamer/`) keeps it minimal:
 
 - `states: dict[str, ClientState]` — the entire store, keyed by client id;
 - `ConnectionManager` (`src/shared.py`) — client id → the set of live sockets,
@@ -533,7 +534,7 @@ from `src/lib/commands.ts`:
 
 ```ts
 const play = useCallback(
-  () => fire(postCommand(`${TIMELINE_API_PATH}/playback/play`)),
+  () => fire(postCommand(`${PMU_STREAM_API_PATH}/playback/play`)),
   [],
 )
 ```
@@ -557,7 +558,7 @@ Server side
 Every command endpoint declares its caller and its reply the same way:
 
 ```python
-@router.post("/playback/play", operation_id="timeline_play")
+@router.post("/playback/play", operation_id="pmu_test_streamer_play")
 async def play(client_id: ClientId) -> CommandAck:
     ...
 ```
@@ -566,8 +567,7 @@ async def play(client_id: ClientId) -> CommandAck:
   any handler runs; missing or non-numeric returns a 422.
 - **`CommandAck`** — `{status, applied}`. Deliberately not the new state.
 - **`operation_id`** — an explicit, readable name per operation.
-- Bodies are pydantic models (`SequenceSelection`, `ChannelSelection`,
-  `AlarmNote`), so a malformed command returns a 422 instead of crashing a
+- Bodies are pydantic models (`ChannelSelection`, `AlarmNote`), so a malformed command returns a 422 instead of crashing a
   handler.
 
 `shared.py` holds `ClientId` and `CommandAck` for the scaffold apps.
@@ -586,12 +586,11 @@ Every handler then does two things: change the right state, and get that change
 onto the screen. The state lives in three different places, so there are three
 arrangements.
 
-**1. State in a module dict** — `timeline`, `pmu_test_streamer`, the scaffold
-template. The simplest case, and it needs no new plumbing: `ConnectionManager`
+**1. State in a module dict** — `pmu_test_streamer` and the scaffold template. The simplest case, and it needs no new plumbing: `ConnectionManager`
 already addresses a client id and already runs on this same event loop.
 
 ```
-POST /api/timeline/playback/play?client_id=42
+POST /api/pmu-test-streamer/playback/play?client_id=42
   → get_state("42").playing = True
   → log_event("play", "42")
   → manager.send_to_client("42", state_message(state))   ← the push, from an HTTP handler
