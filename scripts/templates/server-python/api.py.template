@@ -1,21 +1,16 @@
-"""Backend for the __LABEL__ app.
+"""The __LABEL__ app's backend.
 
-Scaffolded by scripts/generate-new-subapp.sh: a per-client counter to bump and
-reset, the smallest thing that proves the wiring. Replace it with what this app
-really does, keeping the shape — state per client_id, in memory only, and one
-message pushed on connect and after every change.
+WebSocket api, per-client state, REST commands — here a placeholder counter, one
+per client. Replace it with what this app really does, keeping the shape.
 
-**Commands come up over REST, state goes down over the socket.** That split is
-the convention in this repo, not an accident of this template: a POST is a named
-operation with a schema, a status code and an access-log line, while the socket
-carries the state the server decides to push — including pushes nobody asked for.
-Keep both halves when you replace the counter.
+Commands come up over REST and state goes down over the socket; the reasoning is
+in AGENTS.md and doc/the-client-server-api.md.
 
-server.py owns the prefix, so the paths below are served at:
+server.py mounts this `router` under this app's /api/<app> prefix — here
+/api/__SLUG__ — so the paths below carry no prefix of their own.
 
-    POST /api/__SLUG__/count/bump
-    POST /api/__SLUG__/count/reset
-    WS   /api/__SLUG__/ws
+All state is in memory and dies with the process, and everything runs on the one
+asyncio event loop, so no locking is needed.
 """
 
 from typing import Literal
@@ -36,62 +31,48 @@ logger = make_logger("__SLUG__")
 manager = ConnectionManager()
 router = APIRouter()
 
-# One model per client id (the ?client_id= URL param), kept across reconnects and
-# never evicted. That id is one value per browser, persisted in localStorage by
-# the web client, so this state now survives a page reload too -- not just a
-# socket-level reconnect. Nothing is persisted server-side, so a restart still
-# resets every client.
+
+# --- authoritative in-memory state ------------------------------------------
+#
+# One model per client seed (the ?client_id= URL param), kept across reconnects
+# and never evicted. The web client persists that seed in localStorage, so this
+# state survives a page reload as well as a dropped socket; nothing is persisted
+# server-side, so a restart puts every client back at zero.
+
 states: dict[str, __NAME__Model] = {}
 
 
 def get_state(client_id: str) -> __NAME__Model:
+    """The single place per-client state is born; called on connect and on every
+    command, so a command can never hit a missing client."""
     if client_id not in states:
         states[client_id] = __NAME__Model()
     return states[client_id]
 
 
 class __NAME__State(BaseModel):
-    """The one message shape this app pushes.
+    """The single message shape pushed to a client on connect and every change.
 
-    A declared model, not a loose dict, because this IS the downstream half of the
-    published api contract: __init__.py exports it as `WS_MESSAGE`, api_contract.py
-    collects it from there, and the web client's type is GENERATED from the
-    result. So the page cannot drift from what this sends -- change a field here
-    and `scripts/error_check.sh` fails until you run
-    `scripts/generate-api-contract.sh` and commit the regenerated contract.
-
-    Keys are snake_case on the wire and the page's hook maps them to camelCase.
-
-    Note it does not echo the client_id back. The web client already knows who it
-    is -- one id per browser, resolved once in src/lib/clientId.ts and shown in
-    the layout footer -- so sending it here would only be a second copy to keep in
-    step. The id still keys `states` below; it is just not page data."""
+    Keys are snake_case on the wire; the page's hook maps them to camelCase.
+    """
 
     type: Literal["state"] = "state"
     count: int = Field(description="This client's count. Replace with real state.")
 
 
 def state_message(model: __NAME__Model) -> __NAME__State:
-    """The one message shape this app pushes, built from the domain model."""
+    """The single message shape pushed to a client on connect and every change."""
     return __NAME__State(count=model.count)
 
 
 # --- REST commands ----------------------------------------------------------
 #
-# One POST per operation, rather than one endpoint taking an action name: each
-# command is then its own named, documented operation, which is what a log line
-# and an api description key off. `ClientId` and `CommandAck` come from shared.py
-# so every app declares its caller and its reply the same way.
+# One POST per operation; see doc/the-client-server-api.md for why the upstream
+# half is HTTP and the downstream half is not.
 
 
 async def applied(client_id: str, action: str) -> CommandAck:
-    """The tail every command shares: log it, push this client its new state,
-    acknowledge the request.
-
-    `manager.send_to_client` is what carries the result of an HTTP command back
-    to the browser — it addresses a client id, and it runs on the same event loop
-    as this handler.
-    """
+    """Log the command, push this client its new state, acknowledge the request."""
     model = get_state(client_id)
     logger.info("client %s: %s (count=%s)", client_id, action, model.count)
     await manager.send_to_client(client_id, state_message(model))
@@ -117,10 +98,11 @@ async def reset(client_id: ClientId) -> CommandAck:
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    # The client identifies itself with a numeric seed: ?client_id=<seed>. The
-    # commands above take the same id as a query parameter, and `read_client_id`
-    # applies the identical rule -- so a page's socket and its commands can never
-    # end up addressing different state.
+    # The client identifies itself with a numeric seed in the socket URL
+    # (?client_id=<seed>); reject a connection without a valid one.
+    # `read_client_id` applies the very rule the `ClientId` query parameter
+    # enforces, so a page's socket and its commands can never address different
+    # state.
     client_id = read_client_id(ws)
     if client_id is None:
         await ws.close(code=1008)  # policy violation
@@ -132,7 +114,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         await ws.send_text(state_message(get_state(client_id)).model_dump_json())
         # Nothing is sent up this socket; the receive loop is what surfaces a
         # disconnect. Without it a closed socket is only noticed on the next
-        # send, so an idle client would linger indefinitely.
+        # send, so an idle client would linger for ever.
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:

@@ -5,34 +5,25 @@ import { __API_PATH_CONST__, __WS_PATH_CONST__ } from '@/lib/servers'
 import { postCommand } from '@/lib/commands'
 import { useServerSocket } from '@/hooks/useServerSocket'
 
-/** What the server pushes, GENERATED from the api contract -- this is the model
- *  declared in app/server-python/src/__PKG__/api.py, not a hand-copy of it, so the
- *  two cannot drift. Change the Python model and run
- *  scripts/generate-api-contract.sh; until you do, error_check.sh fails. */
+/** What the server pushes, generated from the api contract — the model declared
+ *  in app/server-python/src/__PKG__/api.py, not a hand-copy of it. */
 type __NAME__Message = Wire['__NAME__State']
 
 /** What this page works in: the client's own vocabulary, camelCase, mapped from
- *  the wire shape below. Deliberately still hand-written -- the server's field
- *  names are the server's business, and a page should not inherit them. */
+ *  the wire shape above. */
 export type __NAME__State = { count: number }
 
-/** Fire a command and carry on. A failure is logged and nothing else happens:
- *  the page renders only what the server pushes, so a command that did not land
- *  simply produces no change — which is what the user already sees. */
+/** Fire a command and carry on; a failure is logged and nothing else happens.
+ *  A command that did not land produces no state change, which is what the user
+ *  already sees. */
 function fire(promise: Promise<void>): void {
   promise.catch((error) => console.error('__SLUG__ command failed', error))
 }
 
-/** The app's two halves: state down the socket, commands up over REST.
- *
- *  Connection handling — identifying this browser, reconnects, status — comes
- *  from useServerSocket, and this adds the mapping to __NAME__State plus the
- *  commands. Note nothing is *sent* on the socket: a command is a POST to
- *  /api/__SLUG__, and its result comes back as the next pushed state.
- *
- *  The client id is not in here either. It is one value for the whole app
- *  (src/lib/clientId.ts), attached to every socket and every command by the
- *  layers below, so a page neither receives it nor renders it. */
+/**
+ * The __LABEL__ app: state arrives on the socket, commands go up as POSTs to
+ * /api/__SLUG__.
+ */
 export function use__NAME__Socket() {
   const { message, status, connected } =
     useServerSocket<__NAME__Message>(__WS_PATH_CONST__)
