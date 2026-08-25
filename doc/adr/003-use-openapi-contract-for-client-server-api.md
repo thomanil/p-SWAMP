@@ -24,6 +24,9 @@ by `scripts/generate-api-contract.sh`. The socket half rides in the same
 document, as `components.schemas` entries plus an `x-websocket-channels`
 extension.
 
+The generation runs code-first: the Python is the source of truth and the
+document is derived from it, never hand-authored.
+
 The client's wire types are generated from it into
 `app/client-web/src/api/schema.ts`; page hooks say `Wire['SomeState']` rather
 than hand-copying a model. `scripts/error_check.sh` fails while either artifact
@@ -47,6 +50,17 @@ it. That is acceptable while it is read by our own generator and by people.
 
 ## Alternatives considered
 
+- **Spec-first: hand-author the contract, generate both sides from it.** The
+  standard design-first pattern (`datamodel-code-generator`, OpenAPI Generator,
+  TypeSpec), and the direction we deliberately did not take. It pays when several
+  teams must agree on an api before either side exists; we have one server, one
+  client and one team, and the client is generated already. It also costs more
+  than it looks: no generator reads our socket extension, so we would hand-write
+  that emitter anyway, and generated models would be shapes only — the validation,
+  the twin `CommandAck` and the numpy adapters stay hand-written either way, but
+  against generated code rather than being it. Worth revisiting if the contract
+  has to outlive its implementation, or if the socket protocol grows
+  bidirectional channels.
 - **AsyncAPI for the socket half.** The standards-correct answer, but a second
   spec format and a second generator to maintain for seven one-way channels.
 - **Hand-written types on both sides.** What we had. Free until it is wrong, and
