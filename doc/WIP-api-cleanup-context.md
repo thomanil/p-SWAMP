@@ -22,7 +22,7 @@ step rather than code making the copies impossible.
 | 2 | One send path, one per-client view registry | done |
 | 3 | Extract the repeated WebSocket endpoint tail | done |
 | 4 | Drop the hand-written snake→camel mapping in the client hooks | done |
-| 5 | Move the panel `variant` convention into `<Panel>` | todo |
+| 5 | Move the panel `variant` convention into `<Panel>` | done |
 | 6 | ~~Delete `pmu-test-streamer`~~ | **deferred — keep it for now** |
 | 7 | Make the `APPS` registry explicit and self-checking | todo |
 | 8 | Fix stale per-client comments | todo |

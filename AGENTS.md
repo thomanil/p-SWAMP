@@ -500,8 +500,14 @@ Client side, four edits:
 
 1. Add `src/pages/grid-monitor/<slug>/` with the socket hook, the drawing
    component, and a `<Name>Panel.tsx` that renders them inside `<Panel>`. Copy
-   `app-status/` for a simple one. Give it a `variant?: PanelVariant` prop and use
-   it for size and for `focusHref` (a focused route must not link to itself).
+   `app-status/` for a simple one. Give it a `variant?: PanelVariant` prop and
+   pass it straight to `<Panel variant={variant}>`, along with the facts it
+   needs — `subtitle`, `focusHref`, `focusedClassName`. **Don't branch on the
+   variant for those**: `<Panel>` owns the convention (subtitle when focused,
+   expand link when not, width when it owns the page), and it owns it precisely
+   because six panels each writing the ternaries out is six chances to differ.
+   Branch on `variant` only for what is genuinely this panel's business, such as
+   how tall to draw a canvas.
 2. Place it in the grid in `GridMonitorPage.tsx`. Use `minmax(0,1fr)` columns,
    never `1fr` — a grid item's default `min-width:auto` lets a canvas or a table
    force its column wider than the viewport.

@@ -35,18 +35,15 @@ export function IslandMapPanel({
   return (
     <Panel
       title="Islanding Detection"
-      subtitle={
-        variant === 'focused'
-          ? 'Frequency-based island detection across the Nordic 44 grid'
-          : undefined
-      }
+      subtitle="Frequency-based island detection across the Nordic 44 grid"
       status={status}
       ready={ready}
       // The topology is static and fetched over HTTP, independently of the
       // detector's socket — so the grid is drawn as soon as it loads, and the
       // socket only supplies the colouring.
       drawsWithoutData
-      focusHref={variant === 'dashboard' ? '/islanding' : undefined}
+      focusHref="/islanding"
+      variant={variant}
       minBodyClass="min-h-[300px]"
       badge={
         connected ? (

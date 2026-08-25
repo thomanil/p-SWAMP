@@ -35,15 +35,12 @@ export function PhasorsPanel({
   return (
     <Panel
       title="Voltage Phasors"
-      subtitle={
-        variant === 'focused'
-          ? 'Bus voltage phasors across the Nordic 44 grid, coloured by island'
-          : undefined
-      }
+      subtitle="Bus voltage phasors across the Nordic 44 grid, coloured by island"
       status={status}
       ready={ready}
-      className={variant === 'focused' ? 'w-full max-w-2xl' : undefined}
-      focusHref={variant === 'dashboard' ? '/phasors' : undefined}
+      focusedClassName="w-full max-w-2xl"
+      focusHref="/phasors"
+      variant={variant}
       minBodyClass="min-h-[320px]"
       badge={
         connected ? (

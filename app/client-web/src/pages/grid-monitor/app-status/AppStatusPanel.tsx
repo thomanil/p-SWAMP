@@ -28,15 +28,12 @@ export function AppStatusPanel({
   return (
     <Panel
       title="Application Status"
-      subtitle={
-        variant === 'focused'
-          ? 'Monitoring applications running against the replayed PMU stream'
-          : undefined
-      }
+      subtitle="Monitoring applications running against the replayed PMU stream"
       status={status}
       ready={ready}
-      className={variant === 'focused' ? 'w-full max-w-3xl' : undefined}
-      focusHref={variant === 'dashboard' ? '/app-status' : undefined}
+      focusedClassName="w-full max-w-3xl"
+      focusHref="/app-status"
+      variant={variant}
       minBodyClass="min-h-[152px]"
       contentClassName="px-0 pt-0"
       badge={

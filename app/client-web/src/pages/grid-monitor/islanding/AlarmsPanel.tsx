@@ -35,10 +35,11 @@ export function AlarmsPanel({
   return (
     <Panel
       title="Alarms"
-      subtitle={variant === 'focused' ? 'Raised by the monitoring applications' : undefined}
+      subtitle="Raised by the monitoring applications"
       status={status}
       ready={ready}
-      focusHref={variant === 'dashboard' ? '/islanding' : undefined}
+      focusHref="/islanding"
+      variant={variant}
       minBodyClass="min-h-[160px]"
       contentClassName="px-0 pt-0"
       badge={
