@@ -1,6 +1,5 @@
 # How we work together
 
-
 We are multiple teams with different strengths and areas of expertise/focus, 
 collaborating together remotely and asynchronously. These are some basic practices that 
 we use to work effectively without tripping over each other.
@@ -9,9 +8,11 @@ we use to work effectively without tripping over each other.
 
 Its a good idea to keep a running conversation between us. These are the primary ways we keep each other in the loop:
 
-- "Ongoing" chat in shared Teams chat (TBD/TODO, needs to be cleared on Statnett side)
+- "Ongoing" chat in shared Teams chat (_TBD/TODO, needs to be cleared on Statnett side_)
 - Recurring video calls
 - Some writing to each other in pull requests
+
+TODO some clarification about how teams resolve shared tasks/dependencies, task tracking etc.
 
 ## Git workflow, required bits
 
