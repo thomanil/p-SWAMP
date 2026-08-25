@@ -2,8 +2,15 @@
 # The client-server rig's end-to-end smoke test — "does the whole thing still
 # work?", as one command.
 #
-#   scripts/smoketest.sh                          start a server, test it, stop it
+#   scripts/smoketest.sh                          build a server, test it, stop it
 #   SMOKETEST_URL=http://host:port scripts/smoketest.sh   test a server already running
+#
+# The first form ALWAYS starts from scratch: every p-swamp container on the
+# daemon is removed, the image is rebuilt, and the container is recreated, before
+# a single assertion runs. It never reuses a running server, because a reused one
+# is not the tree you are testing — see teardown_pswamp below for the three ways
+# that has already bitten. The second form is the exception and touches nothing:
+# the caller started that server and owns it (this is the path CI takes).
 #
 # This is the manual test automated. The routine it replaces: start the server,
 # start the web client, open the Reference example, click the buttons, check the
@@ -55,8 +62,9 @@ prepend_path "$HOME/.local/bin"
 export PATH
 
 BASE_URL="${SMOKETEST_URL:-http://127.0.0.1:8000}"
-# Only true when this script brought the stack up, so it only ever tears down
-# what it started — a developer's own running server is left alone.
+# True once this script owns the stack's lifecycle, i.e. on every run except the
+# SMOKETEST_URL one, where the caller has already started a server and this must
+# not touch it.
 STARTED_STACK=0
 
 FAILURES=()
@@ -74,6 +82,46 @@ cleanup() {
   if [ "$STARTED_STACK" -eq 1 ]; then
     printf '\nStopping the server…\n'
     docker compose down --remove-orphans >/dev/null 2>&1
+  fi
+}
+
+# Remove every p-SWAMP container on this daemon, then say what went.
+#
+# Always, before starting anything — never reuse what is already running. A
+# reused container is not the tree you are testing, and it fails in ways that
+# look like a code bug:
+#
+#   * `restart: unless-stopped` in docker-compose.yml means a container from a
+#     previous session is *likely* to still be up, days later, at whatever commit
+#     it was built from;
+#   * compose `watch` syncs adds and edits but NOT deletes, so a long-lived
+#     container accumulates modules the repo no longer has — a deleted package
+#     keeps importing, a renamed one exists twice;
+#   * `watch` only syncs source. The web client is baked in at build time, so a
+#     container whose Python is current can still be serving a stale UI, which is
+#     exactly what checks 2-4 below are looking at.
+#
+# The cost of always rebuilding is a warm-cache image build.
+
+teardown_pswamp() {
+  local removed
+  docker compose down --remove-orphans -t 5 >/dev/null 2>&1
+
+  # Anything left running a p-swamp image outside this compose project — a
+  # hand-started `docker run`, or a container from an older project name. Matched
+  # on the image rather than the container name, since the name is whatever the
+  # person who started it chose. (No bash 4 here: see the AGENTS.md note on
+  # macOS's bash 3.2.)
+  removed=""
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    docker rm -f "$id" >/dev/null 2>&1 && removed="$removed $id"
+  done <<EOF
+$(docker ps -aq --filter "ancestor=p-swamp:latest" 2>/dev/null)
+EOF
+
+  if [ -n "$removed" ]; then
+    echo "    Removed stray p-swamp container(s):$removed"
   fi
 }
 
@@ -120,15 +168,22 @@ fi
 # about.
 section "Server under test"
 if [ -n "${SMOKETEST_URL:-}" ]; then
+  # The one path that touches nothing: the caller started a server and owns it.
+  # CI takes this branch — it builds and runs the image itself, so this script
+  # must not go looking for containers to remove.
   echo "    Using the server at $SMOKETEST_URL (not managing its lifecycle)"
-elif [ -n "$(docker compose ps --status running -q server 2>/dev/null)" ]; then
-  echo "    Reusing the compose server already running at $BASE_URL"
 else
-  echo "    Starting the compose server (this builds the image on a cold run)…"
+  # Down first, always. See teardown_pswamp for what reuse costs; the short
+  # version is that a container found running is never the tree you are testing.
+  echo "    Clearing any running p-swamp containers…"
+  teardown_pswamp
+
+  echo "    Starting the compose server from scratch (builds the image)…"
   # --wait blocks until the healthcheck in docker-compose.yml passes, so there is
-  # no polling loop here. --build for the reason the dev script gives: without it
-  # Compose happily runs a stale image.
-  if ! docker compose up -d --build --wait; then
+  # no polling loop here. --build because compose otherwise reuses whatever image
+  # it already has; --force-recreate because it otherwise reuses the container
+  # even when the image is new, which is the same staleness one layer up.
+  if ! docker compose up -d --build --force-recreate --wait; then
     printf '\033[31msmoketest: the server did not come up\033[0m\n'
     docker compose logs --tail 50 server
     docker compose down --remove-orphans >/dev/null 2>&1
