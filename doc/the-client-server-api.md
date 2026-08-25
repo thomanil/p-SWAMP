@@ -9,21 +9,22 @@ Read as much as you need:
 |---|---|
 | add an endpoint, a field, or a page | [Common tasks](#common-tasks) |
 | know which files are generated and which to edit | [Where the contract comes from](#where-the-contract-comes-from) |
-| consume this api from another codebase | [What the contract is](#what-the-contract-is), [Consuming it from another codebase](#consuming-it-from-another-codebase) |
+| know what the contract covers | [What the contract is](#what-the-contract-is) |
 | understand how a click becomes a change | [Upstream](#upstream-how-a-command-reaches-the-server) |
 | understand how state reaches the screen | [Downstream](#downstream-how-state-reaches-the-screen) |
 | know what a failure looks like | [Error and refusal semantics](#error-and-refusal-semantics) |
 
-`client-server-rig.md` is the shorter tour of the whole rig, of which this api is one part.
+For the shorter tour of the whole rig, of which this api is one part, read
+`client-server-rig.md`.
 
-The shape in one paragraph
+The shape of the api
 ==
 
-**Two directions, two transports.** Anything a user triggers goes up as an HTTP
-`POST` under `/api/<app>/`. Everything the server has to say comes down a
-WebSocket at `/api/<app>/ws`, which is downstream only. A command's reply is a
-small acknowledgement, never state — so state has exactly one path and there is
-no ordering to reconcile between two of them.
+**Two directions, two transports.** A user action goes up as an HTTP `POST` under
+`/api/<app>/`. The server pushes everything it has to say back down a WebSocket at
+`/api/<app>/ws` (the websocket never carries anything upstream). A command answers with a
+small acknowledgement, never with state — so state travels exactly one path, and a
+client never reconciles the order of two.
 
 ```
    BROWSER                                   SERVER (one process, one event loop)
@@ -41,18 +42,18 @@ no ordering to reconcile between two of them.
              hooks/useServerSocket.ts   {type:"state",…}
 ```
 
-Both resolve against **the origin the page was served from**. There is no backend
-picker, and dev is made to look like production rather than special-cased.
+Both resolve against **the origin that served the page**. The client offers no
+backend picker; dev imitates production rather than taking a special path.
 
 
 Where the contract comes from
 ==
 
-**The Python is the source; everything else is generated.** The api is defined by
-ordinary server code — each app package's `router` (its paths, `operation_id`s,
-body models and `CommandAck` replies) and the `WS_MESSAGE` model it pushes down
-its socket. `api_contract.py` does *not* define the api: it describes and
-assembles the document, and adds the socket half OpenAPI has no notion of.
+**The Python is the source; everything else is generated.** Ordinary server code
+defines the api — each app package's `router` (its paths, `operation_id`s, body
+models and `CommandAck` replies) and the `WS_MESSAGE` model it pushes down its
+socket. `api_contract.py` defines nothing: it describes and assembles the
+document, and adds the socket half OpenAPI has no notion of.
 
 ```
    src/<app>/  and  src/pswamp_web/<app>/        ← THE DEFINITION. Edit here.
@@ -79,31 +80,30 @@ assembles the document, and adds the socket half OpenAPI has no notion of.
         └──► src/lib/commands.ts  →  postCommand, typed against the paths
 ```
 
-Two things follow, and they are the whole reason it is arranged this way:
+Two consequences follow, and they are the whole point of pointing it this way:
 
-- **Don't edit the two generated files.** A change to the api goes into the
-  Python — a route, a model, or the metadata in `api_contract.py` — then run
+- **Never edit the two generated files.** Put the change in the Python — a route,
+  a model, or the metadata in `api_contract.py` — then run
   `./scripts/generate-api-contract.sh`, then commit all of it together. Hand-edit
-  `openapi.json` or `schema.ts` and the next regeneration silently discards you.
-  See [Changing the api](#changing-the-api).
+  `openapi.json` or `schema.ts` and the next regeneration discards your work
+  without a word. See [Changing the api](#changing-the-api).
 - **The committed contract cannot disagree with the running server**, because
-  `dump_openapi.py` imports the app and asks for its document rather than
-  describing the api a second time. `generate-api-contract.sh --check`
-  regenerates into a temp dir and diffs; `error_check.sh` runs that on every push.
+  `dump_openapi.py` imports the app and asks it for its own document instead of
+  describing the api a second time. `generate-api-contract.sh --check` regenerates
+  into a temp dir and diffs the result; `error_check.sh` runs that on every push.
 
-[Where the pieces live](#where-the-pieces-live) is the file-by-file table.
+For the file-by-file table, see [Where the pieces live](#where-the-pieces-live).
 
 
 Common tasks
 ==
 
-Recipes for the things people actually come here to do. Each ends the same way —
-regenerate and commit — so that step is stated once, at the end.
+Recipes for what people actually come here to do.
 
 ### I want to add a command (a new POST) to an existing app
 
-In that app's `api.py`. Commands are one url per operation, never one endpoint
-taking an action name:
+Write it in that app's `api.py`. Give every operation its own url; never build one
+endpoint that takes an action name:
 
 ```python
 @router.post("/playback/pause", operation_id="timeline_pause")
@@ -112,19 +112,19 @@ async def pause(client_id: ClientId) -> CommandAck:
     ...
 ```
 
-- **`operation_id` is required and is `<app>_<verb>`**, app in snake_case
-  (`time_window_resync`, `pmu_test_streamer_play`). It is the name a generated
-  client will call, so it is chosen, not derived — renaming the handler must not
-  rename someone's generated method.
-- **`ClientId` and `CommandAck`** come from `shared` in a standalone app, and from
-  `..wire` inside `pswamp_web/` (which may not import the rest of the backend).
-- **Taking a body?** Declare it as a pydantic model in the same file and add it as
-  a parameter — `body: SequenceSelection`. That is what makes a malformed command
-  a 422 instead of a handler crash.
+- **Always set `operation_id`, as `<app>_<verb>`** with the app in snake_case
+  (`time_window_resync`, `pmu_test_streamer_play`). A generated client calls that
+  name, so you choose it deliberately rather than deriving it — renaming the
+  handler must never rename someone's generated method.
+- **Import `ClientId` and `CommandAck`** from `shared` in a standalone app, or
+  from `..wire` inside `pswamp_web/`, which may not import the rest of the backend.
+- **Taking a body?** Declare a pydantic model in the same file and take it as a
+  parameter — `body: SequenceSelection`. FastAPI then rejects a malformed command
+  with a 422 before your handler runs.
 - **Never return the new state.** `CommandAck` only; state goes down the socket.
 
-Client side, one call — the path is checked against the contract, so a typo is a
-`tsc` error:
+Client side, one call. `tsc` checks the path against the contract, so a typo fails
+the build:
 
 ```ts
 const pause = useCallback(
@@ -133,16 +133,22 @@ const pause = useCallback(
 )
 ```
 
+Then run `./scripts/generate-api-contract.sh` and commit `doc/api/openapi.json`
+and `app/client-web/src/api/schema.ts` along with the code.
+
 ### I want to add a field to a socket message
 
-Add it to the message model — `pswamp_web/wire.py` for the p-SWAMP apps,
-the app's own `api.py` for a standalone one — and fill it in wherever
-`state_message()` (or the page's push task) builds it.
+Add it to the message model — `pswamp_web/wire.py` for the p-SWAMP apps, the app's
+own `api.py` for a standalone one — and fill it in wherever `state_message()` (or
+the page's push task) builds it.
 
-After regenerating, `Wire['<Model>']` in the client has the field. It does **not**
-reach the page automatically: each hook maps the wire shape to its own camelCase
-domain type, so add it there too if the page should see it. That mapping is
-deliberately hand-written — the server's field names are the server's business.
+Run `./scripts/generate-api-contract.sh` and `Wire['<Model>']` carries the
+field. The page still will not see it: each hook maps the wire shape to its own
+camelCase domain type, so add it there too. We write that mapping by hand on
+purpose — the server's field names stay the server's business.
+
+Commit `doc/api/openapi.json` and `app/client-web/src/api/schema.ts` with the
+model change.
 
 ### I want to add a whole new page and its api
 
@@ -150,15 +156,16 @@ deliberately hand-written — the server's field names are the server's business
 ./scripts/generate-new-subapp.sh flow-map "Flow Map"
 ```
 
-That writes both halves, patches the four registries, regenerates the contract and
-runs the checks. The new app is in the contract with **no registry entry to add** —
-see "How a package joins the contract" below. Commit the two regenerated artifacts
-with the rest.
+The script writes both halves, patches the four registries, regenerates the
+contract and runs the checks. The new app joins the contract with **no registry
+entry to add** — see "How a package joins the contract" below. It has already run
+`./scripts/generate-api-contract.sh` for you, so commit `doc/api/openapi.json`
+and `app/client-web/src/api/schema.ts` along with the new folders.
 
 ### I want to add a plain GET (something static, not pushed)
 
-Same as a command, but **declare a response model** — a bare `-> dict` publishes as
-an untyped `object` and the client is left casting an implicitly-`any` body:
+Same as a command, but **declare a response model**. A bare `-> dict` publishes as
+an untyped `object`, which leaves the client casting an implicitly-`any` body:
 
 ```python
 @router.get("/channels", operation_id="time_window_channels")
@@ -166,24 +173,28 @@ async def list_channels() -> ChannelCatalogue:
     return ChannelCatalogue(channels=_channels())
 ```
 
-Only for things that never change (the grid topology, the channel catalogue).
-Anything that changes belongs on the socket.
+Use a GET only for what never changes (the grid topology, the channel catalogue).
+Put anything that changes on the socket.
+
+Then run `./scripts/generate-api-contract.sh` and commit `doc/api/openapi.json`
+and `app/client-web/src/api/schema.ts` along with the endpoint.
 
 ### `error_check.sh` is failing on "api contract (spec matches code)"
 
-You changed the api and the committed contract is stale. It prints the diff:
+You changed the api and left the committed contract behind. The check prints the
+diff:
 
 ```
 ./scripts/generate-api-contract.sh      # regenerate both artifacts
 ```
 
 then commit `doc/api/openapi.json` and `app/client-web/src/api/schema.ts` with your
-change. Nothing to hand-edit — that is the whole fix.
+change. Hand-edit nothing — that is the whole fix.
 
 ### How do I see what the api looks like right now?
 
-With a server running, `/docs` (Swagger UI, grouped by app) or `/redoc`. Without
-one, the committed file answers most questions:
+Run a server and open `/docs` (Swagger UI, grouped by app) or `/redoc`. Without
+one, query the committed file:
 
 ```
 jq '.paths | keys' doc/api/openapi.json                  # every HTTP operation
@@ -193,19 +204,23 @@ jq '.components.schemas | keys' doc/api/openapi.json     # every model
 
 ### I renamed a field. Is that a breaking change?
 
-Yes — for anyone generating against the contract, a rename is a removal plus an
-addition. Bump `API_VERSION` and say so in the pull request. Adding an optional
-field is not breaking and needs no bump. See "Versioning" below.
+Yes. Anyone generating against the contract sees a rename as a removal plus an
+addition. Bump `API_VERSION`, run `./scripts/generate-api-contract.sh`, commit
+`doc/api/openapi.json` and `app/client-web/src/api/schema.ts` with the change, and
+say so in the pull request. An added optional field breaks nothing and needs no
+bump. See "Versioning" below.
 
 ### Do I need to regenerate after changing only a docstring?
 
-Yes. Docstrings become operation descriptions in the document, so they are part of
-the generated artifacts and the check notices. It is the same one command.
+Yes. Docstrings become operation descriptions, so they land in the generated
+artifacts and the check catches them. Run `./scripts/generate-api-contract.sh` and
+commit `doc/api/openapi.json` and `app/client-web/src/api/schema.ts`, exactly as
+for any other api change.
 
 ------------------------------------------------------------------------------
 
 *The rest is reference: what the contract guarantees, then how the two transports
-actually work underneath it.*
+work underneath it.*
 
 
 What the contract is
@@ -223,37 +238,37 @@ and committed. It describes:
 
 **`app/client-web/src/api/schema.ts`** — TypeScript generated from that document
 by `openapi-typescript`, also committed. The web client reads it through
-`src/api/wire.ts`, which is the small hand-written layer over it.
+`src/api/wire.ts`, the small hand-written layer over it.
 
-The running server serves the identical document at **`/openapi.json`**, with
-**`/docs`** (Swagger UI) and **`/redoc`** rendering it. Both come from the same
-function that writes the file, so the served and committed copies cannot disagree
-— and `scripts/error_check.sh` proves it on every push.
+The running server serves the identical document at **`/openapi.json`**, and
+**`/docs`** (Swagger UI) and **`/redoc`** render it. One function produces both the
+served and the committed copy, so the two cannot disagree — and
+`scripts/error_check.sh` proves it on every push.
 
-> Swagger UI at `/docs` fetches its own assets from a CDN, so it needs the browser
-> to have internet. `/openapi.json` and `/redoc`'s data have no such dependency.
+> Swagger UI at `/docs` fetches its own assets from a CDN, so the browser needs
+> internet. `/openapi.json` and `/redoc`'s data do not.
 
 
 Which subapp a request belongs to
 ==
 
-The contract is organised the same way the code is. Every operation is tagged
-with its app's url name — `timeline`, `time-window`, `islanding` — which is the
-`/api/<app>` segment, the server package name with underscores, and the web
-client's page folder. So `/api/time-window/selection` is `time_window/` on the
-server and `pages/grid-monitor/time-window/` in the client, and Swagger UI groups
-it under `time-window`. One name, four places, no lookup table.
+The contract follows the code's own organisation. Every operation carries its
+app's url name as a tag — `timeline`, `time-window`, `islanding` — and that name
+is the `/api/<app>` segment, the server package name with underscores, and the web
+client's page folder. So `/api/time-window/selection` lives in `time_window/` on
+the server and `pages/grid-monitor/time-window/` in the client, and Swagger UI
+groups it under `time-window`. One name, four places, no lookup table.
 
 `operationId` follows the same rule: `<app>_<verb>`, e.g. `time_window_resync`,
-`islanding_acknowledge`. Those are the names a generated client will use, so they
-are chosen rather than derived — a renamed handler must not rename someone's
-generated method.
+`islanding_acknowledge`. A generated client calls those names, so we choose them
+deliberately rather than deriving them — renaming a handler must not rename
+someone's generated method.
 
 
 How a package joins the contract
 ==
 
-**By exporting a name.** There is no registry to add an entry to.
+**A package joins by exporting a name.** No registry to add an entry to.
 
 `server.py` already discovers optional package features with
 `getattr(module, "lifespan", None)`. Socket messages work identically — a package
@@ -272,16 +287,16 @@ __all__ = ["WS_MESSAGE", "TimelineState", "lifespan", "router"]
 whatever each package exports under that name. An app with no socket
 (`pswamp_web/grid/`, which is HTTP only) simply omits it.
 
-That is why `scripts/generate-new-subapp.sh` needed no new anchor to patch: the
-template exports `WS_MESSAGE`, so a scaffolded subapp is in the contract the
-moment it is generated. Commit the two regenerated artifacts along with it — the
-script regenerates them for you, before it runs the checks.
+This is why `scripts/generate-new-subapp.sh` needed no new anchor to patch: its
+template exports `WS_MESSAGE`, so a scaffolded subapp joins the contract the
+moment the script writes it. The script regenerates both artifacts before it runs
+the checks — commit them along with the rest.
 
-The one rule that keeps this working: **a socket payload must be a pydantic
-model.** Push a bare dict and the app silently leaves the contract — the page
-still works, and the type safety is gone with nothing to say so. `ConnectionManager.send_to_client`
-and `wire.send_state` both take a `BaseModel` for this reason (and because
-`json.dumps` emits bare `NaN`, which `JSON.parse` rejects).
+One rule keeps this working: **push a pydantic model, never a bare dict.** A bare
+dict drops the app out of the contract silently — the page keeps working, the type
+safety disappears, and nothing says so. `ConnectionManager.send_to_client` and
+`wire.send_state` therefore both take a `BaseModel` (and because `json.dumps`
+emits bare `NaN`, which `JSON.parse` rejects).
 
 
 Changing the api
@@ -292,92 +307,31 @@ Changing the api
 3. Commit `doc/api/openapi.json` and `app/client-web/src/api/schema.ts` with the
    change.
 
-If you skip step 2, `./scripts/error_check.sh` fails — locally in the pre-push
-hook and again in CI — with a diff of what moved. That is deliberate: the point
-of committing the contract is that a change to it is **reviewable**, so it has to
-be in the same pull request as the code that caused it.
+Skip step 2 and `./scripts/error_check.sh` fails — locally in the pre-push hook,
+then again in CI — printing a diff of what moved. We want that: committing the
+contract only buys a **reviewable** change if it rides in the same pull request as
+the code that caused it.
 
-Don't hand-edit either generated file. `schema.ts` says so at the top, and the
-next regeneration would overwrite you.
+Never hand-edit either generated file. `schema.ts` says so at the top, and the
+next regeneration overwrites you.
 
 ### Versioning
 
-`API_VERSION` in `app/server-python/src/api_contract.py` is bumped **by hand, on
-a breaking change** — a removed or renamed field, a removed operation, a narrowed
-type. Additive changes don't need one.
+Bump `API_VERSION` in `app/server-python/src/api_contract.py` **by hand, on a
+breaking change** — a removed or renamed field, a removed operation, a narrowed
+type. Additive changes need nothing.
 
-It is not automated on purpose. A version that moves on every commit tells a
-reader nothing; one that moves only when compatibility breaks is the single thing
-in the diff that says "this one needs coordinating". If you bump it, say so in the
-pull request — see "The api contract" in `how-we-work-together.md`.
-
-
-Why a WebSocket extension rather than AsyncAPI
-==
-
-OpenAPI describes HTTP operations. This api pushes **all** of its state over
-WebSockets, so a plain OpenAPI document would describe the smaller half and leave
-the part a client actually renders undescribed — which is exactly the state this
-repo was in, with seven hand-written TypeScript mirrors of Python models and no
-check that they matched.
-
-AsyncAPI is the standard answer and was deliberately not chosen: a second spec
-format means a second generator, a second drift check and a second thing for a
-new team to learn, in order to describe seven one-way channels that all carry a
-single message shape. Instead the message models are merged into
-`components.schemas` — where every generator already looks — and the channels are
-recorded in a vendor extension:
-
-```jsonc
-"x-websocket-channels": [
-  {
-    "path": "/api/time-window/ws",
-    "app": "time-window",
-    "direction": "server-to-client",
-    "message": { "$ref": "#/components/schemas/TimeWindowSlice" }
-  }
-]
-```
-
-`x-` keys are legal OpenAPI and generators ignore what they do not recognise, so
-the document stays valid everywhere and the schemas — the part codegen consumes —
-come through as ordinary models. A consumer that wants the channel map reads the
-extension; one that only wants types never notices it is there.
-
-If the socket protocol ever grows a second message shape per channel, or an
-upstream direction, revisit this. Today every channel is downstream-only and
-carries one model, and the extension says exactly that.
-
-
-Consuming it from another codebase
-==
-
-`doc/api/openapi.json` is a normal OpenAPI 3.1 document; point any generator at
-it. For reference, this repo's own web client uses:
-
-```
-npx openapi-typescript doc/api/openapi.json -o schema.ts
-```
-
-Three things worth knowing before you generate against it:
-
-- **Fields are snake_case**, as the server sends them. This repo's client maps to
-  camelCase in each page hook rather than at the wire, so the server's field names
-  stay the server's business.
-- **`client_id` is required on everything** — every command and every socket — as
-  a query parameter. It is a numeric string, one per browser profile, and all of
-  one client's sockets must send the same value or they get separate server-side
-  pipelines. It is **not** authentication.
-- **A missing measurement is `null`, not `NaN`.** The models declare
-  `float | None` and the server substitutes; a `TimeWindow` is all-`null` until it
-  fills, which is normal and not an error.
+We left it manual on purpose. A version that moves on every commit tells a reader
+nothing; one that moves only when compatibility breaks becomes the single line in
+a diff that says "coordinate this one". If you bump it, say so in the pull
+request — see "The api contract" in `how-we-work-together.md`.
 
 
 Addressing: origin, prefix, client id
 ==
 
-Three things decide where a request goes and whose state it touches. All three
-are settled in `app/client-web/src/lib/`.
+Three things decide where a request goes and whose state it touches.
+`app/client-web/src/lib/` settles all three.
 
 **Origin** — `servers.ts` builds every url from `window.location`:
 
@@ -386,30 +340,30 @@ are settled in `app/client-web/src/lib/`.
 | `resolveServerUrl(wsPath)` | `ws(s)://<host><BASE_PATH><path>` | the one WebSocket, in `useServerSocket` |
 | `resolveApiUrl(path)` | `http(s)://<host><BASE_PATH><path>` | `postCommand`, and the two plain GETs |
 
-The protocol follows the page's (`https:` → `wss:`), so nothing has to know
-whether it is running behind TLS.
+The protocol follows the page's (`https:` → `wss:`), so no code has to know
+whether it runs behind TLS.
 
-**Prefix** — `basePath.ts` discovers the mount prefix at runtime by reading its
-own `import.meta.url` and cutting at `/assets/`. Remotely the app sits under
-`/p-swamp/` behind a reverse proxy that strips the prefix before forwarding, so
-the *server* sees plain `/api/...` and the *browser* must put it back. This is
-what lets one published image run both at a root and under a prefix. It rests on
-routes staying one segment deep — see that file.
+**Prefix** — `basePath.ts` discovers the mount prefix at runtime: it reads its own
+`import.meta.url` and cuts at `/assets/`. Remotely the app sits under `/p-swamp/`
+behind a reverse proxy that strips the prefix before forwarding, so the *server*
+sees plain `/api/...` and the *browser* has to put it back. That is how one
+published image runs both at a root and under a prefix. It depends on routes
+staying one segment deep — that file explains why.
 
 **Client id** — `clientId.ts` resolves one random integer per browser profile,
-persisted in `localStorage`, and every socket and every command sends it:
+persists it in `localStorage`, and every socket and every command sends it:
 
 - sockets as `?client_id=` on the WebSocket url (`useServerSocket`),
 - commands as `?client_id=` on the POST (`postCommand` attaches it, so no caller
   passes it).
 
-It is the sharding key for all server state. One id per browser is what makes the
-grid monitor's five sockets views of **one** server-side pipeline rather than
-five. It is **not authentication** and does not pretend to be: send someone
-else's id and you drive their replay.
+That id shards all server state. One id per browser is what makes the grid
+monitor's five sockets show **one** server-side pipeline rather than five. It
+authenticates **nothing** and pretends to nothing: send someone else's id and you
+drive their replay.
 
-In dev the same urls work because Vite proxies the whole `/api` prefix —
-including WebSocket upgrades — to the backend on `:8000` (`server.proxy` in
+The same urls work in dev because Vite proxies the whole `/api` prefix —
+WebSocket upgrades included — to the backend on `:8000` (`server.proxy` in
 `vite.config.ts`). In the shipped image the server serves the client itself, so
 every request is same-origin by construction.
 
@@ -420,53 +374,55 @@ Downstream: how state reaches the screen
 Client side
 --
 
-`useServerSocket(wsPath, options)` (`src/hooks/useServerSocket.ts`) is the whole
-connection half, shared by every app:
+`useServerSocket(wsPath, options)` (`src/hooks/useServerSocket.ts`) handles the
+whole connection half for every app. It:
 
 1. opens one WebSocket to `resolveServerUrl(wsPath) + '?client_id=' + CLIENT_ID`;
 2. reconnects every 2 s while down — **except** after close codes `1008` (id
-   rejected) and `1013` (server at pipeline capacity), which are refusals the
-   server meant and which retrying would only make worse;
-3. on each frame, `JSON.parse`, drop anything whose `type` is not `"state"`, then
-   either store it (`message`) or hand it to `options.onMessage`;
-4. tracks a `status` — `connecting` / `online` / `offline` — distinguishing "never
-   reached the server" from "an established connection dropped".
+   rejected) and `1013` (server at pipeline capacity). The server meant those
+   refusals, and retrying only makes them worse;
+3. runs each frame through `JSON.parse`, drops anything whose `type` is not
+   `"state"`, then either stores it (`message`) or hands it to `options.onMessage`;
+4. tracks a `status` — `connecting` / `online` / `offline` — which separates
+   "never reached the server" from "an established connection dropped".
 
 It knows nothing about message *shape*. Each page's own hook maps the raw payload
-to a typed object, which is also where snake_case becomes camelCase.
+to a typed object, and turns snake_case into camelCase on the way.
 
-**The `onMessage` escape hatch matters.** Storing a message in React state costs
-a render pass. That is right for a small payload drawn as SVG (phasors,
-islanding) and wrong for a 50 Hz sample stream: `useTimeWindowSocket` keeps its
-samples in a `useRef` and notifies the chart through its own `subscribe`, so ten
-messages a second produce zero renders. React only re-renders when something it
-owns changes — the channel list, or the connection status.
+**Reach for the `onMessage` escape hatch when the stream is fast.** Storing a
+message in React state costs a render pass — right for a small payload drawn as
+SVG (phasors, islanding), wrong for a 50 Hz sample stream. `useTimeWindowSocket`
+therefore keeps its samples in a `useRef` and notifies the chart through its own
+`subscribe`, so ten messages a second trigger zero renders. React re-renders only
+when something it owns changes: the channel list, or the connection status.
 
 Server side
 --
 
-`src/server.py` is wiring only. It mounts each app package's `router` under its
-prefix from `APPS`, tags it with the app's url name, composes every package's
-`lifespan` into one, serves `/healthz`, and mounts the built client at `/` last
-(a mount at `/` is greedy and would shadow anything registered after it).
+`src/server.py` does wiring and nothing else. It mounts each app package's
+`router` under its prefix from `APPS`, tags it with the app's url name, composes
+every package's `lifespan` into one, serves `/healthz`, and mounts the built
+client at `/` last — a mount at `/` is greedy and swallows anything registered
+after it.
 
-From there the two families of app diverge.
+From there the two families of app part ways.
 
 **The scaffold demos** (`timeline/`, `pmu_test_streamer/`) keep it minimal:
 
 - `states: dict[str, ClientState]` — the entire store, keyed by client id;
 - `ConnectionManager` (`src/shared.py`) — client id → the set of live sockets,
   pure transport, one instance per app;
-- one `ticker()` task started by the package's `lifespan`, which each tick
+- one `ticker()` task, which the package's `lifespan` starts; each tick it
   advances only the clients that are playing and sends each its own
   `state_message()`.
 
-A client id may briefly hold several sockets (a reconnect overlapping the dying
-one), hence a set; `send_to_client` iterates a snapshot and drops any socket that
-fails mid-send, so one dead connection cannot break delivery to the others.
+A client id may briefly hold several sockets — a reconnect overlapping the dying
+one — which is why it is a set. `send_to_client` iterates a snapshot and drops any
+socket that fails mid-send, so one dead connection cannot break delivery to the
+rest.
 
-**The p-SWAMP layer** (`src/pswamp_web/`) is the real one, and has a pipeline
-behind it. Every endpoint opens the same way:
+**The p-SWAMP layer** (`src/pswamp_web/`) is the real one, with a pipeline behind
+it. Every endpoint opens the same way:
 
 ```python
 async with connected_hub(ws) as hub:
@@ -475,20 +431,19 @@ async with connected_hub(ws) as hub:
 ```
 
 `connected_hub` (`pswamp_web/hub.py`) parses `?client_id=`, accepts the socket,
-and acquires that client's `Hub` for the life of the connection. Note the
-ordering of the two refusals, which is deliberate: **no usable id** is closed
-*before* accepting, i.e. the handshake is rejected outright; **at capacity** is
-accepted *first* and then closed with `1013`, because a close code only reaches
-the browser on an established connection, and the client treats `1013` as
-terminal.
+and holds that client's `Hub` for the life of the connection. It refuses in two
+different orders, deliberately. Given **no usable id** it closes *before*
+accepting, rejecting the handshake outright. **At capacity** it accepts *first*
+and then closes with `1013`, because a close code only reaches the browser over an
+established connection — and the client treats `1013` as terminal.
 
-A `Hub` is one client's pipeline: a `RecordingPlayer` over the committed Nordic
+A `Hub` holds one client's pipeline: a `RecordingPlayer` over the committed Nordic
 44 recording, three p-SWAMP monitoring applications each with their own reader off
-that player, and the alarm/status/island stores. `HubRegistry` is the only thing
-that constructs one, and it enforces three rules — one pipeline per client however
-many sockets (a per-client lock, so the monitor's five simultaneous first-connects
-build one rather than racing to build five), a pipeline outlives its sockets by
-`IDLE_EVICT_SECONDS` so a reload rejoins the same stream, and never more than
+that player, and the alarm/status/island stores. Only `HubRegistry` constructs
+one, and it enforces three rules: one pipeline per client however many sockets (a
+per-client lock, so the monitor's five simultaneous first-connects build one
+rather than racing to build five); a pipeline outlives its sockets by
+`IDLE_EVICT_SECONDS`, so a reload rejoins the same stream; and never more than
 `MAX_PIPELINES`.
 
 Then each page picks one of **two delivery patterns**:
@@ -498,9 +453,9 @@ Then each page picks one of **two delivery patterns**:
 | **Poll the window** | `time_window` (10 Hz), `phasors` (5 Hz), `app_status` (2 Hz) | an `asyncio` task reads the client's window or stores on its own timer and sends |
 | **Subscribe to the bus** | `islanding`, `line_outage` | a listener on `hub.bus` offers into an `asyncio.Queue`; the push task blocks on that queue |
 
-Polling is the direct translation of what the Qt widgets do, and it is what keeps
-a 50 Hz sample stream from becoming 50 event-loop callbacks a second. Subscribing
-suits results and events, which arrive about once a second or less.
+Polling translates directly from what the Qt widgets do, and it keeps a 50 Hz
+sample stream from becoming 50 event-loop callbacks a second. Subscribing suits
+results and events, which arrive about once a second or less.
 
 Both bus-driven pages re-read the payload from the hub rather than carrying it on
 the queue, so a dropped notification costs latency and never content.
@@ -512,19 +467,22 @@ Every page sends through **`send_state()`** (`pswamp_web/wire.py`), never
 await ws.send_text(message.model_dump_json())
 ```
 
-`json.dumps` emits bare `NaN` and `Infinity` tokens, which `JSON.parse` rejects
-outright — and NaN is the *normal* case here, since a `TimeWindow` is all-NaN
-until it fills. Routing every page through one function means a new message type
-cannot quietly reintroduce that. The pydantic models in `wire.py` are the schema
-the Qt front end never needed, because its widgets read the very `TimeWindow`
+`json.dumps` emits bare `NaN` and `Infinity` tokens and `JSON.parse` rejects them
+outright — and NaN is the *normal* case here, since a `TimeWindow` holds nothing
+else until it fills. Routing every page through one function stops a new message
+type from quietly reintroducing it. A missing measurement therefore reaches the
+client as `null`, never `NaN` — the models declare `float | None` and the server
+substitutes — and a `TimeWindow` arrives all-`null` until it fills, which is
+normal and not an error. The pydantic models in `wire.py` are the
+schema the Qt front end never needed: its widgets read the very `TimeWindow`
 object the application thread writes into.
 
 The thread seam
 --
 
-p-SWAMP's monitoring applications are upstream code and run as plain daemon
-threads looping on a blocking read. That is kept exactly as it is. They cross into
-the event loop at **exactly two places**:
+p-SWAMP's monitoring applications are upstream code, and they run as plain daemon
+threads looping on a blocking read. We leave that exactly as it is. They cross
+into the event loop at **exactly two places**:
 
 1. **`Bus.publish_threadsafe()`** (`pswamp_web/bus.py`) → `loop.call_soon_threadsafe`
    → `_deliver` on the loop → synchronous listeners (the stores) and queued
@@ -534,24 +492,24 @@ the event loop at **exactly two places**:
    append counter *and* the data under the window's own lock, so the two describe
    the same instant.
 
-Everything else — WS handlers, push tasks, request handlers — is cooperatively
+Everything else — WS handlers, push tasks, request handlers — runs cooperatively
 scheduled on the one loop and never truly parallel, so none of it needs a lock.
-Adding a third seam is how that stops being reviewable.
+Add a third seam and that stops being reviewable.
 
 The delta protocol
 --
 
-`time_window` is the one page where the naive thing does not work. A 30 s window
-of 8 channels at 50 Hz is 12,000 numbers; re-sending it 10×/s is roughly a
+`time_window` is the one page where the naive approach fails. A 30 s window of 8
+channels at 50 Hz holds 12,000 numbers, and re-sending it 10×/s costs roughly a
 megabyte per second per client. So it sends the window once (`mode: "full"`) and
-after that only rows that are new (`mode: "append"`) — measured at ~5.9 KB/s
+afterwards only the rows that are new (`mode: "append"`) — measured at ~5.9 KB/s
 against ~1.4 MB/s.
 
-The counter on the window is what makes that possible: `new_rows = appended -
-state.last_appended`. Two cases force a full message instead — a fresh selection
-(the client's traces are for different channels entirely), and a client that has
-fallen behind by more than the window, where an append would splice unrelated
-data onto what it already has.
+The counter on the window makes that possible: `new_rows = appended -
+state.last_appended`. Two cases force a full message instead: a fresh selection,
+where the client's traces belong to different channels entirely; and a client that
+has fallen behind by more than the window, where an append would splice unrelated
+data onto what it already holds.
 
 
 Upstream: how a command reaches the server
@@ -560,8 +518,8 @@ Upstream: how a command reaches the server
 Client side
 --
 
-A page hook exposes one named function per operation, each wrapping
-`postCommand` from `src/lib/commands.ts`:
+A page hook exposes one named function per operation, each wrapping `postCommand`
+from `src/lib/commands.ts`:
 
 ```ts
 const play = useCallback(
@@ -570,18 +528,18 @@ const play = useCallback(
 )
 ```
 
-`postCommand(path, options?)` is the only place anything goes upstream. It fills in
-any `{placeholder}` in the path from `options.path` (url-encoding each value),
-resolves the url, appends `?client_id=`, sets `Content-Type` only when there is a
-body, and throws a `CommandError` carrying the status and FastAPI's `detail` on any
-non-2xx. Both the path and the body are typed against the generated contract, so a
-typo is a `tsc` error rather than a 404 — see "Changing the api" above.
+`postCommand(path, options?)` is the only code that sends anything upstream. It
+fills in any `{placeholder}` in the path from `options.path` (url-encoding each
+value), resolves the url, appends `?client_id=`, sets `Content-Type` only when it
+carries a body, and throws a `CommandError` with the status and FastAPI's `detail`
+on any non-2xx. The contract types both the path and the body, so a typo fails
+`tsc` instead of returning a 404 — see "Changing the api" above.
 
-Callers log and carry on (`fire` in each hook). A command is fire-and-forget from
-the UI's point of view: the resulting state arrives on the socket or not at all,
-so a failed command produces no change — which is what the user already sees.
-Controls stay `disabled={!connected}` for the same reason: the POST would reach
-the server without a socket, but its result would have nowhere to arrive.
+Callers log and carry on (`fire` in each hook). The UI treats a command as
+fire-and-forget: the resulting state arrives on the socket or not at all, so a
+failed command changes nothing — which is what the user already sees. Keep
+controls `disabled={!connected}` for the same reason: without a socket the POST
+still reaches the server, but its result has nowhere to land.
 
 Server side
 --
@@ -595,27 +553,28 @@ async def play(client_id: ClientId) -> CommandAck:
 ```
 
 - **`ClientId`** — an annotated query parameter, so FastAPI validates it before
-  any handler runs (missing or non-numeric is a 422).
+  any handler runs; missing or non-numeric returns a 422.
 - **`CommandAck`** — `{status, applied}`. Deliberately not the new state.
 - **`operation_id`** — an explicit, readable name per operation.
 - Bodies are pydantic models (`SequenceSelection`, `ChannelSelection`,
-  `AlarmNote`), so a malformed command is a 422 rather than a handler crash.
+  `AlarmNote`), so a malformed command returns a 422 instead of crashing a
+  handler.
 
 `shared.py` holds `ClientId` and `CommandAck` for the scaffold apps.
 `pswamp_web/wire.py` keeps deliberate **twins** of both, because that package may
-not import the rest of the web backend — it is written to move into the desktop
-package as `pswamp/web/`. Change one pair and change the other.
+not import the rest of the web backend — we wrote it to move into the desktop
+package as `pswamp/web/`. Change one pair, change the other.
 
-Both `ClientId`s are a `str` matching `^\d{1,20}$` — the exact rule
-`read_client_id` applies to a socket's query parameter, in both `shared.py` and
-`pswamp_web/hub.py`. They must agree, or a page's commands would address
-different state from its sockets. (They once did not: `shared.py` had an `int`
-with `ge=1` while `wire.py` had this pattern, which published two schemas for one
-identity and disagreed about `"0"`.)
+Both `ClientId`s are a `str` matching `^\d{1,20}$`, the exact rule
+`read_client_id` applies to a socket's query parameter in both `shared.py` and
+`pswamp_web/hub.py`. They have to agree, or a page's commands address different
+state from its sockets. They once did not: `shared.py` used an `int` with `ge=1`
+while `wire.py` used this pattern, which published two schemas for one identity
+and disagreed about `"0"`.
 
-Then the handler has to do two things: change the right state, and make sure the
-change reaches the screen. There are three arrangements, because the state lives
-in three different places.
+Every handler then does two things: change the right state, and get that change
+onto the screen. The state lives in three different places, so there are three
+arrangements.
 
 **1. State in a module dict** — `timeline`, `pmu_test_streamer`, the scaffold
 template. The simplest case, and it needs no new plumbing: `ConnectionManager`
@@ -629,9 +588,9 @@ POST /api/timeline/playback/play?client_id=42
   → 200 CommandAck(applied="play")
 ```
 
-**2. State in the client's pipeline** — `islanding`. The hub is reachable by
-client id, but the *push task* is not: it is blocked on its queue inside a socket
-handler. So the endpoint mutates and then wakes it:
+**2. State in the client's pipeline** — `islanding`. A client id reaches the hub,
+but not the *push task*, which sits blocked on its queue inside a socket handler.
+So the endpoint mutates and then wakes it:
 
 ```
 POST /api/islanding/alarms/<uuid>/acknowledge?client_id=42
@@ -642,16 +601,16 @@ POST /api/islanding/alarms/<uuid>/acknowledge?client_id=42
   → 200 CommandAck(applied="acknowledge")
 ```
 
-An operator action changes the alarm list, which no application publishes an
-event for; without the nudge the page would show it only when the islanding
-detector next produced a result, up to a second later. Measured round trip with
-it: ~1 ms.
+An operator action changes the alarm list, and no application publishes an event
+for that. Without the nudge, the page would show the change only when the
+islanding detector next produced a result — up to a second later. Measured round
+trip with it: ~1 ms.
 
-**3. State on the connection itself** — `time_window`. Which channels a view has
-selected is per-*connection*, held in a local variable inside the socket handler,
-and a command arrives on no connection at all. `SessionRegistry`
-(`pswamp_web/sessions.py`) is the fix: the handler publishes its `ClientState`
-for the life of the socket, and the command finds it by client id.
+**3. State on the connection itself** — `time_window`. A view's channel selection
+is per-*connection*, living in a local variable inside the socket handler, and a
+command arrives on no connection at all. `SessionRegistry`
+(`pswamp_web/sessions.py`) fixes that: the handler publishes its `ClientState` for
+the life of the socket, and the command finds it by client id.
 
 ```
 POST /api/time-window/selection?client_id=42   {"channels": [5, 9]}
@@ -663,22 +622,23 @@ POST /api/time-window/selection?client_id=42   {"channels": [5, 9]}
     the mode:"full" message by itself.
 ```
 
-A client may hold several sessions for one endpoint (two tabs), so a command
-applies to all of them — one browser is one viewer, and its views should agree.
-The registry stores them in a **list**, not a set: these are `eq=True` dataclasses,
-which Python makes unhashable.
+A client may hold several sessions for one endpoint — two tabs — so a command
+applies to all of them: one browser is one viewer, and its views should agree. The
+registry stores them in a **list**, not a set, because these are `eq=True`
+dataclasses and Python makes those unhashable.
 
 Two rules that hold across all three
 --
 
 - **A command never builds a pipeline.** `live_hub(client_id)` peeks; it never
-  calls `REGISTRY.acquire`. Acquiring would cost four threads and ~30 MB against
-  `MAX_PIPELINES` for a replay nobody is watching, and the POST has no socket to
-  deliver results to. No pipeline is a 404 — in practice, "you have no page open".
+  calls `REGISTRY.acquire`. Acquiring would spend four threads and ~30 MB against
+  `MAX_PIPELINES` on a replay nobody is watching, and the POST has no socket to
+  deliver results to. No pipeline means a 404 — in practice, "you have no page
+  open".
 - **A socket that receives nothing still needs its receive loop.** Every WS
   handler ends in `while True: await ws.receive_text()`. Without a pending
-  receive, a closed socket is only noticed on the next send, so an idle client
-  lingers indefinitely — holding a pipeline slot, in the pswamp_web case.
+  receive, nothing notices a closed socket until the next send, so an idle client
+  lingers indefinitely — holding a pipeline slot, in the `pswamp_web` case.
 
 
 The plain GETs
@@ -687,9 +647,9 @@ The plain GETs
 Two endpoints are neither commands nor pushed state, because what they return
 never changes: the grid topology (`GET /api/grid/model`) and the channel
 catalogue (`GET /api/time-window/channels`). A page fetches each once on mount
-via `resolveApiUrl`, and the browser is free to cache it. Putting them on a
-socket would mean every consumer's hook had to handle a second message shape to
-receive something static.
+via `resolveApiUrl`, and the browser may cache it. Putting them on a socket would
+force every consumer's hook to handle a second message shape just to receive
+something static.
 
 
 Error and refusal semantics
@@ -707,14 +667,15 @@ Error and refusal semantics
 | socket when every pipeline is in use | accept, then close `1013` — client stops retrying |
 | unknown path under `/api/` | real `404`, never the SPA shell (`SPAStaticFiles._NO_FALLBACK`) |
 
-`"0"` is *accepted*, incidentally — the rule is "numeric and at most 20 digits",
-not "a positive integer". Nothing generates it (the browser picks a random
-positive integer) and it is a valid key like any other; it is called out only
-because an earlier `ge=1` on the scaffold apps rejected it, so the two halves used
-to disagree.
+The server *accepts* `"0"`, incidentally: the rule reads "numeric and at most 20
+digits", not "a positive integer". Nothing generates it — the browser picks a
+random positive integer — and it works as a key like any other. It earns a mention
+only because an earlier `ge=1` on the scaffold apps rejected it, which left the
+two halves disagreeing.
 
-Which is the practical difference the two transports make: a rejected command can
-say *why*, with a status code, in the access log and the Network tab.
+All of which shows the practical difference the two transports make: a rejected
+command can say *why*, with a status code, in the access log and in the Network
+tab.
 
 
 Where the pieces live
@@ -740,43 +701,42 @@ Where the pieces live
 Implementation notes
 ==
 
-**Duplicate schema names are collapsed.** `CommandAck` is declared twice on
-purpose — in `shared.py` and in `pswamp_web/wire.py` — and the reason is the
-repo's central compromise: **one analysis core, two front ends.** The p-SWAMP web
-layer is written to move into the desktop package as `pswamp/web/`, a third
-presentation adapter beside `gui/` (PySide6) and `visualization/`, so it may not
-import anything from the rest of the web backend — `shared.py` included, which is
-where the scaffold apps keep their copy. Two packages that may not share a module
-need two declarations of the same four-line model. The duplication is the price
-of the Qt and web front ends living over one core, paid here rather than in the
-core itself.
+**We collapse duplicate schema names.** `CommandAck` exists twice on purpose — in
+`shared.py` and in `pswamp_web/wire.py` — and the reason is this repo's central
+compromise: **one analysis core, two front ends.** We wrote the p-SWAMP web layer
+to move into the desktop package as `pswamp/web/`, a third presentation adapter
+beside `gui/` (PySide6) and `visualization/`, so it may import nothing from the
+rest of the web backend — `shared.py` included, where the scaffold apps keep their
+copy. Two packages that cannot share a module need two declarations of the same
+four-line model. The Qt and web front ends pay for their shared core here, rather
+than in the core itself.
 
-The cost lands in the published contract, not in the code. Pydantic
+That cost lands in the published contract, not in the code. Pydantic
 disambiguates same-named classes by *module path*, so the reply to all fourteen
 commands would otherwise publish as `shared__CommandAck` and
 `pswamp_web__wire__CommandAck` — two names for one concept, one of them baking in
-a path that is documented to be moving, which would rename a schema in every
-consumer's generated code the day that move happens. Both classes therefore set
+a path we have documented as moving, which would rename a schema in every
+consumer's generated code the day that move lands. Both classes therefore set
 `model_config = ConfigDict(title="CommandAck")`, and `collapse_titled_twins` folds
 structurally identical twins back to that title. Twins that genuinely diverge keep
-their separate names, which is the correct outcome for two different shapes.
+their separate names, which is the right outcome for two different shapes.
 
-**Don't expect this to expire on its own**, and note which half is the workaround.
-The *duplication* is the standing compromise; `collapse_titled_twins` is what
-keeps it out of the contract, and it is the piece consumers depend on. Whether the
-duplication ever goes away is decided by §7 of
-`WIP-context-port-from-qt-to-web-frontend.md`, and the answer is the opposite way
-round from the intuition: if **Qt stays**, `pswamp_web/` moves *into* the desktop
-package and still cannot import the web backend's `shared.py`, so the twin becomes
-permanent. Only if **Qt is retired** and the two Python projects merge could one
-`CommandAck` serve everything. Until that is settled, treat the twin as
-load-bearing and keep the two in step.
+**Don't expect this to expire on its own**, and keep straight which half is the
+workaround. The *duplication* is the standing compromise; `collapse_titled_twins`
+keeps it out of the contract, and consumers depend on that piece. §7 of
+`WIP-context-port-from-qt-to-web-frontend.md` decides whether the duplication ever
+goes away, and the answer runs opposite to the intuition: if **Qt stays**,
+`pswamp_web/` moves *into* the desktop package and still cannot import the web
+backend's `shared.py`, so the twin becomes permanent. Only if **Qt goes** and the
+two Python projects merge could one `CommandAck` serve everything. Until that is
+settled, treat the twin as load-bearing and keep the two in step.
 
 **`openapi-typescript` declares a stale peer.** It wants `typescript@^5.x` while
-this project is on 6; it drives the TS 6 compiler API without complaint (checked),
-so `app/client-web/package.json` carries an `overrides` entry resolving that peer
-to the project's own TypeScript. That keeps plain `npm install` and `npm ci`
-working with no flags, rather than pinning everything to `--legacy-peer-deps`. The
-visible cost: `scripts/update-dependencies.sh` runs `npm-check-updates --peer`,
-which will decline to bump TypeScript past 5 while the stale range stands, and
-says so in its report. Drop the `overrides` entry when upstream widens the range.
+this project runs 6, though it drives the TS 6 compiler API without complaint (we
+checked). So `app/client-web/package.json` carries an `overrides` entry pointing
+that peer at the project's own TypeScript, which keeps plain `npm install` and
+`npm ci` working with no flags rather than pinning everything to
+`--legacy-peer-deps`. It costs one visible thing: `scripts/update-dependencies.sh`
+runs `npm-check-updates --peer`, which refuses to bump TypeScript past 5 while the
+stale range stands, and says so in its report. Drop the `overrides` entry when
+upstream widens the range.

@@ -653,7 +653,15 @@ before touching the api:
 
 - **The socket half is in there too**, as `components.schemas` plus an
   `x-websocket-channels` extension — deliberately not AsyncAPI, which would be a
-  second spec format and a second generator for seven one-way channels.
+  second spec format, a second generator and a second drift check for seven
+  one-way channels that each carry a single message shape. An entry reads
+  `{"path": "/api/time-window/ws", "app": "time-window", "direction":
+  "server-to-client", "message": {"$ref": "#/components/schemas/TimeWindowSlice"}}`.
+  `x-` keys are legal OpenAPI and generators skip what they don't recognise, so
+  the document stays valid everywhere while the schemas — the part codegen
+  consumes — come through as ordinary models. Revisit that choice if a channel
+  ever grows a second message shape or an upstream direction; today every channel
+  runs downstream only and carries one model.
 - **The web client's wire types are GENERATED.** A page hook says
   `type XMessage = Wire['XState']` (`src/api/wire.ts`), never a hand-copy of the
   Python model. Its camelCase mapping stays hand-written — that is the client's
