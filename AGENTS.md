@@ -198,8 +198,9 @@ Two deployables, one wire protocol:
   standalone scaffold demo to copy — a counter over a WebSocket plus two POST
   commands, where the connection half lives once in
   `src/hooks/useServerSocket.ts` and the app's own hook
-  (`useReferenceSubappSocket`) adds only its wire type and its commands. `/pmu-test-streamer`
-  (`PmuTestStreamerPage`) is the older demo beside it, on its way out. See
+  (`useReferenceSubappSocket`) adds only its wire type and its commands.
+  `/pmu-test-streamer` (`PmuTestStreamerPage`) is the older demo beside it, on
+  its way out. See
   "Adding a p-SWAMP view" and "Adding a page" below.
 
 Key invariants to preserve:
@@ -338,9 +339,10 @@ Key invariants to preserve:
   process serving?" is the whole health story; there is no `/readyz`. It stays at
   the root, not under `/api`: it is the process's health, not any one app's.
 - **Every api lives under `/api/<app>/`.** The prefix is `AppEntry.prefix`,
-  derived from the entry's slug in `APPS` in `server.py`, not from the package, so a router declares plain paths (`"/ws"`,
-  `"/count/bump"`) and is reachable at `/api/reference-subapp/ws`. Keep the
-  prefix aligned with the web client's route for the same app. `/api` is also the only
+  derived from that entry's slug in `APPS` in `server.py` rather than from the
+  package, so a router declares plain paths (`"/ws"`, `"/count/bump"`) and is
+  reachable at `/api/reference-subapp/ws`. The slug is also the web client's
+  route for the same app, which is what keeps the two halves reading alike. `/api` is also the only
   thing the Vite dev proxy forwards, so an endpoint outside it won't reach the
   backend in dev. The `include_router` loop tags each app with its own url name,
   so the generated api description groups a package's operations together for
@@ -396,8 +398,10 @@ simply becomes `from pswamp.web.wire import …`. So anything both sides need is
 `get_logger`. Reading the rule as "duplicate it, then keep the copies equal" is
 what produced four twins and the `collapse_titled_twins` machinery that used to
 sit in `api_contract.py` to hide them from the published contract. Don't
-reintroduce that: add to `wire.py` (or `log.py`) and re-export. Note this is only **one of two**
-possible directions: §7 of `doc/WIP-context-port-from-qt-to-web-frontend.md` sets
+reintroduce that: add to `wire.py` (or `log.py`) and re-export.
+
+Note this is only **one of two** possible directions: §7 of
+`doc/WIP-context-port-from-qt-to-web-frontend.md` sets
 it against the opposite move — root `src/` under `app/server-python/` — and argues
 the choice follows from whether the Qt front end is being retired, not from
 tidiness. Either way, the invariant that keeps this package self-contained is what

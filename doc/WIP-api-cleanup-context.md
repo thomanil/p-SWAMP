@@ -23,7 +23,7 @@ step rather than code making the copies impossible.
 | 3 | Extract the repeated WebSocket endpoint tail | done |
 | 4 | Drop the hand-written snake→camel mapping in the client hooks | done |
 | 5 | Move the panel `variant` convention into `<Panel>` | done |
-| 6 | ~~Delete `pmu-test-streamer`~~ | **deferred — keep it for now** |
+| 6 | Delete `pmu-test-streamer` | **deferred — keep it for now** |
 | 7 | Make the `APPS` registry explicit and self-checking | done |
 | 8 | Fix stale per-client comments | done |
 
@@ -119,9 +119,42 @@ test framework is not this pass's job); reproduce it with
 `fastapi.testclient.TestClient(server.app)`. Worth turning into a real test file
 one day — it is the closest thing to an integration test the stack has.
 
+## Step 6, deferred
+
+Deleting the `pmu-test-streamer` subapp is the cheapest remaining reduction —
+~500 lines across both halves, plus `sample_data.txt`, a nav entry, contract
+entries and a paragraph in most of the docs, all for a demo that `AGENTS.md`
+already describes as superseded. It stays for now by explicit decision. Every
+step above kept it working and treated it as a first-class app, so nothing here
+makes removing it harder later.
+
+What that costs meanwhile: it is a second, differently-shaped example sitting
+next to the one people are told to copy. `reference-subapp` is the one to copy;
+the streamer is worth reading only for its ticker.
+
 ## Ground rules for this pass
 
-- No behaviour changes. Same wire format, same URLs, same UI.
+- No behaviour changes. Same wire format, same URLs, same UI. The two contract
+  diffs across the six commits are a docstring and one added tag description.
 - `./scripts/error_check.sh` green before each commit; contract regenerated and
   committed where it moved.
 - One commit per step, subject prefixed `cleanup(N):`.
+- Where a step changed the scaffold templates or the registries the generator
+  patches, `./scripts/generate-new-subapp.sh` was run for real afterwards, the
+  generated subapp driven over its socket, and the tree reset.
+
+## What this did not touch
+
+Deliberately out of scope, and still true of the tree:
+
+- **No test suite.** The stack has no automated tests at all; this pass leaned on
+  a throwaway in-process script (above) and `error_check.sh`. That is the largest
+  remaining gap, and the first thing a new team member will miss.
+- **The two-registry-per-app spelling.** A slug is still written by hand in the
+  package name, the page folder, the route, the nav item and two consts in
+  `servers.ts`. The generator writes all of them, so the cost lands only on a
+  rename done by hand.
+- **`doc/` volume.** ~4,400 lines of prose against ~9,000 of hand-written code.
+  Steps 1-3 and 7 deleted several "keep X and Y in sync" instructions by making
+  X and Y one thing, which is the only kind of documentation cut worth making
+  automatically; the rest is a judgement call nobody has made yet.
