@@ -660,6 +660,34 @@ per clone with `git config core.hooksPath .githooks`. Bypass with
 runs the same script (see "CI" below), so skipping it locally just moves the
 failure to a slower place.
 
+Dependency upgrades (all four manifests + all three lockfiles, in one pass):
+
+```
+./scripts/update-dependencies.sh          # TARGET=minor for no major jumps; NO_CHECK=1 skips the error_check.sh run
+```
+
+It produces a *candidate diff*, never a decision: `npm-check-updates -u --peer`
+plus `npm install` on the web client (falling back to a from-scratch resolve
+when an existing lock anchors npm to a tree it cannot reconcile — seen for
+real), then `uv lock --upgrade` on the root package and then on the web backend.
+That order matters: the second re-reads the first through the path dependency,
+which is only true because `--upgrade` implies `--refresh`.
+
+It reports twice. First "What actually moved" — every version change in all
+three lockfiles, direct dependencies listed and transitive ones counted
+(`VERBOSE=1` lists them). Read that instead of the lockfile diff, which is ~95%
+per-wheel sha256 hashes and a poor summary of an upgrade. Then `uv tree
+--outdated --depth 1` for both Python projects, which is the one gap the script
+cannot close on its own: uv has no npm-check-updates, so `uv lock --upgrade`
+never widens a range, and a capped dependency (`fastapi>=0.115.6,<0.116`) needs
+a hand edit to `pyproject.toml` before it can move.
+
+The routine around the script — run on a branch, read the reports, run the app,
+open a PR — is documented in "Updating dependencies" in
+`doc/client-server-rig.md`, and the manifests have a `CODEOWNERS` entry so the
+diff lands in front of a reviewer. This is the only script here that needs the
+network.
+
 Deploy / test the real artifact:
 
 ```

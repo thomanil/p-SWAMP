@@ -35,6 +35,15 @@ at least for a "reference app" to ensure the basic structure of the repo/project
   Each such decoupling makes the project harder for partners to iterate in quickly!
 
 
+# How to onboard when you are new to the project
+
+- Get Statnett and RND platform user/access
+- Get org/repo access in Github
+- Clone this repo
+- Make sure you are able to run the two scripts that launches the project locally: 
+`scripts/start-local-hotloaded-pswamp-server.sh` and `scripts/start-local-hotloaded-pswamp-web-client.sh`
+- Make sure the error check script runs ok for you: `scripts/error_check.sh`
+- Change something trivial about the project in a branch, create your first pull request to merge it into main
 
   
 Folder structure for client-server specific bits
@@ -472,6 +481,35 @@ every package — direct and transitive — that everyone actually gets. Re-lock
 the versions already in the lock, so an upgrade is a deliberate `uv lock --upgrade`,
 never a side effect of adding something unrelated. `./scripts/error_check.sh` fails if
 the two drift apart, as does the Docker build.
+
+Updating dependencies
+--
+
+It is good hygiene to update dependencies often, to stay ahead of supply chain attacks etc
+(LLM tech is accelerating security risks). One script does the whole repo — both Python
+projects and the web client, manifests and lockfiles:
+
+```
+./scripts/update-dependencies.sh          # TARGET=minor to skip major-version jumps
+```
+
+What it produces is a *candidate diff*: run it on a branch, read what it reports. Start the
+app and click through it, then open a pull request so someone else reads the same diff. The
+manifests have a `CODEOWNERS` entry so that lands in front of a reviewer.
+
+Read its **"What actually moved"** report rather than the lockfile diff. A lockfile diff is a
+bad summary of an upgrade — around 95% of its changed lines are per-wheel sha256 hashes, so
+one numpy bump rewrites ~40 lines while moving one version. The report prints the versions
+themselves, direct dependencies first and transitive ones as a count (`VERBOSE=1` lists
+those too). The manifests are the decision and are short enough to read in full.
+
+One thing to expect: on the npm side the script moves the version *ranges* themselves, on
+the Python side it cannot — `uv lock --upgrade` respects the bounds in `pyproject.toml`, and
+uv has no `npm-check-updates`. So a capped dependency needs a hand edit before it can move,
+and the script ends by listing exactly which ones are held back and how far they could go.
+
+The header comment in `scripts/update-dependencies.sh` explains the rest — what it runs in
+what order, why, and how to recover from a half-finished run.
 
 Optional extras
 --

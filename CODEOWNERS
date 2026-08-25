@@ -1,0 +1,60 @@
+# =============================================================================
+# Code owners for p-SWAMP
+# =============================================================================
+#
+# WHAT THIS FILE IS
+#
+#   A list of file patterns, each with one or more owners: the people who know
+#   a given corner of the repo well enough that they would want to know when it
+#   changes.
+#
+# HOW IT INTERACTS WITH PULL REQUESTS
+#
+#   GitHub reads this file whenever a pull request is opened against main. If
+#   the branch touches files somebody owns, that person is added as a reviewer
+#   AUTOMATICALLY and gets a notification. If you want to keep tabs on a certain part of this repo
+#   add yourself as owner on that directory so that you get notified about new PRs that touch that code.
+#
+#   main is protected, but code-owner approval is
+#   NOT required to merge pull requests. The point of our PRs is
+#   to get the right eyes on a change, not to add a waiting step.
+#
+# ADDING YOURSELF
+#
+#   If you own an area, or keep being surprised by changes to some directory,
+#   add a line for it. A few things to know:
+#
+#     - The LAST matching pattern wins, so broad rules go first and specific
+#       ones further down. Only that one pattern applies — matches are not
+#       combined.
+#     - Paths starting with / are anchored to the repo root; a trailing /
+#       matches everything under a directory.
+#     - An owner must be a GitHub user or team with write access to this repo.
+#       GitHub silently ignores a line naming anyone else.
+#     - This file only takes effect once it is on main. Edits to it on a
+#       feature branch do not apply to that branch's own PR.
+#
+#   Syntax reference: https://docs.github.com/articles/about-code-owners
+#
+# =============================================================================
+#
+# TODO Add more unicus people on the integration/architecture paths
+# TODO Add in more SINTEF, IFE etc people
+
+# Deploy manifests for the local minikube and remote rndp clusters.
+/k8s/          @thomanil
+
+# CI pipeline and agent/copilot instructions.
+/.github/      @thomanil
+
+# Dependency manifests and lockfiles, both halves of the repo. These patterns
+# are unanchored, so they match at every depth: the web client's package.json /
+# package-lock.json, and both Python projects' pyproject.toml / uv.lock (the
+# desktop package at the root and the web backend under app/server-python).
+# A dependency bump is the change most worth a second pair of eyes — it is
+# usually produced wholesale by scripts/update-dependencies.sh, so the diff is
+# large, machine-written, and the only place a supply-chain surprise can enter.
+package.json        @thomanil
+package-lock.json   @thomanil
+pyproject.toml      @thomanil
+uv.lock             @thomanil

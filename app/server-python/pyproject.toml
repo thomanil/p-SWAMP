@@ -13,8 +13,8 @@ version = "0.1.0"
 description = "P-SWAMP state server: WebSocket timeline backend."
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.115.6,<0.116",
-    "uvicorn[standard]>=0.34,<0.35",
+    "fastapi>=0.141.1,<0.142",
+    "uvicorn[standard]>=0.52.4,<0.53",
     "p-swamp",
 ]
 
@@ -48,7 +48,7 @@ p-swamp = { path = "../../", editable = true }
 # everything else, and defined in exactly one place rather than duplicated across
 # the two scripts that invoke it.
 [dependency-groups]
-dev = ["ruff==0.16.2"]
+dev = ["ruff==0.16.4"]
 
 # Not an installable package: src/ is a plain source folder that the process runs
 # from, not a packaging layout. src/server.py is the one entrypoint and imports
