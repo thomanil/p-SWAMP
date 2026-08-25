@@ -8,12 +8,14 @@ state belongs in that app's own package.
 Most of what an app package needs is *defined* one level down, in `pswamp_web/`,
 and re-exported here. That looks backwards and is not:
 
-`pswamp_web/` is written to move into the desktop package as `pswamp/web/`, so
-nothing inside it may import from the rest of this backend. The rule is one-way,
-though — it says nothing about importing *inward*, which is what this module
-does, and which stays legal after the move (the web backend already depends on
-`p-swamp`, so the import becomes `from pswamp.web.wire import ...` and nothing
-else changes).
+`pswamp_web/` is kept self-contained — nothing inside it may import from the
+rest of this backend — because the repo's two Python projects are meant to become
+one, and the direction depends on how long the Qt desktop path lives: either that
+package moves in under `pswamp/`, or — once Qt is gone — the root package moves in
+here (§7 of `doc/WIP-context-port-from-qt-to-web-frontend.md`). Self-containment
+is what keeps either move cheap. The rule is one-way, though — it says nothing
+about importing *inward*, which is what this module does, and which stays legal
+whichever way the consolidation goes.
 
 Getting that direction right is what removed four "change one, change the other"
 duplicates: `ClientId`, `CommandAck`, the client-id parser, and the stdout

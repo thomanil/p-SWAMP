@@ -146,7 +146,8 @@ downstream type from there rather than hand-copying the Python model's fields â€
 the server sends them, snake_case and all, all the way to the frontend components.
 
 This document is generated from the server and committed at `doc/api/openapi.json`;
-`scripts/error_check.sh` fails if the two disagree. See `doc/the-client-server-api.md for more detail.`.
+`scripts/error_check.sh` fails if the two disagree. See
+`doc/the-client-server-api.md` for more detail.
 """
 
 

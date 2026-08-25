@@ -15,10 +15,13 @@ declared here, and every page sends through :func:`send_state`.
 It also holds the names every REST command endpoint declares itself with --
 :data:`ClientId`, :class:`CommandAck`, :func:`read_client_id` -- for the whole
 backend, not just this package. They live here rather than in ``src/shared.py``
-because the import may only run one way: this package is written to move into the
-desktop package as ``pswamp/web/``, so nothing in it may import from the rest of
-the web backend, while ``shared.py`` importing *inward* costs nothing and stays
-legal after the move. It re-exports them for the app packages beside it.
+because the import may only run one way: this package is kept self-contained so
+that the repo's two Python projects can be consolidated in whichever direction the
+Qt front end's lifetime ends up dictating (§7 of
+``doc/WIP-context-port-from-qt-to-web-frontend.md``), so nothing in it may import
+from the rest of the web backend, while ``shared.py`` importing *inward* costs
+nothing and stays legal whichever way that goes. It re-exports them for the app
+packages beside it.
 
 Two conventions worth knowing before adding a message:
 
@@ -135,8 +138,9 @@ story.
 
 The scaffold app packages under ``src/`` import this (and :class:`CommandAck`)
 through ``shared.py``, which re-exports both. The import direction is one-way:
-nothing in here may import from the rest of the web backend, because this package
-is written to move into the desktop package as ``pswamp/web/``.
+nothing in here may import from the rest of the web backend, so that the Python
+consolidation (§7 of ``doc/WIP-context-port-from-qt-to-web-frontend.md``) stays
+cheap in either direction.
 """
 
 

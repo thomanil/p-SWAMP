@@ -380,32 +380,34 @@ Key invariants to preserve:
 the **desktop `p-swamp` package** at the repo root. It is the only code in `app/`
 that imports `pswamp.*`.
 
-**It is written to move into that package.** The intended end state is
-`src/pswamp/web/` — the sibling of the existing `gui/` (PySide6) and
-`visualization/` (pyqtgraph) packages, a third presentation adapter over the same
-Qt-free core. So the package obeys two rules that are otherwise unusual here:
-*nothing inside it imports from the rest of the web backend* (not `shared.py`, not
-`server.py`), and *every import between its own modules is relative*. Moving it is
-then a `git mv` plus the handful of import lines in `server.py` that name it.
-Don't add a dependency that breaks that.
+**It is kept self-contained, because it has to be movable.** Two things are
+settled: the client-server stack is the direction this project is going, and the
+analysis core at the repo root stays whatever happens to the front ends. The open
+question is **how long the Qt desktop path lives alongside them** — and that is
+what decides where the shared Python ends up, which is why this package must be
+cheap to move. §7 of `doc/WIP-context-port-from-qt-to-web-frontend.md` lays out
+the two mutually exclusive moves: while Qt stays, this package moves in under
+`pswamp/` as a third presentation adapter beside `gui/` and `visualization/`; once
+Qt is gone, "the core" and "the web backend's only Python dependency" are the same
+thing, so the root package moves in *here* instead and the root becomes repo
+furniture. Don't write either destination down as decided. What both rely on is
+the same, so the package obeys two rules that are otherwise unusual here:
+*nothing inside it imports from the rest of the web backend* (not `shared.py`, not `server.py`), and
+*every import between its own modules is relative*. That is what makes moving it a
+`git mv` plus the handful of import lines in `server.py` that name it. Don't add a
+dependency that breaks it.
 
 **The rule is one-way, and that matters.** It forbids importing *outward*; the
-rest of the backend importing *inward* is fine, and stays fine after the move —
-the web backend already depends on `p-swamp`, so `from pswamp_web.wire import …`
-simply becomes `from pswamp.web.wire import …`. So anything both sides need is
+rest of the backend importing *inward* is fine, and stays fine either way — if
+this package ends up under `pswamp/`, `from pswamp_web.wire import …` simply
+becomes `from pswamp.web.wire import …`; if the core moves here instead, nothing
+changes at all. So anything both sides need is
 **defined here and re-exported by `shared.py`**, never declared twice:
 `ClientId`, `CommandAck`, `CLIENT_ID_PATTERN`/`read_client_id`, `send_state` and
 `get_logger`. Reading the rule as "duplicate it, then keep the copies equal" is
 what produced four twins and the `collapse_titled_twins` machinery that used to
 sit in `api_contract.py` to hide them from the published contract. Don't
 reintroduce that: add to `wire.py` (or `log.py`) and re-export.
-
-Note this is only **one of two** possible directions: §7 of
-`doc/WIP-context-port-from-qt-to-web-frontend.md` sets
-it against the opposite move — root `src/` under `app/server-python/` — and argues
-the choice follows from whether the Qt front end is being retired, not from
-tidiness. Either way, the invariant that keeps this package self-contained is what
-makes both moves cheap.
 
 Two things it compensates for rather than fixing in the core, both marked in the
 code and both listed in §11 of
