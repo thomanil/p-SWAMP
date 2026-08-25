@@ -7,13 +7,16 @@ patches the registries.
 - `server-python/` → `app/server-python/src/<pkg>/`
 - `client-web/` → `app/client-web/src/pages/<slug>/`
 
+A generated subapp comes out looking like the checked-in reference subapp
+(`app/server-python/src/reference_subapp/`,
+`app/client-web/src/pages/reference-subapp/`) — that is the worked example to
+read. What the script writes is then yours: change it freely.
+
 **This file is where the scaffolding is explained.** The templates themselves
-carry only the comments a real subapp would carry — roughly what
-`app/server-python/src/pmu_test_streamer/` and
-`app/client-web/src/pages/pmu-test-streamer/` carry — because every generated
-subapp inherits its comments verbatim, and doc *about the scaffolding* would then
-be copied into a dozen apps it does not describe, ageing separately in each. Put
-new guidance about the templates here, and keep it out of the templates.
+carry only the comments a real subapp would carry, because every generated subapp
+inherits its comments verbatim — doc *about the scaffolding* would then be copied
+into a dozen apps it does not describe, ageing separately in each. Put new
+guidance about the templates here, and keep it out of the templates.
 
 For the same reason this file does not re-explain the client/server seam the
 templates are an instance of. That is `doc/the-client-server-api.md`, and it is

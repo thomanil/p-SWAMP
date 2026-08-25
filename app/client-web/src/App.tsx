@@ -9,6 +9,7 @@ import { LineOutagePanel } from '@/pages/grid-monitor/line-outage/LineOutagePane
 import { PhasorsPanel } from '@/pages/grid-monitor/phasors/PhasorsPanel'
 import { MeasurementsPanel } from '@/pages/grid-monitor/time-window/MeasurementsPanel'
 import { PmuTestStreamerPage } from '@/pages/pmu-test-streamer/PmuTestStreamerPage'
+import { ReferenceSubappPage } from '@/pages/reference-subapp/ReferenceSubappPage'
 
 /**
  * The route table — the one place that knows which apps this client hosts.
@@ -56,6 +57,7 @@ function App() {
           {/* Scaffold demo, unrelated to the p-SWAMP pipeline. */}
           <Route path="pmu-test-streamer" element={<PmuTestStreamerPage />} />
 
+          <Route path="reference-subapp" element={<ReferenceSubappPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

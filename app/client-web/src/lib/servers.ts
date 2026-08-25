@@ -30,6 +30,7 @@ export const TIME_WINDOW_WS_PATH = '/api/time-window/ws'
 export const ISLANDING_WS_PATH = '/api/islanding/ws'
 export const PHASORS_WS_PATH = '/api/phasors/ws'
 export const LINE_OUTAGE_WS_PATH = '/api/line-outage/ws'
+export const REFERENCE_SUBAPP_WS_PATH = '/api/reference-subapp/ws'
 
 // Each app's REST prefix — where its commands are POSTed. Same value as the app's
 // mount prefix in APPS (app/server-python/src/server.py); an endpoint path is
@@ -37,6 +38,7 @@ export const LINE_OUTAGE_WS_PATH = '/api/line-outage/ws'
 export const PMU_STREAM_API_PATH = '/api/pmu-test-streamer'
 export const TIME_WINDOW_API_PATH = '/api/time-window'
 export const ISLANDING_API_PATH = '/api/islanding'
+export const REFERENCE_SUBAPP_API_PATH = '/api/reference-subapp'
 
 // The grid topology is static, so it is fetched over HTTP rather than pushed.
 export const GRID_MODEL_PATH = '/api/grid/model'

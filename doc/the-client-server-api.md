@@ -32,7 +32,7 @@ client never reconciles the order of two.
    page component                            FastAPI app  (src/server.py)
         │  onClick                                │
         ▼                                         │  routers mounted per app
-   page hook  (usePmuStreamSocket)                 │  under /api/<app>
+   page hook  (useReferenceSubappSocket)          │  under /api/<app>
         │                                         │
         ├──► postCommand() ──── POST ─────────────┼──► command endpoint
         │    lib/commands.ts   ?client_id=…       │      mutates that client's state
@@ -76,7 +76,7 @@ document, and adds the socket half OpenAPI has no notion of.
         ▼
    app/client-web/src/api/schema.ts               generated, committed
         │
-        ├──► src/api/wire.ts      →  Wire['PmuStreamState']  in each page hook
+        ├──► src/api/wire.ts      →  Wire['ReferenceSubappState'] in each hook
         └──► src/lib/commands.ts  →  postCommand, typed against the paths
 ```
 
@@ -106,14 +106,14 @@ Write it in that app's `api.py`. Give every operation its own url; never build o
 endpoint that takes an action name:
 
 ```python
-@router.post("/playback/pause", operation_id="pmu_test_streamer_pause")
-async def pause(client_id: ClientId) -> CommandAck:
+@router.post("/count/step", operation_id="reference_subapp_step")
+async def step(client_id: ClientId) -> CommandAck:
     """One line saying what it does — this becomes the description in /docs."""
     ...
 ```
 
 - **Always set `operation_id`, as `<app>_<verb>`** with the app in snake_case
-  (`time_window_resync`, `pmu_test_streamer_play`). A generated client calls that
+  (`time_window_resync`, `reference_subapp_bump`). A generated client calls that
   name, so you choose it deliberately rather than deriving it — renaming the
   handler must never rename someone's generated method.
 - **Import `ClientId` and `CommandAck`** from `shared` in a standalone app, or
@@ -127,8 +127,8 @@ Client side, one call. `tsc` checks the path against the contract, so a typo fai
 the build:
 
 ```ts
-const pause = useCallback(
-  () => fire(postCommand(`${PMU_STREAM_API_PATH}/playback/pause`)),
+const step = useCallback(
+  () => fire(postCommand(`${REFERENCE_SUBAPP_API_PATH}/count/step`)),
   [],
 )
 ```
@@ -263,7 +263,7 @@ Which subapp a request belongs to
 ==
 
 The contract follows the code's own organisation. Every operation carries its
-app's url name as a tag — `pmu-test-streamer`, `time-window`, `islanding` — and
+app's url name as a tag — `reference-subapp`, `time-window`, `islanding` — and
 that name
 is the `/api/<app>` segment, the server package name with underscores, and the web
 client's page folder. So `/api/time-window/selection` lives in `time_window/` on
@@ -286,13 +286,17 @@ How a package joins the contract
 exports the model it pushes:
 
 ```python
-# app/server-python/src/pmu_test_streamer/__init__.py
-from .api import PmuStreamState, lifespan, router
+# app/server-python/src/reference_subapp/__init__.py
+from .api import ReferenceSubappState, router
 
-WS_MESSAGE = PmuStreamState
+WS_MESSAGE = ReferenceSubappState
 
-__all__ = ["WS_MESSAGE", "PmuStreamState", "lifespan", "router"]
+__all__ = ["WS_MESSAGE", "ReferenceSubappState", "router"]
 ```
+
+An app that also needs startup/shutdown work exports a `lifespan` beside those —
+`pmu_test_streamer` (a playback ticker) and `pswamp_web` (the pipeline registry)
+are the two that do.
 
 `api_contract.py` walks the same `APPS` list `server.py` mounts and collects
 whatever each package exports under that name. An app with no socket
@@ -418,14 +422,20 @@ after it.
 
 From there the two families of app part ways.
 
-**The scaffold demo** (`pmu_test_streamer/`) keeps it minimal:
+**The scaffold demos** keep it minimal. `reference_subapp/` is the whole of it:
 
-- `states: dict[str, ClientState]` — the entire store, keyed by client id;
+- `states: dict[str, ReferenceSubappModel]` — the entire store, keyed by client
+  id;
 - `ConnectionManager` (`src/shared.py`) — client id → the set of live sockets,
   pure transport, one instance per app;
-- one `ticker()` task, which the package's `lifespan` starts; each tick it
-  advances only the clients that are playing and sends each its own
-  `state_message()`.
+- a command handler that mutates one client's state and pushes it, and a socket
+  handler that pushes on connect and then only waits.
+
+`pmu_test_streamer/` (the older demo, on its way out) adds the one thing the
+reference app has no need of: a `ticker()` task, which the package's `lifespan`
+starts, advancing every playing client each tick and sending each its own
+`state_message()`. Copy that pair when an app has to push on its own clock rather
+than only in response to a command.
 
 A client id may briefly hold several sockets — a reconnect overlapping the dying
 one — which is why it is a set. `send_to_client` iterates a snapshot and drops any
@@ -533,8 +543,8 @@ A page hook exposes one named function per operation, each wrapping `postCommand
 from `src/lib/commands.ts`:
 
 ```ts
-const play = useCallback(
-  () => fire(postCommand(`${PMU_STREAM_API_PATH}/playback/play`)),
+const bump = useCallback(
+  () => fire(postCommand(`${REFERENCE_SUBAPP_API_PATH}/count/bump`)),
   [],
 )
 ```
@@ -558,8 +568,8 @@ Server side
 Every command endpoint declares its caller and its reply the same way:
 
 ```python
-@router.post("/playback/play", operation_id="pmu_test_streamer_play")
-async def play(client_id: ClientId) -> CommandAck:
+@router.post("/count/bump", operation_id="reference_subapp_bump")
+async def bump(client_id: ClientId) -> CommandAck:
     ...
 ```
 
@@ -586,15 +596,17 @@ Every handler then does two things: change the right state, and get that change
 onto the screen. The state lives in three different places, so there are three
 arrangements.
 
-**1. State in a module dict** — `pmu_test_streamer` and the scaffold template. The simplest case, and it needs no new plumbing: `ConnectionManager`
-already addresses a client id and already runs on this same event loop.
+**1. State in a module dict** — `reference_subapp`, `pmu_test_streamer`, and
+anything the scaffold generates. The simplest case, and it needs no new plumbing:
+`ConnectionManager` already addresses a client id and already runs on this same
+event loop.
 
 ```
-POST /api/pmu-test-streamer/playback/play?client_id=42
-  → get_state("42").playing = True
-  → log_event("play", "42")
-  → manager.send_to_client("42", state_message(state))   ← the push, from an HTTP handler
-  → 200 CommandAck(applied="play")
+POST /api/reference-subapp/count/bump?client_id=42
+  → get_state("42").bump()
+  → logger.info("client %s: %s …", "42", "bump")
+  → manager.send_to_client("42", state_message(model))   ← the push, from an HTTP handler
+  → 200 CommandAck(applied="bump")
 ```
 
 **2. State in the client's pipeline** — `islanding`. A client id reaches the hub,

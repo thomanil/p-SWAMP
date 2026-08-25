@@ -169,6 +169,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/reference-subapp/count/bump": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bump
+         * @description Add one to this client's count.
+         */
+        post: operations["reference_subapp_bump"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reference-subapp/count/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reset
+         * @description Put this client's count back to zero.
+         */
+        post: operations["reference_subapp_reset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/time-window/channels": {
         parameters: {
             query?: never;
@@ -714,6 +754,25 @@ export interface components {
             window: (components["schemas"]["PmuRecord"] | null)[];
         };
         /**
+         * ReferenceSubappState
+         * @description The single message shape pushed to a client on connect and every change.
+         *
+         *     Keys are snake_case on the wire; the page's hook maps them to camelCase.
+         */
+        ReferenceSubappState: {
+            /**
+             * Count
+             * @description This client's count. Replace with real state.
+             */
+            count: number;
+            /**
+             * Type
+             * @default state
+             * @constant
+             */
+            type: "state";
+        };
+        /**
          * ReplayStatus
          * @description State of the PMU source feeding every application.
          */
@@ -1029,6 +1088,70 @@ export interface operations {
         };
     };
     pmu_test_streamer_stop: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reference_subapp_bump: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reference_subapp_reset: {
         parameters: {
             query: {
                 /** @description The browser's client id -- the same value its WebSocket sends, resolved once per browser profile in app/client-web/src/lib/clientId.ts. */

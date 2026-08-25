@@ -33,6 +33,7 @@ from starlette.types import Scope
 import api_contract
 import pmu_test_streamer
 import pswamp_web
+import reference_subapp
 import pswamp_web.app_status
 import pswamp_web.grid
 import pswamp_web.islanding
@@ -73,6 +74,7 @@ APPS = [
     ("/api/islanding", pswamp_web.islanding),
     ("/api/line-outage", pswamp_web.line_outage),
     ("/api/phasors", pswamp_web.phasors),
+    ("/api/reference-subapp", reference_subapp),
 ]
 
 
