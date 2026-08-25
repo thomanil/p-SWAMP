@@ -162,6 +162,16 @@ entry to add** — see "How a package joins the contract" below. It has already 
 `./scripts/generate-api-contract.sh` for you, so commit `doc/api/openapi.json`
 and `app/client-web/src/api/schema.ts` along with the new folders.
 
+> **To see every moving part a subapp needs, run that script and read the diff.**
+> It is a more complete answer than any list here: it writes a page folder under
+> `app/client-web/src/pages/<slug>/` and a backend package under
+> `app/server-python/src/<pkg>/` — socket endpoint, pydantic models, two POST
+> commands over a per-client counter, the hook and the view — patches the four
+> registries (`server.py`, `lib/servers.ts`, `App.tsx`, `AppLayout.tsx`), and
+> regenerates the contract so both artifacts match the new code. Run it on a
+> throwaway name purely to look: `git status` shows exactly what it touched, and
+> deleting the two new folders plus reverting the four patched files undoes it.
+
 ### I want to add a plain GET (something static, not pushed)
 
 Same as a command, but **declare a response model**. A bare `-> dict` publishes as
