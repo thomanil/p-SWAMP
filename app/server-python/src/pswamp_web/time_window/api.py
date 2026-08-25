@@ -34,7 +34,14 @@ from .. import channels as channel_utils
 from ..hub import Hub, connected_hub, live_hub, read_client_id
 from ..replay import load_recording
 from ..sessions import SessionRegistry
-from ..wire import ClientId, CommandAck, TimeWindowSlice, send_state, series
+from ..wire import (
+    ChannelCatalogue,
+    ClientId,
+    CommandAck,
+    TimeWindowSlice,
+    send_state,
+    series,
+)
 
 # How often a client is updated. Fast enough to read as live, and slow enough
 # that each message carries a handful of samples rather than one.
@@ -231,8 +238,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     await pusher
 
 
-@router.get("/channels")
-async def list_channels() -> dict:
+@router.get("/channels", operation_id="time_window_channels")
+async def list_channels() -> ChannelCatalogue:
     """Every selectable channel, for the picker. Static for the process, so it is
     a plain GET rather than part of the socket protocol."""
-    return {"channels": [c.model_dump() for c in _channels()]}
+    return ChannelCatalogue(channels=_channels())

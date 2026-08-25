@@ -37,7 +37,7 @@ import math
 from typing import Annotated, Literal
 
 from fastapi import Query, WebSocket
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 # A measurement that may be missing. NaN and infinities become null on the wire.
 Sample = float | None
@@ -107,7 +107,15 @@ class CommandAck(BaseModel):
 
     Not the resulting state: that arrives on whichever socket the page has open,
     on the server's own schedule. See the twin in shared.py.
+
+    The explicit title is what keeps that twin from colliding with this one in the
+    generated contract: two classes of the same name would otherwise be
+    disambiguated into machine-chosen spellings that change with the module
+    layout. Both are titled "CommandAck" and both describe the same shape, so
+    api_contract.py's duplicate check accepts them as one schema.
     """
+
+    model_config = ConfigDict(title="CommandAck")
 
     status: Literal["ok"] = "ok"
     applied: str
@@ -140,6 +148,18 @@ class Channel(BaseModel):
     channel: str  # "Frequency" | "V_Magnitude" | "I[L3000-3020]_Angle"
     measurement: str  # "f" | "Df" | "v_Magnitude" | "v_Angle" | "i_..."
     label: str  # "3000 Frequency"
+
+
+class ChannelCatalogue(BaseModel):
+    """Body of ``GET /api/time-window/channels``: every selectable channel.
+
+    Static for the life of the process, which is why it is a plain GET rather than
+    something pushed down the socket. Declared as a model so the catalogue is in
+    the contract -- it used to be built as a hand-dumped dict, which published as
+    a bare `object` and left the client casting an implicitly-`any` response.
+    """
+
+    channels: list[Channel]
 
 
 class TimeWindowSlice(BaseModel):
@@ -250,9 +270,21 @@ class LineOutageLog(BaseModel):
 # --- alarms -----------------------------------------------------------------
 
 
+# What an alarm event can be. Was a bare `str` with these spelled out only in a
+# trailing comment, which published as an unconstrained string -- so a client had
+# no way to know the vocabulary and no check if it guessed wrong.
+AlarmEventType = Literal[
+    "init",
+    "not_critical",
+    "acknowledge",
+    "silence",
+    "user_message",
+]
+
+
 class AlarmEvent(BaseModel):
     t: float
-    type: str  # "init" | "not_critical" | "acknowledge" | "silence" | "user_message"
+    type: AlarmEventType
     message: str
 
 
@@ -269,6 +301,24 @@ class Alarm(BaseModel):
 class AlarmList(BaseModel):
     type: Literal["state"] = "state"
     alarms: list[Alarm]  # newest first
+
+
+class IslandingState(BaseModel):
+    """Both halves of the islanding page in one message.
+
+    Detection and alarms are separate concerns upstream -- different topics, one
+    derived from the other -- but they change together and are read together, so
+    splitting them across two sockets would only mean the page could render them
+    inconsistently.
+
+    Declared here rather than in islanding/api.py, where it used to live: this
+    module's whole job is to be the one place a message shape is named, and a
+    shape defined next to its endpoint was the one exception.
+    """
+
+    type: Literal["state"] = "state"
+    islanding: IslandingResult | None = None
+    alarms: AlarmList
 
 
 # --- application status -----------------------------------------------------

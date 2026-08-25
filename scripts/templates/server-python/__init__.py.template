@@ -1,10 +1,22 @@
 """The __LABEL__ app.
 
-Exposes `router`, which server.py mounts under /api/__SLUG__. Add a `lifespan`
-asynccontextmanager here too if this app ever needs startup/shutdown work — see
-src/timeline/__init__.py.
+Exposes two names, and server.py uses nothing else:
+
+  router      the endpoints, mounted under /api/__SLUG__
+  WS_MESSAGE  the model this app pushes down its socket
+
+`WS_MESSAGE` is how this app joins the published api contract: api_contract.py
+walks the same APPS registry server.py mounts, collects whatever each package
+exports under that name, and puts its schema in doc/api/openapi.json — from which
+the web client's TypeScript is generated. Nothing to register anywhere; exporting
+the name is the whole of it.
+
+Add a `lifespan` asynccontextmanager here too if this app ever needs
+startup/shutdown work — see src/timeline/__init__.py.
 """
 
-from .api import router
+from .api import __NAME__State, router
 
-__all__ = ["router"]
+WS_MESSAGE = __NAME__State
+
+__all__ = ["WS_MESSAGE", "__NAME__State", "router"]

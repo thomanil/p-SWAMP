@@ -235,12 +235,17 @@ Key invariants to preserve:
 - **Commands go up over REST, state comes down over the socket.** Every operation
   a user can trigger is a `POST` under `/api/<app>/`, with a pydantic body and its
   own `operation_id`; the socket carries only what the server decides to push.
-  `doc/api-architecture.md` traces both directions hop by hop, if you need the
-  machinery rather than the rule.
+  `doc/the-client-server-api.md` is the full account — the contract, both call
+  paths hop by hop, and the failure semantics.
   What the split is for: a POST is a row in the Network tab, a line in the access
   log with a status code, and a describable operation, none of which a frame
-  inside a long-lived socket can be. The upstream half is what an OpenAPI/Swagger
-  layer will describe; the socket stays out of it by nature.
+  inside a long-lived socket can be.
+  **Both halves are now published as one generated contract** —
+  `doc/api/openapi.json`, committed and checked by `error_check.sh`. The upstream
+  half is ordinary OpenAPI; the socket half rides in the same document as
+  `components.schemas` entries plus an `x-websocket-channels` extension, because
+  OpenAPI has no notion of a socket. See the contract commands under "Common
+  commands" below, and `doc/the-client-server-api.md` for the whole account.
   - **A command never answers with state.** It returns a small `CommandAck`
     (`{status, applied}`) and the resulting state arrives on the socket like any
     other change — so there is exactly one path for state and no ordering to
@@ -440,6 +445,11 @@ Client side, four edits:
    as POSTs through `postCommand` (`src/lib/commands.ts`); the socket is
    downstream only, and `useServerSocket` has no `send`.
 
+Take the hook's wire type from the contract — `Wire['<Model>']` via
+`src/api/wire.ts` — rather than hand-writing a mirror of the pydantic model, and
+run `./scripts/generate-api-contract.sh` after adding the backend package so that
+type exists.
+
 The backend needs no wiring — every socket resolves against the serving origin, so
 all panels on a screen are views of the same server by construction.
 **Each panel owns its own hook** — a panel must never re-render because a
@@ -488,10 +498,13 @@ handler beside them:
 this**, plus the backend section below: from the url-name it derives the other
 spellings (`grid_overview`, `GridOverview`, `GRID_OVERVIEW`), renders
 `scripts/templates/` into both folders, inserts into the four registries by
-anchor, and runs `error_check.sh` on the result (`NO_CHECK=1` skips that). What it
+anchor, regenerates the api contract, and runs `error_check.sh` on the result
+(`NO_CHECK=1` skips the checks, but still regenerates the contract — a stale one
+would just be a broken tree). What it
 leaves is a working per-client counter — POST to bump it, socket to see it — a
 placeholder to replace, not a stub to fill in; change what that is by editing the templates, not
-the script. Both arguments are required, and it writes nothing if the name is
+the script. Commit `doc/api/openapi.json` and `app/client-web/src/api/schema.ts`
+along with the new subapp. Both arguments are required, and it writes nothing if the name is
 taken. The steps it performs, which stay the reference for doing it by hand:
 
 Three edits, no build config:
@@ -513,7 +526,8 @@ on both sides of the wire — the server package is the same name with underscor
 A page that talks to a backend adds a fourth edit: a hook wrapping
 `useServerSocket(<APP>_WS_PATH)` (copy `usePmuStreamSocket.ts`) with a
 `*_WS_PATH` const in `src/lib/servers.ts`. Nothing to configure beyond that path —
-the socket always points at the serving origin.
+the socket always points at the serving origin. Its message type comes from the
+contract (`Wire['<Model>']`), not from a hand-written mirror.
 
 **A page with controls adds its commands to that same hook.** Each is a POST: an
 `*_API_PATH` const in `src/lib/servers.ts` (second block), and one `useCallback`
@@ -566,8 +580,9 @@ page and its api are added together in practice. Two edits, no manifest and no
 Dockerfile/compose change (both copy `src/` wholesale and watch the directory):
 
 1. Add `app/server-python/src/<app>/` with an `__init__.py` re-exporting the
-   package's public surface, exactly two names — `router` (an `APIRouter`) and,
-   only if it needs startup/shutdown work, `lifespan` (an `asynccontextmanager`).
+   package's public surface, at most three names — `router` (an `APIRouter`);
+   `WS_MESSAGE` (the pydantic model it pushes down its socket), if it has one; and
+   `lifespan` (an `asynccontextmanager`), only if it needs startup/shutdown work.
    Copy `src/timeline/__init__.py`. Use **relative** imports inside the package
    (`from .model import ...`).
 2. Add one `("/api/<app>", <app>)` entry to `APPS` in `src/server.py`, with the
@@ -576,6 +591,16 @@ Dockerfile/compose change (both copy `src/` wholesale and watch the directory):
 `server.py` does the rest: it includes the router under that prefix and enters the
 package's `lifespan` (via `AsyncExitStack`) if present, so packages never need to
 know about each other. Keep domain logic out of `server.py` — it is wiring only.
+
+**`WS_MESSAGE` is how the app joins the published contract, and there is no
+registry for it.** `api_contract.py` walks that same `APPS` list and collects
+whatever each package exports under the name — the identical `getattr` trick
+`server.py` uses for `lifespan`. So the socket payload **must be a pydantic
+model**: return a bare dict from `state_message()` and the app silently drops out
+of the contract, the page keeps working, and nothing says the type safety is gone.
+`ConnectionManager.send_to_client` takes a `BaseModel` for that reason (and
+because `json.dumps` emits bare `NaN`, which `JSON.parse` rejects). An app with no
+socket — `pswamp_web/grid/` — just omits the name.
 
 `src/pmu_test_streamer/` is the one to copy: it is the same player shape as the
 timeline minus the sequence picker, and shows how a package ships a **data file**
@@ -596,23 +621,50 @@ underlying tech). Start the server first, then the client:
 ./scripts/start-local-hotloaded-pswamp-web-client.sh  # Vite/React web client w/ HMR on http://localhost:5173
 ```
 
+**The api contract is not hot-reloaded.** An api change reloads the server, but
+`doc/api/openapi.json` and `app/client-web/src/api/schema.ts` are regenerated only
+by `./scripts/generate-api-contract.sh`. Nothing warns you in the meantime — Vite
+strips types rather than checking them — so the client keeps compiling against the
+old shape until `error_check.sh` runs.
+
 The server script's own terminal is the local log view — it streams the
 container's output already, so there is no separate Compose follow script (the
 minikube path still has `logs-minikube.sh`, since `kubectl` logs aren't attached
 to the deploy). Every command a user triggers is a `POST` line in there with its
 status code.
 
-The upstream api describes itself, since FastAPI generates it from the endpoints:
+The api describes itself, and the description is committed:
 
 ```
-curl -s localhost:8000/openapi.json | jq '.paths | keys'   # every command path
+curl -s localhost:8000/openapi.json | jq '.paths | keys'                 # every command path
+jq '.["x-websocket-channels"]' doc/api/openapi.json                      # every socket channel
+./scripts/generate-api-contract.sh          # regenerate both artifacts after an api change
+./scripts/generate-api-contract.sh --check  # read-only; what error_check.sh runs
 ```
 
-`/docs` and `/redoc` render the same thing (Swagger UI fetches its own assets
-from a CDN, so it needs the browser to have internet). The socket endpoints are
-*absent* by nature — OpenAPI describes HTTP operations, and the command surface is
-the half that is HTTP. Fuller OpenAPI/Swagger integration is a separate, later
-step; what exists today is what the endpoints declare on their own.
+`/docs` and `/redoc` render the same document (Swagger UI fetches its own assets
+from a CDN, so it needs the browser to have internet).
+
+**Change an endpoint or a socket message → regenerate and commit.** The two
+generated artifacts are `doc/api/openapi.json` and
+`app/client-web/src/api/schema.ts`, and `error_check.sh` fails while either is
+stale. `doc/the-client-server-api.md` explains the whole thing; the parts worth knowing
+before touching the api:
+
+- **The socket half is in there too**, as `components.schemas` plus an
+  `x-websocket-channels` extension — deliberately not AsyncAPI, which would be a
+  second spec format and a second generator for seven one-way channels.
+- **The web client's wire types are GENERATED.** A page hook says
+  `type XMessage = Wire['XState']` (`src/api/wire.ts`), never a hand-copy of the
+  Python model. Its camelCase mapping stays hand-written — that is the client's
+  own vocabulary.
+- **`postCommand` is typed against the document**, so a typo'd path, a missing
+  path parameter or a wrong body is a `tsc` error. Path-parameterised commands
+  take the contract's templated path plus a `path` object:
+  `postCommand(\`${ISLANDING_API_PATH}/alarms/{alarm_uuid}/acknowledge\`, { path: { alarm_uuid: uuid } })`.
+- **`API_VERSION` in `api_contract.py` is bumped by hand on a breaking change**,
+  and mentioned in the PR. Additive changes don't need one.
+- **Don't hand-edit `schema.ts` or `openapi.json`** — regenerate them.
 
 Scaffolding (see "Adding a page" above for what it writes):
 
@@ -650,9 +702,16 @@ change, or a change to where the path points, is silently ignored until
 Quality checks (cover both halves of the codebase):
 
 ```
-./scripts/error_check.sh             # READ-ONLY: uv lock --check + py_compile + ruff check/format (python), tsc -b + eslint (web). Runs all checks even if one fails, exits non-zero on any failure.
+./scripts/error_check.sh             # READ-ONLY: uv lock --check + py_compile + ruff check/format (python), tsc -b + eslint (web), api contract vs code. Runs all checks even if one fails, exits non-zero on any failure.
 ./scripts/autofix_lint_formatting.sh # write counterpart: eslint --fix, ruff check --fix, ruff format
 ```
+
+Note the api-contract check is the one step that needs the **full server
+environment** rather than just the pinned linter, because it imports the FastAPI
+app to ask for its own description — so a *cold* run pays for uv to sync
+numpy/scipy/pandas. Warm it is ~0.6 s: importing the app touches neither the
+recorded dataset nor the grid model, both of which are lazy. It starts no server
+and binds no port. Everything else stays offline.
 
 A **pre-push hook** (`.githooks/pre-push`) runs `error_check.sh`. Activate once
 per clone with `git config core.hooksPath .githooks`. Bypass with
@@ -696,9 +755,19 @@ Deploy / test the real artifact:
 ```
 
 `start-pswamp-in-local-minikube-cluster.sh` is the single *local* k8s test path: it
-builds the image straight from your working tree into minikube, opens the web
-client once `/healthz` answers (`NO_BROWSER=1` skips that), then tails the pod's
-logs until Ctrl-C (`NO_LOGS=1` skips that). NodePort is 30081.
+checks the committed api contract still matches the code (`NO_CHECK=1` skips
+that), builds the image straight from your working tree into minikube, opens the
+web client once `/healthz` answers (`NO_BROWSER=1` skips that), then tails the
+pod's logs until Ctrl-C (`NO_LOGS=1` skips that). NodePort is 30081.
+
+**Why that contract preflight is here and not left to `error_check.sh`:** it is
+the one staleness this path cannot otherwise catch. The image build runs `tsc -b`,
+so a client disagreeing with the committed `schema.ts` fails the build — but a
+*stale* `schema.ts` agrees with the client perfectly, both being equally behind
+the Python. `tsc` only compares TypeScript to TypeScript, so the image builds
+clean and the pod serves a client expecting fields the server no longer sends.
+The check runs before the cluster start, so a failure costs seconds rather than a
+minute of image build. It needs `uv` and `npx` on top of minikube/kubectl.
 
 **minikube keeps its own image store, separate from the host docker daemon.**
 `minikube image build` writes there; `docker build` (and compose) writes to the

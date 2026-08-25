@@ -32,10 +32,17 @@ the ticker mid-command.
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from typing import Literal
 
 from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
-from shared import ClientId, CommandAck, ConnectionManager, make_logger
+from shared import (
+    ClientId,
+    CommandAck,
+    ConnectionManager,
+    make_logger,
+    read_client_id,
+)
 
 from .model import SEQUENCES, TICKS_PER_SECOND, TimelineModel
 
@@ -68,10 +75,10 @@ class ClientState:
     playing: bool = False
 
 
-states: dict[int, ClientState] = {}
+states: dict[str, ClientState] = {}
 
 
-def get_state(client_id: int) -> ClientState:
+def get_state(client_id: str) -> ClientState:
     """The single place per-client state is born; called on connect and on every
     command, so a command can never hit a missing client."""
     state = states.get(client_id)
@@ -80,24 +87,45 @@ def get_state(client_id: int) -> ClientState:
     return state
 
 
-def state_message(state: ClientState) -> dict:
+class TimelineState(BaseModel):
+    """The single message shape pushed to a client on connect and every change.
+
+    A declared model rather than a loose dict, because this IS the downstream
+    half of the published contract: api_contract.py collects it from this
+    package's `WS_MESSAGE` export and the web client generates its wire type from
+    the result, so the browser can no longer drift from what this sends.
+
+    snake_case on the wire, as everywhere in this repo; the page's hook maps it to
+    camelCase. Changing a field here changes the generated TypeScript, so
+    scripts/error_check.sh fails until the contract is regenerated.
+    """
+
+    type: Literal["state"] = "state"
+    window: list[int | None] = Field(
+        description="The visible slice of the sequence; null before its start.",
+    )
+    sequence_name: str = Field(description="Which sequence this client is on.")
+    sequences: list[str] = Field(description="Every sequence that can be picked.")
+    playing: bool = Field(description="Whether the server is advancing this client.")
+
+
+def state_message(state: ClientState) -> TimelineState:
     """The single message shape pushed to a client on connect and every change."""
-    return {
-        "type": "state",
-        "window": state.model.visible_window(),
-        "sequence_name": state.model.sequence_name,
-        "sequences": list(SEQUENCES.keys()),
-        "playing": state.playing,
-    }
+    return TimelineState(
+        window=state.model.visible_window(),
+        sequence_name=state.model.sequence_name,
+        sequences=list(SEQUENCES.keys()),
+        playing=state.playing,
+    )
 
 
-def roster_table(acting_id: int | None = None) -> str:
+def roster_table(acting_id: str | None = None) -> str:
     """An aligned, human-readable table of every currently connected client and
     its state: sequence picked, place in the timeline (index + value there), and
     play/pause. Disconnected-but-remembered seeds are excluded — this is the
     live roster, not the state table. The client that triggered the current
     event (if any) is flagged with an arrow."""
-    ids = sorted(manager.conns)
+    ids = sorted(manager.conns, key=int)
     if not ids:
         return "    (no clients connected)"
     headers = ("", "CLIENT", "SEQUENCE", "INDEX", "VALUE", "STATE")
@@ -124,7 +152,7 @@ def roster_table(acting_id: int | None = None) -> str:
     return "\n".join([fmt(headers), rule, *(fmt(row) for row in rows[1:])])
 
 
-def log_event(action: str, client_id: int) -> None:
+def log_event(action: str, client_id: str) -> None:
     """The single logging entry point for every interesting event. Emits the
     triggering client + action, then dumps the full live roster so the console
     always shows the complete picture after any operation (connect, disconnect,
@@ -198,7 +226,7 @@ class SequenceSelection(BaseModel):
     )
 
 
-async def applied(client_id: int, state: ClientState, action: str) -> CommandAck:
+async def applied(client_id: str, state: ClientState, action: str) -> CommandAck:
     """The tail every command shares: log it, push the new state to this client,
     acknowledge it.
 
@@ -265,12 +293,13 @@ async def set_sequence(client_id: ClientId, body: SequenceSelection) -> CommandA
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    # The client identifies itself with an integer seed in the URL
+    # The client identifies itself with a numeric seed in the URL
     # (ws://.../api/timeline/ws?client_id=<seed>); reject a connection without a
-    # valid one. The commands above take the same id as a query parameter.
-    try:
-        client_id = int(ws.query_params.get("client_id"))
-    except (TypeError, ValueError):
+    # valid one. `read_client_id` applies the very rule the `ClientId` query
+    # parameter above enforces, so a page's socket and its commands can never
+    # address different state.
+    client_id = read_client_id(ws)
+    if client_id is None:
         await ws.close(code=1008)  # policy violation
         return
 
@@ -281,7 +310,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     log_event("reconnected" if known else "connected", client_id)
     try:
         # Initial full state for this client (resumes prior state if seed is known).
-        await ws.send_json(state_message(state))
+        await ws.send_text(state_message(state).model_dump_json())
         # Nothing is sent up this socket; the receive loop is what surfaces a
         # disconnect. Without it a closed socket is only noticed on the next
         # send, so a client that goes away between ticks — or one that never

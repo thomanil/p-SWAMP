@@ -18,8 +18,17 @@ server.py owns the prefix, so the paths below are served at:
     WS   /api/__SLUG__/ws
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from shared import ClientId, CommandAck, ConnectionManager, make_logger
+from pydantic import BaseModel, Field
+from shared import (
+    ClientId,
+    CommandAck,
+    ConnectionManager,
+    make_logger,
+    read_client_id,
+)
 
 from .model import __NAME__Model
 
@@ -32,24 +41,39 @@ router = APIRouter()
 # the web client, so this state now survives a page reload too -- not just a
 # socket-level reconnect. Nothing is persisted server-side, so a restart still
 # resets every client.
-states: dict[int, __NAME__Model] = {}
+states: dict[str, __NAME__Model] = {}
 
 
-def get_state(client_id: int) -> __NAME__Model:
+def get_state(client_id: str) -> __NAME__Model:
     if client_id not in states:
         states[client_id] = __NAME__Model()
     return states[client_id]
 
 
-def state_message(model: __NAME__Model) -> dict:
-    """The one message shape this app pushes. Keys are snake_case on the wire and
-    the page's hook maps them to camelCase, so changing one means changing both.
+class __NAME__State(BaseModel):
+    """The one message shape this app pushes.
+
+    A declared model, not a loose dict, because this IS the downstream half of the
+    published api contract: __init__.py exports it as `WS_MESSAGE`, api_contract.py
+    collects it from there, and the web client's type is GENERATED from the
+    result. So the page cannot drift from what this sends -- change a field here
+    and `scripts/error_check.sh` fails until you run
+    `scripts/generate-api-contract.sh` and commit the regenerated contract.
+
+    Keys are snake_case on the wire and the page's hook maps them to camelCase.
 
     Note it does not echo the client_id back. The web client already knows who it
     is -- one id per browser, resolved once in src/lib/clientId.ts and shown in
     the layout footer -- so sending it here would only be a second copy to keep in
     step. The id still keys `states` below; it is just not page data."""
-    return {"type": "state", "count": model.count}
+
+    type: Literal["state"] = "state"
+    count: int = Field(description="This client's count. Replace with real state.")
+
+
+def state_message(model: __NAME__Model) -> __NAME__State:
+    """The one message shape this app pushes, built from the domain model."""
+    return __NAME__State(count=model.count)
 
 
 # --- REST commands ----------------------------------------------------------
@@ -60,7 +84,7 @@ def state_message(model: __NAME__Model) -> dict:
 # so every app declares its caller and its reply the same way.
 
 
-async def applied(client_id: int, action: str) -> CommandAck:
+async def applied(client_id: str, action: str) -> CommandAck:
     """The tail every command shares: log it, push this client its new state,
     acknowledge the request.
 
@@ -93,18 +117,19 @@ async def reset(client_id: ClientId) -> CommandAck:
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    # The client identifies itself with an integer seed: ?client_id=<seed>. The
-    # commands above take the same id as a query parameter.
-    try:
-        client_id = int(ws.query_params.get("client_id"))
-    except (TypeError, ValueError):
+    # The client identifies itself with a numeric seed: ?client_id=<seed>. The
+    # commands above take the same id as a query parameter, and `read_client_id`
+    # applies the identical rule -- so a page's socket and its commands can never
+    # end up addressing different state.
+    client_id = read_client_id(ws)
+    if client_id is None:
         await ws.close(code=1008)  # policy violation
         return
 
     await manager.connect(ws, client_id)
     logger.info("client %s: connected", client_id)
     try:
-        await ws.send_json(state_message(get_state(client_id)))
+        await ws.send_text(state_message(get_state(client_id)).model_dump_json())
         # Nothing is sent up this socket; the receive loop is what surfaces a
         # disconnect. Without it a closed socket is only noticed on the next
         # send, so an idle client would linger indefinitely.

@@ -3,6 +3,7 @@ import { useCallback, useRef, useState } from 'react'
 import { useServerSocket } from '@/hooks/useServerSocket'
 import { postCommand } from '@/lib/commands'
 import { TIME_WINDOW_API_PATH, TIME_WINDOW_WS_PATH } from '@/lib/servers'
+import type { Wire } from '@/api/wire'
 
 export type ChannelInfo = {
   idx: number
@@ -38,15 +39,7 @@ export type WindowBuffer = {
   capacity: number
 }
 
-type TimeWindowMessage = {
-  mode: 'full' | 'append'
-  seq: number
-  t: (number | null)[]
-  series: (number | null)[][]
-  channels: ChannelInfo[] | null
-  n_samples: number | null
-  sampling_rate: number | null
-}
+type TimeWindowMessage = Wire['TimeWindowSlice']
 
 function emptyBuffer(): WindowBuffer {
   return { t: [], series: [], channels: [], capacity: 0 }
@@ -114,7 +107,7 @@ export function useTimeWindowSocket() {
    *  the new traces arrive on the socket as the next `mode: 'full'` message, at
    *  the pusher's next tick — so nothing here waits on the response. */
   const selectChannels = useCallback((indices: number[]) => {
-    postCommand(`${TIME_WINDOW_API_PATH}/selection`, { channels: indices }).catch(
+    postCommand(`${TIME_WINDOW_API_PATH}/selection`, { body: { channels: indices } }).catch(
       (error) => console.error('channel selection failed', error),
     )
   }, [])

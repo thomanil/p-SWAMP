@@ -3,6 +3,7 @@ import { useCallback, useMemo } from 'react'
 import { useServerSocket } from '@/hooks/useServerSocket'
 import { postCommand } from '@/lib/commands'
 import { ISLANDING_API_PATH, ISLANDING_WS_PATH } from '@/lib/servers'
+import type { Wire } from '@/api/wire'
 
 export type Island = {
   /** 0 is the main system; anything higher has separated from it. */
@@ -39,31 +40,7 @@ export type IslandingPageState = {
   alarms: Alarm[]
 }
 
-type IslandingMessage = {
-  islanding: {
-    t: number
-    app_uuid: string
-    app_name: string
-    status: string
-    islands: { index: number; stations: string[]; mean_freq: number | null }[]
-    parameters: {
-      window_length: number
-      mean_threshold: number
-      eval_freq: number
-    }
-  } | null
-  alarms: {
-    alarms: {
-      uuid: string
-      app_uuid: string
-      app_name: string
-      t_start: number
-      t_end: number | null
-      status: AlarmStatus
-      events: { t: number; type: string; message: string }[]
-    }[]
-  }
-}
+type IslandingMessage = Wire['IslandingState']
 
 /** Fire an operator action and carry on; the updated alarm list arrives on the
  *  socket, which the server pushes as soon as it has applied the change. */
@@ -111,17 +88,36 @@ export function useIslandingSocket() {
 
   // One url per action on the alarm they apply to:
   //   POST /api/islanding/alarms/<uuid>/acknowledge
+  //
+  // The path is written the way the contract spells it -- placeholder and all --
+  // and the uuid goes in as a parameter, so postCommand checks it against the
+  // generated operation and url-encodes it on the way out.
   const acknowledge = useCallback(
-    (uuid: string) => fire(postCommand(`${ISLANDING_API_PATH}/alarms/${uuid}/acknowledge`)),
+    (uuid: string) =>
+      fire(
+        postCommand(`${ISLANDING_API_PATH}/alarms/{alarm_uuid}/acknowledge`, {
+          path: { alarm_uuid: uuid },
+        }),
+      ),
     [],
   )
   const silence = useCallback(
-    (uuid: string) => fire(postCommand(`${ISLANDING_API_PATH}/alarms/${uuid}/silence`)),
+    (uuid: string) =>
+      fire(
+        postCommand(`${ISLANDING_API_PATH}/alarms/{alarm_uuid}/silence`, {
+          path: { alarm_uuid: uuid },
+        }),
+      ),
     [],
   )
   const annotate = useCallback(
     (uuid: string, message: string) =>
-      fire(postCommand(`${ISLANDING_API_PATH}/alarms/${uuid}/annotate`, { message })),
+      fire(
+        postCommand(`${ISLANDING_API_PATH}/alarms/{alarm_uuid}/annotate`, {
+          path: { alarm_uuid: uuid },
+          body: { message },
+        }),
+      ),
     [],
   )
 

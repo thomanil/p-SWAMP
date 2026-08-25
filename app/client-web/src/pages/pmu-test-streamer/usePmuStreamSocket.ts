@@ -3,6 +3,7 @@ import { useCallback, useMemo } from 'react'
 import { postCommand } from '@/lib/commands'
 import { PMU_STREAM_API_PATH, PMU_STREAM_WS_PATH } from '@/lib/servers'
 import { useServerSocket } from '@/hooks/useServerSocket'
+import type { Wire } from '@/api/wire'
 
 /** One record in the visible window, or null where the window runs off either end
  *  of the data file. Line numbers are 1-based, as an editor would count them. */
@@ -17,13 +18,7 @@ export type PmuStreamState = {
   playing: boolean
 }
 
-/** The raw wire shape, before snake_case → camelCase. */
-type PmuStreamMessage = {
-  window: ({ line_number: number; text: string } | null)[]
-  index: number
-  total_lines: number
-  playing: boolean
-}
+type PmuStreamMessage = Wire['PmuStreamState']
 
 /** Fire a command and carry on; a failure is logged and nothing else happens.
  *  See the same helper in useTimelineSocket for why that is the right default. */

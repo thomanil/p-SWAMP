@@ -1,16 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
 
+import type { Wire } from '@/api/wire'
 import { GRID_MODEL_PATH, resolveApiUrl } from '@/lib/servers'
 
 import { islandColor } from '../islands'
 import type { Island } from './useIslandingSocket'
 
-type GridModel = {
-  buses: { name: string; lon: number | null; lat: number | null }[]
-  branches: { name: string; from_bus: string; to_bus: string; kind: string }[]
-  pmus: { name: string; lon: number; lat: number }[]
-  bbox: [number, number, number, number]
-}
+/** The static topology, straight from the contract (`GET /api/grid/model`).
+ *  Note the fields stay snake_case here: unlike the socket payloads there is no
+ *  mapping layer on this one, and the drawing code below reads them directly. */
+type GridModel = Wire['GridModel']
 
 const VIEW_W = 560
 const VIEW_H = 700

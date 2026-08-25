@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 
 import { useServerSocket } from '@/hooks/useServerSocket'
 import { APP_STATUS_WS_PATH } from '@/lib/servers'
+import type { Wire } from '@/api/wire'
 
 /** The statuses a p-SWAMP application can report on itself. */
 export type AppStatusValue =
@@ -42,27 +43,7 @@ export type AppStatusState = {
 
 // The wire shape, snake_case as the server sends it. Kept private: the mapping
 // below is the boundary, and nothing outside this file should see these names.
-type AppStatusMessage = {
-  apps: {
-    uuid: string
-    app_name: string
-    status: AppStatusValue
-    t: number
-    received_at: number
-    stale: boolean
-  }[]
-  server_time: number
-  replay: {
-    source: string
-    playing: boolean
-    data_rate: number
-    n_samples: number
-    n_channels: number
-    cursor: number
-    position: number
-    duration: number
-  }
-}
+type AppStatusMessage = Wire['AppStatusTable']
 
 export function useAppStatusSocket() {
   const { message, status, connected } =

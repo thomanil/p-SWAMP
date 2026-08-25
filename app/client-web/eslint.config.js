@@ -6,7 +6,11 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // `dist` is the build output. `src/api/schema.ts` is generated from
+  // doc/api/openapi.json by scripts/generate-api-contract.sh — it is checked by
+  // `tsc` like everything else, but linting a machine-written file only ever
+  // produces noise nobody may fix by hand. Regenerate it, don't edit it.
+  globalIgnores(['dist', 'src/api/schema.ts']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

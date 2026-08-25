@@ -45,6 +45,13 @@ on:
       - "Dockerfile"
       - ".dockerignore"
       - "scripts/error_check.sh" # a change to the gate re-runs the gate
+      # The published api contract. error_check.sh verifies that these two
+      # generated artifacts still match the code, so a change to either — or to
+      # the script that produces them — has to re-run the gate. Note doc/ is
+      # otherwise deliberately NOT a trigger: this is the one part of it that is
+      # generated rather than written, and the one that can be wrong.
+      - "doc/api/**"
+      - "scripts/generate-api-contract.sh"
       - ".github/workflows/build-and-publish-image.yml"
   pull_request:
     paths:
@@ -54,6 +61,8 @@ on:
       - "Dockerfile"
       - ".dockerignore"
       - "scripts/error_check.sh"
+      - "doc/api/**"
+      - "scripts/generate-api-contract.sh"
       - ".github/workflows/build-and-publish-image.yml"
   # Lets you rebuild from the Actions tab without pushing a commit.
   workflow_dispatch:
@@ -116,7 +125,13 @@ jobs:
 
       # Installs node_modules itself on a cold checkout (see the script), so
       # there is no separate `npm ci` step to keep in sync with it.
-      - name: Static checks (tsc, eslint, uv lock --check, py_compile, ruff)
+      #
+      # The api-contract check inside it imports the FastAPI app to regenerate
+      # doc/api/openapi.json and diff it against the committed copy, so this step
+      # also syncs the server's full dependency set — not just the pinned linter.
+      # setup-uv's cache above is keyed on uv.lock, which is what keeps that from
+      # being slow on every run.
+      - name: Static checks (tsc, eslint, uv lock --check, py_compile, ruff, api contract)
         run: ./scripts/error_check.sh
 
   # --- Build the image and push it to GHCR ------------------------------------

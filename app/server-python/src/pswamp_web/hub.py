@@ -264,8 +264,9 @@ def read_client_id(ws: WebSocket) -> str | None:
 
     The web client persists one integer per browser profile in localStorage and
     sends it on every socket, so all of a page's panels resolve to the same
-    pipeline. Kept numeric because the scaffold demos parse the same parameter
-    with ``int()`` — an opaque token would close those sockets with 1008.
+    pipeline. Kept numeric and bounded because the value ends up in thread names
+    and log lines. ``shared.read_client_id`` is the twin the scaffold apps use and
+    applies the identical rule, so one browser addresses one identity everywhere.
 
     This is not authentication and does not pretend to be: supply someone else's
     id and you share their stream.

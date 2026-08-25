@@ -33,3 +33,28 @@ than as something to remember.
 The rendered Python has to pass `scripts/error_check.sh` — ruff, at 88 columns —
 so keep the text after a token on any line short. The name is capped at 32
 characters, which is the margin these templates are written to.
+
+## The api contract
+
+A new subapp is in the published contract automatically, and there is **no
+registry to add it to**. The mechanism is one line in the generated
+`__init__.py`:
+
+```python
+WS_MESSAGE = __NAME__State
+```
+
+`api_contract.py` walks the same `APPS` list `server.py` mounts and collects
+whatever each package exports under that name — the same trick `server.py`
+already plays with `lifespan`. So the socket message model reaches
+`doc/api/openapi.json`, and `app/client-web/src/api/schema.ts` is generated from
+that, which is where the rendered hook's `Wire['__NAME__State']` comes from.
+
+Two consequences when editing these templates:
+
+- **Keep `state_message()` returning a pydantic model.** Return a bare dict and
+  the app silently drops out of the contract — the page still works, and the type
+  safety is gone with nothing to say so.
+- **`generate-new-subapp.sh` regenerates the contract before it runs
+  `error_check.sh`**, because the rendered hook imports a type that does not
+  exist until it does.

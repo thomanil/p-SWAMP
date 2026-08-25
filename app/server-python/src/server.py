@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
+import api_contract
 import pmu_test_streamer
 import pswamp_web
 import pswamp_web.app_status
@@ -97,7 +98,17 @@ async def lifespan(app: FastAPI):
         yield
 
 
-app = FastAPI(lifespan=lifespan)
+# Title, version and per-app tag descriptions come from api_contract.py, which
+# also owns the socket half of the document -- see `install` at the bottom of this
+# file. Without them the api would publish as "FastAPI 0.1.0", which tells a
+# consuming team nothing and makes a breaking change undetectable.
+app = FastAPI(
+    lifespan=lifespan,
+    title=api_contract.API_TITLE,
+    version=api_contract.API_VERSION,
+    description=api_contract.API_DESCRIPTION,
+    openapi_tags=api_contract.openapi_tags(APPS),
+)
 
 # In the shipped image the web client is served from this same origin, so none of
 # this applies. In local dev it is not: the client runs on the Vite dev server
@@ -132,14 +143,14 @@ app.add_middleware(
 )
 
 
-@app.get("/healthz")
-async def healthz() -> dict:
+@app.get("/healthz", operation_id="healthz")
+async def healthz() -> api_contract.HealthStatus:
     """Liveness probe for Docker/k8s, and the compose healthcheck. Cheap and
     side-effect-free: the server has no external dependencies, so "the process is
     up and serving" is the whole health story — there is nothing a separate
     readiness probe could usefully check. Deliberately at the root rather than
     under /api: it is the process's health, not any one app's."""
-    return {"status": "ok"}
+    return api_contract.HealthStatus()
 
 
 for _prefix, _module in APPS:
@@ -148,6 +159,20 @@ for _prefix, _module in APPS:
     # the prefix rather than written out, so a new entry in APPS above needs
     # nothing here.
     app.include_router(_module.router, prefix=_prefix, tags=[_prefix[len("/api/") :]])
+
+
+# --- the published api contract ---------------------------------------------
+#
+# Replaces FastAPI's generated document with the one api_contract.py builds: the
+# same operations, plus the WebSocket message schemas, which OpenAPI has no notion
+# of and which are the bulk of what the web client needs typed. Must run AFTER the
+# include_router loop above, or the document would describe an empty api.
+#
+# /openapi.json, /docs and /redoc all serve this, and it is the same function
+# scripts/generate-api-contract.sh dumps to doc/api/openapi.json -- so the served
+# document and the committed one cannot drift.
+
+api_contract.install(app, APPS)
 
 
 # --- web client assets ------------------------------------------------------
