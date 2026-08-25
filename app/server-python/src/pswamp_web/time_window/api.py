@@ -22,16 +22,15 @@ bus, which is what keeps the 50 Hz sample stream from becoming 50 event-loop
 callbacks a second.
 """
 
-import asyncio
-import contextlib
 import functools
 from dataclasses import dataclass, field
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket
 from pydantic import BaseModel, Field
 
 from .. import channels as channel_utils
 from ..hub import Hub, connected_hub, live_hub
+from ..pump import serve_ticks
 from ..replay import load_recording
 from ..sessions import SessionRegistry
 from ..wire import (
@@ -40,7 +39,6 @@ from ..wire import (
     CommandAck,
     TimeWindowSlice,
     read_client_id,
-    send_state,
     series,
 )
 
@@ -206,37 +204,17 @@ async def ws_endpoint(ws: WebSocket) -> None:
         # we need the value itself to publish the session under it.
         client_id = read_client_id(ws)
 
-        all_channels = _channels()
-        state = ClientState(selection=channel_utils.default_selection(all_channels))
+        state = ClientState(selection=channel_utils.default_selection(_channels()))
         # The first read establishes the baseline for the append counter; without
         # it the opening message would claim every sample ever appended is new.
         # Note this is *this client's* window, which on a fresh pipeline has just
         # been prefilled and is at the start of the recording.
         state.last_appended = hub.store_app.tw.n_appended
 
-        async def push() -> None:
-            interval = 1 / PUSH_HZ
-            while True:
-                message = build_message(hub, state)
-                if message is not None:
-                    await send_state(ws, message)
-                await asyncio.sleep(interval)
-
+        # build_message returns None when the window has not advanced, so an idle
+        # client costs a dict lookup per tick and no traffic.
         with SESSIONS.registered(client_id, state):
-            pusher = asyncio.create_task(push())
-            try:
-                # Nothing comes up this socket -- the commands above are HTTP
-                # -- but the receive loop is what surfaces a disconnect.
-                while True:
-                    await ws.receive_text()
-            except WebSocketDisconnect:
-                pass
-            except Exception:
-                pass
-            finally:
-                pusher.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await pusher
+            await serve_ticks(ws, PUSH_HZ, lambda: build_message(hub, state))
 
 
 @router.get("/channels", operation_id="time_window_channels")

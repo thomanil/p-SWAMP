@@ -36,6 +36,7 @@ from fastapi import WebSocket
 from pydantic import BaseModel
 
 from pswamp_web.log import get_logger
+from pswamp_web.pump import wait_for_disconnect
 from pswamp_web.sessions import SessionRegistry
 from pswamp_web.wire import (
     CLIENT_ID_PATTERN,
@@ -53,6 +54,7 @@ __all__ = [
     "get_logger",
     "read_client_id",
     "send_state",
+    "wait_for_disconnect",
 ]
 
 

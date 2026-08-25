@@ -19,13 +19,13 @@ event, so each one wakes this client's push task explicitly; see `_nudge`.
 """
 
 import asyncio
-import contextlib
 from dataclasses import dataclass
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket
 from pydantic import BaseModel, Field
 
-from ..hub import ISLANDING_RESULT_TOPIC, Hub, connected_hub, live_hub
+from ..hub import ALARM_TOPIC, ISLANDING_RESULT_TOPIC, Hub, connected_hub, live_hub
+from ..pump import Event, event_queue, offer, serve_updates
 from ..sessions import SessionRegistry
 from ..wire import (
     AlarmList,
@@ -34,7 +34,6 @@ from ..wire import (
     IslandingResult,
     IslandingState,
     read_client_id,
-    send_state,
 )
 from .adapt import to_wire
 
@@ -70,50 +69,30 @@ async def ws_endpoint(ws: WebSocket) -> None:
 
         client_id = read_client_id(ws)
         latest: IslandingResult | None = None
-        updates: asyncio.Queue = asyncio.Queue(maxsize=64)
 
-        # Wake on either topic; the payload itself is re-read from the hub, so a
-        # dropped notification costs nothing but latency.
-        detach = [
-            hub.bus.add_listener(ISLANDING_RESULT_TOPIC, lambda p: _offer(updates, p)),
-            hub.bus.add_listener("alarms", lambda p: _offer(updates, None)),
-        ]
+        def build(event: Event | None) -> IslandingState:
+            """This page's whole message, whatever woke us.
 
-        async def push() -> None:
+            The alarm list is re-read from the client's hub every time, so an
+            alarm event (or a command's nudge, which carries no topic at all)
+            needs nothing from the notification. A detection *result* does: it is
+            the one thing not held in a store, so it is carried on the queue and
+            kept here between messages.
+            """
             nonlocal latest
-            await send_state(ws, current_message(hub, latest))
-            while True:
-                payload = await updates.get()
-                if payload is not None and hub.islanding_app is not None:
-                    adapted = to_wire(hub.islanding_app, payload)
-                    if adapted is not None:
-                        latest = adapted
-                await send_state(ws, current_message(hub, latest))
+            if event is not None and event.topic == ISLANDING_RESULT_TOPIC:
+                adapted = (
+                    to_wire(hub.islanding_app, event.payload)
+                    if hub.islanding_app is not None
+                    else None
+                )
+                if adapted is not None:
+                    latest = adapted
+            return current_message(hub, latest)
 
-        with SESSIONS.registered(client_id, Session(updates=updates)):
-            pusher = asyncio.create_task(push())
-            try:
-                # Operator actions are POSTs now; this loop only surfaces the
-                # disconnect. See the commands at the bottom of this module.
-                while True:
-                    await ws.receive_text()
-            except WebSocketDisconnect:
-                pass
-            except Exception:
-                pass
-            finally:
-                for remove in detach:
-                    remove()
-                pusher.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await pusher
-
-
-def _offer(queue: asyncio.Queue, payload) -> None:
-    try:
-        queue.put_nowait(payload)
-    except asyncio.QueueFull:
-        pass
+        with event_queue(hub.bus, ISLANDING_RESULT_TOPIC, ALARM_TOPIC) as updates:
+            with SESSIONS.registered(client_id, Session(updates=updates)):
+                await serve_updates(ws, updates, build)
 
 
 # An operator note longer than this is a report, not an annotation; truncated
@@ -149,10 +128,11 @@ def _nudge(client_id: str) -> None:
 
     An operator action changes the alarm list, which no application publishes an
     event for; without this the page would show it only when the islanding
-    detector next produced a result, up to a second later.
+    detector next produced a result, up to a second later. It carries no topic
+    for exactly that reason -- there was no application event.
     """
     for session in SESSIONS.of(client_id):
-        _offer(session.updates, None)
+        offer(session.updates)
 
 
 def _annotate(client_id: str, alarm_uuid: str, event_type: str, message: str) -> None:

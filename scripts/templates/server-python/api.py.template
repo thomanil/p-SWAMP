@@ -15,7 +15,7 @@ asyncio event loop, so no locking is needed.
 
 from typing import Literal
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket
 from pydantic import BaseModel, Field
 from shared import (
     ClientId,
@@ -24,6 +24,7 @@ from shared import (
     get_logger,
     read_client_id,
     send_state,
+    wait_for_disconnect,
 )
 
 from .model import __NAME__Model
@@ -111,21 +112,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
 
     async with sockets.connected(ws, client_id):
         logger.info("client %s: connected", client_id)
-        try:
-            # Straight down this socket, not through the registry: the opening
-            # message is for the connection that just arrived, while a command's
-            # result goes to every socket the client has open. Both go through
-            # `send_state`, which is the one serialiser -- see shared.py.
-            await send_state(ws, state_message(get_state(client_id)))
-            # Nothing is sent up this socket; the receive loop is what surfaces a
-            # disconnect. Without it a closed socket is only noticed on the next
-            # send, so an idle client would linger for ever.
-            while True:
-                await ws.receive_text()
-        except WebSocketDisconnect:
-            pass
-        except Exception:
-            pass
+        # Straight down this socket, not through the registry: the opening
+        # message is for the connection that just arrived, while a command's
+        # result goes to every socket the client has open. Both go through
+        # `send_state`, which is the one serialiser -- see shared.py.
+        await send_state(ws, state_message(get_state(client_id)))
+        # Nothing is sent up this socket; this is what notices the client going
+        # away. See pswamp_web/pump.py -- the page packages share it.
+        await wait_for_disconnect(ws)
     # Outside the block, so the socket is already out of the registry: an app
     # that prints a roster on disconnect must not list the client that left.
     logger.info("client %s: disconnected", client_id)

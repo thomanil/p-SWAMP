@@ -14,14 +14,13 @@ The Stop and Open-console buttons from the Qt version are deliberately not here:
 they publish to a command topic that has no meaning without a broker.
 """
 
-import asyncio
-import contextlib
+import time
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket
 
 from ..hub import Hub, connected_hub
-from ..wire import AppStatusTable, send_state
-import time
+from ..pump import serve_ticks
+from ..wire import AppStatusTable
 
 # Twice the reporting rate, so a status change shows up within about half a
 # second and staleness is noticed promptly without polling hard.
@@ -43,25 +42,4 @@ async def ws_endpoint(ws: WebSocket) -> None:
     async with connected_hub(ws) as hub:
         if hub is None:
             return
-
-        async def push() -> None:
-            interval = 1 / PUSH_HZ
-            while True:
-                await send_state(ws, status_message(hub))
-                await asyncio.sleep(interval)
-
-        pusher = asyncio.create_task(push())
-        try:
-            # Nothing is sent by this page, but the receive loop is what surfaces
-            # a disconnect: without it a closed socket is only noticed on the next
-            # send, and a client that goes away between ticks would linger.
-            while True:
-                await ws.receive_text()
-        except WebSocketDisconnect:
-            pass
-        except Exception:
-            pass
-        finally:
-            pusher.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await pusher
+        await serve_ticks(ws, PUSH_HZ, lambda: status_message(hub))

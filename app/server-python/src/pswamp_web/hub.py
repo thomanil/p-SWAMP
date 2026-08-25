@@ -59,6 +59,10 @@ logger = get_logger("pswamp_web.hub")
 ISLANDING_RESULT_TOPIC = "islanding.result"
 LINE_OUTAGE_RESULT_TOPIC = "line_outage.result"
 
+# Topics the applications publish under names of their own; spelled here so a
+# page subscribes to the same string the stores listen on.
+ALARM_TOPIC = "alarms"
+
 # How many pipelines may exist at once. Sized from memory and the GIL rather than
 # CPU time: one pipeline is ~1.4% of a core but ~30 MB that never comes back, and
 # every one of its four threads runs Python bytecode contending for the one GIL
@@ -226,7 +230,7 @@ class Hub:
         through a queue they would have to be drained from."""
         self._detach = [
             self.bus.add_listener("status", self.statuses.handle),
-            self.bus.add_listener("alarms", self.alarms.handle),
+            self.bus.add_listener(ALARM_TOPIC, self.alarms.handle),
             self.bus.add_listener(ISLANDING_RESULT_TOPIC, self.islands.handle),
             self.bus.add_listener(LINE_OUTAGE_RESULT_TOPIC, self.line_outages.handle),
         ]

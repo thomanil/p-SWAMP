@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Literal
 
-from fastapi import APIRouter, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, WebSocket
 from pydantic import BaseModel, Field
 from shared import (
     ClientId,
@@ -30,6 +30,7 @@ from shared import (
     get_logger,
     read_client_id,
     send_state,
+    wait_for_disconnect,
 )
 
 from .model import LINES, TICKS_PER_SECOND, PmuStreamModel
@@ -260,21 +261,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
     async with sockets.connected(ws, client_id):
         state = get_state(client_id)  # born here so it shows in the roster below
         log_event("reconnected" if known else "connected", client_id)
-        try:
-            # Straight down this socket, not through the registry: the opening
-            # message is for the connection that just arrived (and resumes its
-            # prior position if known), while a command's result goes to every
-            # socket the client has open.
-            await send_state(ws, state_message(state))
-            # Nothing is sent up this socket; the receive loop is what surfaces a
-            # disconnect. Without it a closed socket is only noticed on the next
-            # send, so a paused client would linger for ever.
-            while True:
-                await ws.receive_text()
-        except WebSocketDisconnect:
-            pass
-        except Exception:
-            pass
+        # Straight down this socket, not through the registry: the opening
+        # message is for the connection that just arrived (and resumes its prior
+        # position if known), while a command's result goes to every socket the
+        # client has open.
+        await send_state(ws, state_message(state))
+        # Nothing is sent up this socket; this is what notices the client going
+        # away. See pswamp_web/pump.py -- the page packages share it.
+        await wait_for_disconnect(ws)
     # Outside the block, so the socket is already out of the registry and the
     # roster this logs shows who is left rather than who is leaving.
     log_event("disconnected", client_id)

@@ -303,10 +303,18 @@ Key invariants to preserve:
     The page packages register what a command has to reach (a selection, a
     wake-up queue); the scaffold apps register the socket itself, via
     `SocketRegistry`. One dict, not two implementations of it.
-  - **A socket that receives nothing still needs its receive loop.** Every WS
-    handler ends in `while True: await ws.receive_text()`. It is not vestigial:
-    without a pending receive, a closed socket is only noticed on the next send,
-    so an idle client lingers for ever.
+  - **A socket that receives nothing still needs its receive loop**, which is
+    `wait_for_disconnect(ws)` in `pswamp_web/pump.py` — every endpoint in the
+    backend ends in it, page packages directly and scaffold apps through
+    `shared.py`. It is not vestigial: without a pending receive, a closed socket
+    is only noticed on the next send, so an idle client lingers for ever.
+  - **A page endpoint is three lines of plumbing and its own logic, nothing
+    else.** `connected_hub(ws)` identifies the client and gets its pipeline;
+    `serve_ticks` or `serve_updates` (`pswamp_web/pump.py`) runs the socket. What
+    is left in the package is what to send, which is the only part that differs.
+    Those five endpoints each carried their own copy of the pusher-task /
+    receive-loop / cancel-and-suppress tail until it was extracted; don't write a
+    sixth.
 - **One message shape, downstream.** The server pushes `state_message()` on
   connect and every change; the client renders it. Changing that shape means
   touching both sides.
@@ -519,15 +527,22 @@ note the context object and its hook must live in a separate `.ts` file, because
 
 Server side, the backend package under `src/pswamp_web/<app>/` exporting `router`
 (and registered in `APPS`) is unchanged — see "Adding a backend api". Copy
-`app_status/` for a ticker-driven api or `islanding/` for an event-driven one.
-Decide which of the two delivery patterns fits:
+`app_status/` for a ticker-driven api or `line_outage/` for an event-driven one.
+Decide which of the two delivery patterns fits; `pswamp_web/pump.py` has one
+function per pattern, so the choice is which one you call:
 
-- **Poll the client's window** (`time_window`, and any measurement plot) — read
-  the snapshot on your own asyncio ticker. This is the direct translation of what
-  the Qt widgets do, and it is what keeps the 50 Hz sample stream off the event
-  loop.
-- **Subscribe to the client's bus** (`islanding`, alarms, status) — for results
-  and events, which arrive about once a second.
+- **Poll the client's window** (`time_window`, and any measurement plot) —
+  `await serve_ticks(ws, PUSH_HZ, lambda: build(hub))`, reading the snapshot on
+  the ticker. This is the direct translation of what the Qt widgets do, and it is
+  what keeps the 50 Hz sample stream off the event loop. Return `None` from the
+  builder when nothing has advanced, and an idle client costs nothing.
+- **Subscribe to the client's bus** (`islanding`, alarms, status) — `with
+  event_queue(hub.bus, TOPIC) as updates:` then `await serve_updates(ws, updates,
+  build)`, for results and events, which arrive about once a second. The builder
+  is handed the `Event` that woke it, so a page listening on several topics can
+  tell them apart; build the message from the client's stores rather than from
+  the payload wherever you can, since that is what makes a dropped notification
+  cost latency and never content.
 
 Either way the endpoint opens with `async with connected_hub(ws) as hub:` and
 reads everything off that `hub`, never a module-level singleton.
