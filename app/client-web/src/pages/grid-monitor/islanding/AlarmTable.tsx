@@ -92,15 +92,15 @@ export function AlarmTable({
               </TableCell>
             )}
             <TableCell className="tabular-nums">
-              {clockTime(alarm.tStart)}
-              {alarm.tEnd !== null && (
+              {clockTime(alarm.t_start)}
+              {alarm.t_end !== null && (
                 <span className="text-muted-foreground">
                   {' '}
-                  – {clockTime(alarm.tEnd)}
+                  – {clockTime(alarm.t_end)}
                 </span>
               )}
             </TableCell>
-            <TableCell className="font-medium">{alarm.appName}</TableCell>
+            <TableCell className="font-medium">{alarm.app_name}</TableCell>
             <TableCell>
               <Badge className={STATUS_STYLES[alarm.status]}>
                 {STATUS_LABELS[alarm.status]}

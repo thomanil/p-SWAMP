@@ -66,13 +66,13 @@ export function AlarmDetails({
     <div className="space-y-4 border-t bg-muted/30 px-6 py-4">
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
         <dt className="text-muted-foreground">Detected by</dt>
-        <dd className="font-medium">{alarm.appName}</dd>
+        <dd className="font-medium">{alarm.app_name}</dd>
         <dt className="text-muted-foreground">Raised</dt>
-        <dd className="tabular-nums">{clockTime(alarm.tStart)}</dd>
-        {alarm.tEnd !== null && (
+        <dd className="tabular-nums">{clockTime(alarm.t_start)}</dd>
+        {alarm.t_end !== null && (
           <>
             <dt className="text-muted-foreground">Cleared</dt>
-            <dd className="tabular-nums">{clockTime(alarm.tEnd)}</dd>
+            <dd className="tabular-nums">{clockTime(alarm.t_end)}</dd>
           </>
         )}
         <dt className="text-muted-foreground">Alarm ID</dt>

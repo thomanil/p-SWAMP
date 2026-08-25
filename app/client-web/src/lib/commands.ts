@@ -127,6 +127,23 @@ export async function postCommand<P extends CommandPath>(
   }
 }
 
+/**
+ * Send a command and carry on: the caller does not wait, and a failure is logged.
+ *
+ * This is what a UI handler wants nearly always, and it is deliberate rather than
+ * lazy. A command that did not land produces no state change — which is what the
+ * user is already looking at — and the state that *does* result arrives on the
+ * socket rather than from this call, so there is nothing here to render either
+ * way. `label` names the app in the log line.
+ *
+ * Await `postCommand` directly instead when the outcome must be handled: a form
+ * that should show a validation error, say, where CommandError.detail carries
+ * what the server said.
+ */
+export function fireCommand(label: string, promise: Promise<void>): void {
+  promise.catch((error) => console.error(`${label} command failed`, error))
+}
+
 /** FastAPI's error body is `{detail: …}`, where detail is a string for our own
  *  HTTPExceptions and an array of field errors for a validation failure. Neither
  *  is guaranteed — a proxy may answer with HTML — so this never throws. */

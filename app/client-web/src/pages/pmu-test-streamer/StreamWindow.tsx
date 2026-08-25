@@ -36,7 +36,7 @@ export function StreamWindow({ window }: { window: (StreamRecord | null)[] }) {
                 the digit count changes. */}
             <span className="w-3 shrink-0">{isCurrent ? '▸' : ''}</span>
             <span className="w-10 shrink-0 text-right tabular-nums">
-              {record === null ? '' : record.lineNumber}
+              {record === null ? '' : record.line_number}
             </span>
             <span className="truncate">{record === null ? '' : record.text}</span>
           </div>

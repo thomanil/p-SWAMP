@@ -67,9 +67,9 @@ export function LineOutagePanel({
         )
       }
       footer={
-        state?.windowLength
-          ? `${state.appName ?? 'LineOutageDetectionApp'} · ` +
-            `${state.windowLength.toFixed(2)}s window`
+        state?.window_length
+          ? `${state.app_name ?? 'LineOutageDetectionApp'} · ` +
+            `${state.window_length.toFixed(2)}s window`
           : undefined
       }
     >

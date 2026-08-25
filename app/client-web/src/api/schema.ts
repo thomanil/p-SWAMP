@@ -754,7 +754,8 @@ export interface components {
          * ReferenceSubappState
          * @description The single message shape pushed to a client on connect and every change.
          *
-         *     Keys are snake_case on the wire; the page's hook maps them to camelCase.
+         *     Keys are snake_case on the wire, and stay that way: the page reads the
+         *     generated type for this model rather than a renamed mirror of it.
          */
         ReferenceSubappState: {
             /**

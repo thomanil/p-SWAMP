@@ -54,7 +54,7 @@ export function AppStatusTable({
           // showing is the last one known, and the point is that it may no
           // longer be true.
           <TableRow key={app.uuid} className={cn(app.stale && 'opacity-40')}>
-            <TableCell className="font-medium">{app.appName}</TableCell>
+            <TableCell className="font-medium">{app.app_name}</TableCell>
             <TableCell>
               <Badge className={STATUS_STYLES[app.status]}>{app.status}</Badge>
               {app.stale && (
@@ -65,7 +65,7 @@ export function AppStatusTable({
               {timeOfDay(app.t)}
             </TableCell>
             <TableCell className="text-right tabular-nums text-muted-foreground">
-              {Math.max(0, serverTime - app.receivedAt).toFixed(1)}s ago
+              {Math.max(0, serverTime - app.received_at).toFixed(1)}s ago
             </TableCell>
           </TableRow>
         ))}

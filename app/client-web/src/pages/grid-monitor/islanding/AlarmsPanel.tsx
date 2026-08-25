@@ -24,7 +24,7 @@ export function AlarmsPanel({
   const { state, status, connected, acknowledge, silence, annotate } = useIslandingData()
   const [selectedUuid, setSelectedUuid] = useState<string | null>(null)
 
-  const alarms = state?.alarms ?? []
+  const alarms = state?.alarms.alarms ?? []
   // Resolved from the live list rather than held in state, so an open pane keeps
   // updating as events land on that alarm. A selection that disappears (the
   // store is bounded) simply closes the pane.

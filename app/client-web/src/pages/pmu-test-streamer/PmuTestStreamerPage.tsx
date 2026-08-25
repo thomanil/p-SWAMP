@@ -81,7 +81,7 @@ export function PmuTestStreamerPage() {
         <div className="grid w-full max-w-xs grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2">
           <label className="text-right text-sm text-muted-foreground">Record</label>
           <span className="text-sm tabular-nums">
-            {state ? `${state.index + 1} of ${state.totalLines}` : '—'}
+            {state ? `${state.index + 1} of ${state.total_lines}` : '—'}
           </span>
         </div>
 

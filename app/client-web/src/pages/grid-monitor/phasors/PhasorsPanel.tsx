@@ -59,10 +59,10 @@ export function PhasorsPanel({
         )
       }
       footer={
-        state?.magRef
-          ? `max ${(state.magRef / 1e3).toFixed(1)} kV` +
-            (state.angRef !== null
-              ? ` · mean angle ${((state.angRef * 180) / Math.PI).toFixed(1)}°`
+        state?.mag_ref
+          ? `max ${(state.mag_ref / 1e3).toFixed(1)} kV` +
+            (state.ang_ref !== null
+              ? ` · mean angle ${((state.ang_ref * 180) / Math.PI).toFixed(1)}°`
               : '')
           : undefined
       }
@@ -70,8 +70,8 @@ export function PhasorsPanel({
       <div className="space-y-3">
         <PhasorDial
           phasors={state?.phasors ?? []}
-          magRef={state?.magRef ?? null}
-          angRef={state?.angRef ?? null}
+          magRef={state?.mag_ref ?? null}
+          angRef={state?.ang_ref ?? null}
           equalLengths={equalLengths}
           rotateToMean={rotateToMean}
           size={variant === 'dashboard' ? 300 : 420}

@@ -197,8 +197,8 @@ Two deployables, one wire protocol:
   `pswamp_web/time_window/`. `/reference-subapp` (`ReferenceSubappPage`) is the
   standalone scaffold demo to copy — a counter over a WebSocket plus two POST
   commands, where the connection half lives once in
-  `src/hooks/useServerSocket.ts` and the app adds only its snake_case → camelCase
-  mapping (`useReferenceSubappSocket`). `/pmu-test-streamer`
+  `src/hooks/useServerSocket.ts` and the app's own hook
+  (`useReferenceSubappSocket`) adds only its wire type and its commands. `/pmu-test-streamer`
   (`PmuTestStreamerPage`) is the older demo beside it, on its way out. See
   "Adding a p-SWAMP view" and "Adding a page" below.
 
@@ -738,10 +738,17 @@ before touching the api:
   consumes — come through as ordinary models. Revisit that choice if a channel
   ever grows a second message shape or an upstream direction; today every channel
   runs downstream only and carries one model.
-- **The web client's wire types are GENERATED.** A page hook says
-  `type XMessage = Wire['XState']` (`src/api/wire.ts`), never a hand-copy of the
-  Python model. Its camelCase mapping stays hand-written — that is the client's
-  own vocabulary.
+- **The web client's wire types are GENERATED, and nothing renames them.** A page
+  hook says `type XState = Wire['XState']` (`src/api/wire.ts`), never a hand-copy
+  of the Python model, and the components read the server's own field names —
+  `app_name`, `mag_ref`, `t_start`. Every hook used to map those into a camelCase
+  mirror, ~150 lines of pure renaming whose real cost was that it failed
+  *silently*: a field added server-side and regenerated into `schema.ts` simply
+  never reached the screen, because a `useMemo` that omits a key is valid
+  TypeScript. That is the exact failure the generated contract exists to abolish.
+  A hook may still **derive** — `useLineOutageSocket` parses branch names out of
+  channel labels, `useTimeWindowSocket` accumulates a ring buffer — and those
+  keep their own vocabulary, because they are not the message.
 - **`postCommand` is typed against the document**, so a typo'd path, a missing
   path parameter or a wrong body is a `tsc` error. Path-parameterised commands
   take the contract's templated path plus a `path` object:

@@ -123,6 +123,10 @@ Four things follow when editing these templates:
   knows who it is — one id per browser, resolved once in `src/lib/clientId.ts`
   and shown in the layout footer — so sending it would only be a second copy to
   keep in step. The id still keys `states` server-side; it is just not page data.
-- **The hook's camelCase mapping is hand-written on purpose**, even though the
-  wire type is generated. The server's field names are the server's business, and
-  a page should not inherit them.
+- **The hook does not map the message to anything.** It types it with the
+  generated `Wire['<Name>State']` and hands it to the page, field names and all.
+  Hooks used to rename every field into camelCase; that is ~150 lines the repo no
+  longer has, and — more to the point — it failed silently, since a `useMemo`
+  that omits a newly added field type-checks fine and the field just never
+  appears. Derive things in a hook by all means (the grid monitor's line-outage
+  hook does); don't rename.

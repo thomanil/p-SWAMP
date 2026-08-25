@@ -56,11 +56,11 @@ export function AppStatusPanel({
       footer={
         replay
           ? `PMU replay · ${replay.position.toFixed(1)}s / ${replay.duration.toFixed(0)}s · ` +
-            `${replay.nChannels} channels @ ${replay.dataRate} Hz`
+            `${replay.n_channels} channels @ ${replay.data_rate} Hz`
           : undefined
       }
     >
-      <AppStatusTable apps={state?.apps ?? []} serverTime={state?.serverTime ?? 0} />
+      <AppStatusTable apps={state?.apps ?? []} serverTime={state?.server_time ?? 0} />
     </Panel>
   )
 }

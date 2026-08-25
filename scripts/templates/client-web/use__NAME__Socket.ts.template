@@ -1,24 +1,21 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback } from 'react'
 
 import type { Wire } from '@/api/wire'
 import { __API_PATH_CONST__, __WS_PATH_CONST__ } from '@/lib/servers'
-import { postCommand } from '@/lib/commands'
+import { fireCommand, postCommand } from '@/lib/commands'
 import { useServerSocket } from '@/hooks/useServerSocket'
 
 /** What the server pushes, generated from the api contract — the model declared
- *  in app/server-python/src/__PKG__/api.py, not a hand-copy of it. */
-type __NAME__Message = Wire['__NAME__State']
-
-/** What this page works in: the client's own vocabulary, camelCase, mapped from
- *  the wire shape above. */
-export type __NAME__State = { count: number }
-
-/** Fire a command and carry on; a failure is logged and nothing else happens.
- *  A command that did not land produces no state change, which is what the user
- *  already sees. */
-function fire(promise: Promise<void>): void {
-  promise.catch((error) => console.error('__SLUG__ command failed', error))
-}
+ *  in app/server-python/src/__PKG__/api.py, not a hand-copy of it.
+ *
+ *  Note the page reads these fields as the server names them, snake_case and
+ *  all. A hook is welcome to *derive* something (see the grid monitor's
+ *  line-outage hook, which parses branch names out of a channel label), but it
+ *  does not rename: a mapping layer has to be extended by hand for every new
+ *  field, and a `useMemo` that forgets one is perfectly valid TypeScript — so
+ *  the field silently never reaches the screen, which is the very failure the
+ *  generated contract exists to prevent. */
+export type __NAME__State = Wire['__NAME__State']
 
 /**
  * The __LABEL__ app: state arrives on the socket, commands go up as POSTs to
@@ -26,21 +23,24 @@ function fire(promise: Promise<void>): void {
  */
 export function use__NAME__Socket() {
   const { message, status, connected } =
-    useServerSocket<__NAME__Message>(__WS_PATH_CONST__)
-
-  const state = useMemo<__NAME__State | null>(
-    () => (message === null ? null : { count: message.count }),
-    [message],
-  )
+    useServerSocket<__NAME__State>(__WS_PATH_CONST__)
 
   const bump = useCallback(
-    () => fire(postCommand(`${__API_PATH_CONST__}/count/bump`)),
+    () =>
+      fireCommand(
+        '__SLUG__',
+        postCommand(`${__API_PATH_CONST__}/count/bump`),
+      ),
     [],
   )
   const reset = useCallback(
-    () => fire(postCommand(`${__API_PATH_CONST__}/count/reset`)),
+    () =>
+      fireCommand(
+        '__SLUG__',
+        postCommand(`${__API_PATH_CONST__}/count/reset`),
+      ),
     [],
   )
 
-  return { state, status, connected, bump, reset }
+  return { state: message, status, connected, bump, reset }
 }

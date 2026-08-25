@@ -142,10 +142,12 @@ Add it to the message model — `pswamp_web/wire.py` for the p-SWAMP apps, the a
 own `api.py` for a standalone one — and fill it in wherever `state_message()` (or
 the page's push task) builds it.
 
-Run `./scripts/generate-api-contract.sh` and `Wire['<Model>']` carries the
-field. The page still will not see it: each hook maps the wire shape to its own
-camelCase domain type, so add it there too. We write that mapping by hand on
-purpose — the server's field names stay the server's business.
+Run `./scripts/generate-api-contract.sh` and `Wire['<Model>']` carries the field
+— and so does the page, which reads the message as the contract types it. There
+is deliberately no mapping layer to extend: hooks used to rename every field into
+a camelCase mirror, which meant a new field reached the page only if someone
+remembered to add it there too, and a `useMemo` that forgot one type-checks
+perfectly. Render it and you are done.
 
 Commit `doc/api/openapi.json` and `app/client-web/src/api/schema.ts` with the
 model change.
@@ -403,8 +405,12 @@ whole connection half for every app. It:
 4. tracks a `status` — `connecting` / `online` / `offline` — which separates
    "never reached the server" from "an established connection dropped".
 
-It knows nothing about message *shape*. Each page's own hook maps the raw payload
-to a typed object, and turns snake_case into camelCase on the way.
+It knows nothing about message *shape*. Each page's own hook types the payload
+with the generated `Wire['<Model>']` and hands it on as-is — snake_case field
+names included, because those come from the contract and are checked against it.
+A hook may still *derive* something (`useLineOutageSocket` parses branch names
+out of the channel labels, `useTimeWindowSocket` accumulates a ring buffer); what
+it no longer does is rename.
 
 **Reach for the `onMessage` escape hatch when the stream is fast.** Storing a
 message in React state costs a render pass — right for a small payload drawn as

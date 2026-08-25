@@ -22,10 +22,10 @@ legal after the move. It re-exports them for the app packages beside it.
 
 Two conventions worth knowing before adding a message:
 
-**snake_case on the wire.** The client hook converts to camelCase at the point it
-maps a message into its page's state, which is where the other pages in this repo
-already do it. These payloads are array-heavy rather than key-heavy, so the
-mapping stays small.
+**snake_case on the wire, and on the screen.** The web client reads these field
+names as they are, through the types generated from this module -- there is no
+renaming layer, because one that has to be extended by hand for every new field
+is one that silently drops the fields nobody remembered.
 
 **NaN is null.** Not a formality: ``json.dumps`` emits a bare ``NaN`` token,
 which ``JSON.parse`` rejects outright, and NaN is the *normal* case here -- a
