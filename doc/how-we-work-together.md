@@ -100,7 +100,7 @@ together if those bits should just live in branch or something else, depending o
 
 ## Only complicate the rig when you have to :)
 
-The project will do some computation intensive operations, so we may well have to split it into multiple processes/services at some point.
-But we try to start as simple as we can, and do more elaborate rigging only when/where actually needed.
+The project will do some computation intensive operations, and we may well have to split it into multiple processes/services at some point.
+But we try to start as simple as we can, and do more elaborate rigging only when/where actually needed, supported by performance numbers and experiments.
 
-When you see that we need to add new infra/services/
+When you see that we need to add new infra/services/, keep the rest of the project/team in the loop.
