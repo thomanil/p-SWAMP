@@ -24,8 +24,8 @@ step rather than code making the copies impossible.
 | 4 | Drop the hand-written snake→camel mapping in the client hooks | done |
 | 5 | Move the panel `variant` convention into `<Panel>` | done |
 | 6 | ~~Delete `pmu-test-streamer`~~ | **deferred — keep it for now** |
-| 7 | Make the `APPS` registry explicit and self-checking | todo |
-| 8 | Fix stale per-client comments | todo |
+| 7 | Make the `APPS` registry explicit and self-checking | done |
+| 8 | Fix stale per-client comments | done |
 
 ### 1. Collapse the twins
 
@@ -92,8 +92,18 @@ gets the reverse) now lives inside `<Panel>`.
 `getattr(module, "WS_MESSAGE", None)` meant forgetting the export dropped an app
 out of the contract silently. `APPS` entries are now `AppEntry(slug, module,
 description)` records, `TAG_DESCRIPTIONS` (a second registry keyed by the same
-slug) is folded in, and `server.py` raises at import if a package with a
-WebSocket route exports no `WS_MESSAGE`.
+slug) is folded in, and `api_contract.check_apps` — called from `install`, which
+`server.py` runs at import — raises if a package with a WebSocket route exports
+no `WS_MESSAGE`. The slug also replaced `prefix[len("/api/"):]`, which was
+slicing the url back apart in three places.
+
+### 8. Stale per-client comments
+
+`server.py` and two panels still said the PMU pipeline was process-wide and
+shared, which the move to one pipeline per client had made false — in the two
+files a newcomer opens first. §8 of
+`doc/WIP-ongoing-llm-assisted-review-before-final-merge.md` had this on its list;
+it is now closed there too.
 
 ## Checking the work
 

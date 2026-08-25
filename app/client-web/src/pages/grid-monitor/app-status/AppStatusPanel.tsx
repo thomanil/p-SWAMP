@@ -11,10 +11,11 @@ import { useAppStatusSocket } from './useAppStatusSocket'
  * Which monitoring applications are running and what they report — the web
  * counterpart of p-SWAMP's Qt status dock.
  *
- * The applications listed here are process-wide, not per client, so every
- * browser sees the same rows. The Qt version's Stop and Open-console buttons are
- * deliberately absent: both publish to a command topic that only exists with a
- * broker behind it.
+ * The applications listed here are this browser's own: every client gets its own
+ * pipeline, so two browsers watching at once see two independent sets of rows at
+ * two points in the recording. The Qt version's Stop and Open-console buttons
+ * are deliberately absent: both publish to a command topic that only exists with
+ * a broker behind it.
  */
 export function AppStatusPanel({
   variant = 'dashboard',

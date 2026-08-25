@@ -241,18 +241,17 @@ documented reason not to.
 
 ### 8. Medium: documentation still describes the superseded shared pipeline
 
-The implementation and primary guidance now define one p-SWAMP pipeline per
-client, but stale process-wide descriptions remain:
+**FIXED** (cleanup pass, see `doc/WIP-api-cleanup-context.md` step 8). All four
+present-tense statements now match `HubRegistry`:
 
-- `app/server-python/src/server.py` says the pipeline is process-wide and shared.
-- `doc/WIP-context-port-from-qt-to-web-frontend.md` describes `hub.py` as the
-  process-wide pipeline near line 57.
-- The same WIP document says state is process-wide near line 894.
+- `app/server-python/src/server.py`'s SERVICES note;
+- `AppStatusPanel.tsx`, which claimed every browser sees the same rows;
+- `PhasorsPanel.tsx`, which called the measurement window shared;
+- both spots in `doc/WIP-context-port-from-qt-to-web-frontend.md`.
 
-These statements are especially risky because pipeline ownership determines
-memory sizing, replay semantics and whether multiple replicas are valid. Update
-historical discussion to clearly mark the old design, and make present-tense
-descriptions match `HubRegistry` and `AGENTS.md`.
+Worth recording why it mattered: pipeline ownership determines memory sizing,
+replay semantics and whether multiple replicas are valid, so a stale sentence
+here is not cosmetic.
 
 ### 9. Medium: the new stack has no behavioral tests
 
@@ -370,7 +369,7 @@ These checks are necessary but do not replace the missing behavioral test suite.
 4. Pin the remote deployment to an immutable image and update the operations
    guide.
 5. Add remote readiness and liveness probes.
-6. Reconcile stale process-wide/per-client documentation.
+6. ~~Reconcile stale process-wide/per-client documentation.~~ Done — see §8.
 7. Remove whitespace errors and run `./scripts/error_check.sh` plus an image
    build.
 

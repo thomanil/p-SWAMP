@@ -37,6 +37,10 @@ scaffolded subapp is in the contract the moment it is generated, because its
 template exports the name. An app with no socket (`pswamp_web/grid/`, which is
 HTTP only) simply omits it.
 
+Discovery by `getattr` has one failure mode, and `check_apps` closes it: an app
+that serves a WebSocket and forgets the export used to drop out of the document
+in silence. It now refuses to start.
+
 The vendor extension
 ==
 
@@ -55,12 +59,39 @@ schemas -- which is what codegen actually consumes -- come through as ordinary
 """
 
 import json
-from typing import Literal
+from types import ModuleType
+from typing import Literal, NamedTuple
 
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
+from fastapi.routing import APIWebSocketRoute
 from pydantic import BaseModel
 from pydantic.json_schema import models_json_schema
+
+
+class AppEntry(NamedTuple):
+    """One backend api, as `server.py`'s `APPS` registry lists it.
+
+    A record rather than a bare tuple because three things are keyed off the same
+    app and they used to live in three shapes: the mount prefix (a string sliced
+    back apart with `prefix[len("/api/"):]` wherever the url name was wanted), the
+    module, and a description that sat in a *second* registry keyed by the slug.
+
+    `slug` is the single spelling -- the url segment, the page route on the web
+    client, and the tag in the published document. The package name is the same
+    word with underscores, which is a Python identifier requirement rather than a
+    choice (`reference_subapp` -> `/api/reference-subapp`).
+    """
+
+    slug: str
+    module: ModuleType
+    description: str = ""
+
+    @property
+    def prefix(self) -> str:
+        """Where `server.py` mounts this app's router."""
+        return f"/api/{self.slug}"
+
 
 # --- document metadata -------------------------------------------------------
 
@@ -111,28 +142,6 @@ This document is generated from the server and committed at `doc/api/openapi.jso
 `scripts/error_check.sh` fails if the two disagree. See `doc/the-client-server-api.md`.
 """
 
-# One line per app, keyed by its url name (the `/api/<app>` segment, which is also
-# the tag `server.py` applies). Purely descriptive: a missing entry costs nothing
-# but an untagged-looking group in Swagger UI.
-TAG_DESCRIPTIONS = {
-    "pmu-test-streamer": "Scaffold demo: replays sample PMU records line by line.",
-    "app-status": (
-        "Health and status of the running p-SWAMP monitoring applications. "
-        "Only downstream status overview, no upstream commands to it yet."
-    ),
-    "grid": "The static Nordic 44 topology. HTTP only — no socket.",
-    "time-window": "The measurement window: channel selection and the sample stream.",
-    "islanding": "Islanding detection results and the alarms derived from them.",
-    "line-outage": (
-        "Detected line disconnect/reconnect events. "
-        "Only downstream event log, no upstream commands to it yet."
-    ),
-    "phasors": (
-        "Voltage phasors, referred to a rotating reference. "
-        "Only downstream snapshots, no upstream commands to it yet."
-    ),
-}
-
 
 class HealthStatus(BaseModel):
     """Reply to `GET /healthz`, the liveness/readiness probe."""
@@ -140,15 +149,17 @@ class HealthStatus(BaseModel):
     status: Literal["ok"] = "ok"
 
 
-def openapi_tags(apps) -> list[dict]:
-    """Tag metadata for the document, in the order `APPS` mounts the apps."""
+def openapi_tags(apps: list[AppEntry]) -> list[dict]:
+    """Tag metadata for the document, in the order `APPS` mounts the apps.
+
+    Purely descriptive: an app with no description costs nothing but a bare group
+    heading in Swagger UI.
+    """
     tags = []
-    for prefix, _module in apps:
-        name = prefix[len("/api/") :]
-        tag = {"name": name}
-        description = TAG_DESCRIPTIONS.get(name)
-        if description:
-            tag["description"] = description
+    for app in apps:
+        tag = {"name": app.slug}
+        if app.description:
+            tag["description"] = app.description
         tags.append(tag)
     return tags
 
@@ -156,20 +167,53 @@ def openapi_tags(apps) -> list[dict]:
 # --- the socket half ---------------------------------------------------------
 
 
-def ws_channels(apps) -> list[tuple[str, str, type[BaseModel]]]:
+def ws_channels(apps: list[AppEntry]) -> list[tuple[str, str, type[BaseModel]]]:
     """`(channel path, app name, message model)` for every app with a socket.
 
     Discovered from the packages themselves via `WS_MESSAGE`, exactly as
     `server.py` discovers `lifespan`. Order follows `APPS`, so the generated
-    document is stable across runs.
+    document is stable across runs. An app that declares a socket without the
+    export never reaches here -- `check_apps` refuses to start the server first.
     """
     channels = []
-    for prefix, module in apps:
-        message = getattr(module, "WS_MESSAGE", None)
+    for app in apps:
+        message = getattr(app.module, "WS_MESSAGE", None)
         if message is None:
             continue
-        channels.append((f"{prefix}/ws", prefix[len("/api/") :], message))
+        channels.append((f"{app.prefix}/ws", app.slug, message))
     return channels
+
+
+def check_apps(apps: list[AppEntry]) -> None:
+    """Refuse to serve an app whose socket is missing from the contract.
+
+    `WS_MESSAGE` is discovered by `getattr`, which is what keeps a package from
+    having to register itself anywhere -- and what made forgetting it *silent*:
+    the app dropped out of the published document, the page carried on working
+    against a hand-written type, and nothing said the type safety was gone. The
+    only way to notice was to read the generated file.
+
+    So the one assumption behind the discovery is checked here instead: an app
+    that serves a WebSocket publishes what it sends. Called from `install`, which
+    `server.py` runs at import, so this fails at startup rather than in review.
+    """
+    for app in apps:
+        if getattr(app.module, "WS_MESSAGE", None) is not None:
+            continue
+        sockets = [
+            route.path
+            for route in app.module.router.routes
+            if isinstance(route, APIWebSocketRoute)
+        ]
+        if sockets:
+            raise RuntimeError(
+                f"{app.module.__name__} serves a WebSocket "
+                f"({app.prefix}{sockets[0]}) but exports no WS_MESSAGE, so the "
+                f"message it pushes would be absent from the published contract "
+                f"and the web client could not generate a type for it. Add "
+                f"`WS_MESSAGE = <TheModel>` to {app.module.__name__}/__init__.py "
+                f"-- see src/reference_subapp/__init__.py."
+            )
 
 
 def _merge_schemas(components: dict, new: dict) -> None:
@@ -238,7 +282,7 @@ def inject_ws_channels(schema: dict, apps) -> dict:
 # --- assembly ----------------------------------------------------------------
 
 
-def build_document(app: FastAPI, apps) -> dict:
+def build_document(app: FastAPI, apps: list[AppEntry]) -> dict:
     """The finished contract: what `/openapi.json` serves and what the committed
     `doc/api/openapi.json` holds. One function, so the two can never differ."""
     schema = get_openapi(
@@ -253,9 +297,15 @@ def build_document(app: FastAPI, apps) -> dict:
     return schema
 
 
-def install(app: FastAPI, apps) -> None:
+def install(app: FastAPI, apps: list[AppEntry]) -> None:
     """Make `app.openapi()` -- and so `/openapi.json`, `/docs` and `/redoc` --
-    serve the document above rather than FastAPI's default."""
+    serve the document above rather than FastAPI's default.
+
+    Also the point at which `check_apps` runs, i.e. at import of `server.py`:
+    every app is mounted by then, and an app that would be missing from the
+    document should stop the server rather than ship.
+    """
+    check_apps(apps)
 
     def openapi() -> dict:
         if app.openapi_schema is None:

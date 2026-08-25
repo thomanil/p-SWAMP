@@ -13,7 +13,8 @@ import { usePhasorsSocket } from './usePhasorsSocket'
 /**
  * Voltage phasors — the web counterpart of p-SWAMP's Qt voltage phasor plot.
  *
- * Reads the same shared measurement window the live measurements panel does.
+ * Reads the same measurement window the live measurements panel does — this
+ * client's own, one per pipeline.
  * When the recorded line trip separates the northern stations, their phasors
  * drift away from the rest of the dial, coloured by the island the detector
  * assigned them.

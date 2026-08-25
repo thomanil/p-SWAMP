@@ -337,8 +337,8 @@ Key invariants to preserve:
   the compose healthcheck). The server has no external dependencies, so "is the
   process serving?" is the whole health story; there is no `/readyz`. It stays at
   the root, not under `/api`: it is the process's health, not any one app's.
-- **Every api lives under `/api/<app>/`.** The prefix comes from `APPS` in
-  `server.py`, not from the package, so a router declares plain paths (`"/ws"`,
+- **Every api lives under `/api/<app>/`.** The prefix is `AppEntry.prefix`,
+  derived from the entry's slug in `APPS` in `server.py`, not from the package, so a router declares plain paths (`"/ws"`,
   `"/count/bump"`) and is reachable at `/api/reference-subapp/ws`. Keep the
   prefix aligned with the web client's route for the same app. `/api` is also the only
   thing the Vite dev proxy forwards, so an endpoint outside it won't reach the
@@ -666,8 +666,10 @@ Dockerfile/compose change (both copy `src/` wholesale and watch the directory):
    Copy `src/reference_subapp/__init__.py`. Use **relative** imports inside the
    package (`from .model import ...`); for a `lifespan`, see
    `src/pswamp_web/__init__.py`.
-2. Add one `("/api/<app>", <app>)` entry to `APPS` in `src/server.py`, with the
-   matching `import <app>`.
+2. Add one `AppEntry("<app>", <app>, "One line on what it is.")` to `APPS` in
+   `src/server.py`, with the matching `import <app>`. The slug is the url
+   segment, the web client's route and the tag in the published document, all
+   from that one spelling; the description becomes the group heading in `/docs`.
 
 `server.py` does the rest: it includes the router under that prefix and enters the
 package's `lifespan` (via `AsyncExitStack`) if present, so packages never need to
@@ -677,8 +679,11 @@ know about each other. Keep domain logic out of `server.py` — it is wiring onl
 registry for it.** `api_contract.py` walks that same `APPS` list and collects
 whatever each package exports under the name — the identical `getattr` trick
 `server.py` uses for `lifespan`. So the socket payload **must be a pydantic
-model**: return a bare dict from `state_message()` and the app silently drops out
-of the contract, the page keeps working, and nothing says the type safety is gone.
+model**: return a bare dict from `state_message()` and the app drops out of the
+contract while the page keeps working. Forgetting the export *entirely* used to
+be silent in the same way; `api_contract.check_apps` now refuses to start a
+server whose app serves a WebSocket and publishes no message for it, so that half
+of the mistake is a startup error naming the package.
 `SocketRegistry.send_to_client` takes a `BaseModel` for that reason (and because
 `json.dumps` emits bare `NaN`, which `JSON.parse` rejects). An app with no
 socket — `pswamp_web/grid/` — just omits the name.

@@ -423,7 +423,7 @@ Server side
 --
 
 `src/server.py` does wiring and nothing else. It mounts each app package's
-`router` under its prefix from `APPS`, tags it with the app's url name, composes
+`router` under its prefix from `APPS`, tags it with the app's url slug, composes
 every package's `lifespan` into one, serves `/healthz`, and mounts the built
 client at `/` last — a mount at `/` is greedy and swallows anything registered
 after it.
