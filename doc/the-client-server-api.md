@@ -8,6 +8,7 @@ Read as much as you need:
 | If you want to… | Read |
 |---|---|
 | add an endpoint, a field, or a page | [Common tasks](#common-tasks) |
+| know which files are generated and which to edit | [Where the contract comes from](#where-the-contract-comes-from) |
 | consume this api from another codebase | [What the contract is](#what-the-contract-is), [Consuming it from another codebase](#consuming-it-from-another-codebase) |
 | understand how a click becomes a change | [Upstream](#upstream-how-a-command-reaches-the-server) |
 | understand how state reaches the screen | [Downstream](#downstream-how-state-reaches-the-screen) |
@@ -43,6 +44,55 @@ no ordering to reconcile between two of them.
 
 Both resolve against **the origin the page was served from**. There is no backend
 picker, and dev is made to look like production rather than special-cased.
+
+
+Where the contract comes from
+==
+
+**The Python is the source; everything else is generated.** The api is defined by
+ordinary server code — each app package's `router` (its paths, `operation_id`s,
+body models and `CommandAck` replies) and the `WS_MESSAGE` model it pushes down
+its socket. `api_contract.py` does *not* define the api: it describes and
+assembles the document, and adds the socket half OpenAPI has no notion of.
+
+```
+   src/<app>/  and  src/pswamp_web/<app>/        ← THE DEFINITION. Edit here.
+     router       POST paths, operation_id, body models, CommandAck
+     WS_MESSAGE   the pydantic model this package pushes
+        │
+        ▼
+   src/api_contract.py                            ← metadata + the socket half
+     title, API_VERSION, description, tag text
+     walks APPS for WS_MESSAGE → components.schemas + x-websocket-channels
+     install() overrides app.openapi()
+        │
+        ▼
+   tools/dump_openapi.py       imports `server`, asks it for its own document
+        │
+        ▼
+   doc/api/openapi.json        generated, committed — and served live at
+        │                      /openapi.json, /docs, /redoc
+        │  openapi-typescript
+        ▼
+   app/client-web/src/api/schema.ts               generated, committed
+        │
+        ├──► src/api/wire.ts      →  Wire['TimelineState']  in each page hook
+        └──► src/lib/commands.ts  →  postCommand, typed against the paths
+```
+
+Two things follow, and they are the whole reason it is arranged this way:
+
+- **Don't edit the two generated files.** A change to the api goes into the
+  Python — a route, a model, or the metadata in `api_contract.py` — then
+  `./scripts/generate-api-contract.sh`, then commit all of it together. Hand-edit
+  `openapi.json` or `schema.ts` and the next regeneration silently discards you.
+  See [Changing the api](#changing-the-api).
+- **The committed contract cannot disagree with the running server**, because
+  `dump_openapi.py` imports the app and asks for its document rather than
+  describing the api a second time. `generate-api-contract.sh --check`
+  regenerates into a temp dir and diffs; `error_check.sh` runs that on every push.
+
+[Where the pieces live](#where-the-pieces-live) is the file-by-file table.
 
 
 Common tasks
