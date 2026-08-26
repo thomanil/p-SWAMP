@@ -1,18 +1,39 @@
 # Build the deployable container image and publish it to GitHub Container
 # Registry (GHCR).
 #
-# Two jobs, in order:
+# Three jobs, in order:
 #
-#   check  — runs scripts/error_check.sh, the same gate .githooks/pre-push runs
-#            locally. CI calls the script rather than reimplementing the checks
-#            in YAML, so the two can never drift apart.
-#   build  — builds Dockerfile (web client + server, one image) for amd64 and
-#            pushes it to ghcr.io/<owner>/<repo>. `needs: check`, so a failing
-#            check never produces an image.
+#   static-errorcheck — runs scripts/error_check.sh, the same gate
+#               .githooks/pre-push runs locally. CI calls the script rather than
+#               reimplementing the checks in YAML, so the two can never drift
+#               apart.
+#   smoketest — builds the image, runs it, and drives the Reference example end to
+#               end (scripts/smoketest.sh). static-errorcheck is static and never
+#               starts the app; this is the half that only starts it.
+#   build     — builds Dockerfile (web client + server, one image) for amd64 and
+#               pushes it to ghcr.io/<owner>/<repo>. Gated on both above, so a
+#               failing check or a server that cannot serve produces no image.
 #
-# On a pull request the image is built but NOT pushed: it proves the Dockerfile
-# still builds, without publishing anything from an unmerged branch (and PRs from
-# forks get a read-only GITHUB_TOKEN, so a push would fail anyway).
+# What runs where:
+#
+#   pull request / branch    static-errorcheck + smoketest. NOTHING is published.
+#                            The old "build but don't push" job used to run here to
+#                            prove the Dockerfile still built; the smoketest job
+#                            now builds the same image and gets a response out of
+#                            it, which proves strictly more, so the publish job is
+#                            skipped outright rather than run with push: false.
+#   push to main / v* tag    both gates, then publish.
+#
+# A branch with no PR open runs nothing: the push trigger is limited to main, so
+# that work is gated through its pull request rather than twice over.
+#
+# Blocking a merge on the two gates is a REPO SETTING, not something this file can
+# express: Settings → Branches → branch protection for main → "Require status
+# checks to pass", selecting `static-errorcheck` and `smoketest`. Those rules
+# match on the JOB name, so renaming a job here silently un-requires it there —
+# rename both together. Note the pull_request trigger below deliberately carries
+# no paths filter, for a reason that follows directly from those checks being
+# required — see the comment on it.
 #
 # Pulling what this publishes:
 #   docker pull ghcr.io/<owner>/p-swamp:latest
@@ -23,7 +44,7 @@
 # github.com/users/<owner>/packages → the package → Package settings → Change
 # visibility. The org.opencontainers.image.source label set below links the
 # package back to this repo.
-name: build-and-publish-image
+name: ci-pipeline
 
 on:
   push:
@@ -45,6 +66,7 @@ on:
       - "Dockerfile"
       - ".dockerignore"
       - "scripts/error_check.sh" # a change to the gate re-runs the gate
+      - "scripts/smoketest.sh" # …and so does a change to the other gate
       # The published api contract. error_check.sh verifies that these two
       # generated artifacts still match the code, so a change to either — or to
       # the script that produces them — has to re-run the gate. Note doc/ is
@@ -52,18 +74,22 @@ on:
       # generated rather than written, and the one that can be wrong.
       - "doc/api/**"
       - "scripts/generate-api-contract.sh"
-      - ".github/workflows/build-and-publish-image.yml"
+      # This file's own name: a filter listing a path that no longer exists fails
+      # silently, by never re-running the pipeline for a change to the pipeline.
+      - ".github/workflows/ci-pipeline.yml"
+
+  # Deliberately NO paths filter here, unlike the push trigger above.
+  #
+  # `static-errorcheck` and `smoketest` are required status checks on main, and
+  # GitHub treats a required check that never ran as *pending*, not as passed — so
+  # a PR whose files all fall outside a filter would sit "Expected — waiting for
+  # status to be reported" and could never be merged. A path filter on the publish
+  # side only decides whether to spend a build; on the merge-gate side it decides
+  # whether a PR is mergeable at all, which is not a trade worth making. A
+  # docs-only PR therefore pays for a (heavily cached) run rather than becoming
+  # unmergeable.
   pull_request:
-    paths:
-      - "app/**"
-      - "src/**"
-      - "pyproject.toml"
-      - "Dockerfile"
-      - ".dockerignore"
-      - "scripts/error_check.sh"
-      - "doc/api/**"
-      - "scripts/generate-api-contract.sh"
-      - ".github/workflows/build-and-publish-image.yml"
+
   # Lets you rebuild from the Actions tab without pushing a commit.
   workflow_dispatch:
 
@@ -86,7 +112,7 @@ env:
 
 jobs:
   # --- Static checks: the local pre-push gate, run again on the server --------
-  check:
+  static-errorcheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -134,9 +160,81 @@ jobs:
       - name: Static checks (tsc, eslint, uv lock --check, py_compile, ruff, api contract)
         run: ./scripts/error_check.sh
 
+  # --- Does the built image actually work? -----------------------------------
+  #
+  # error_check.sh above is entirely static and deliberately never starts the
+  # app; this job is the other half — it ONLY starts the app. It runs the image
+  # exactly as a cluster would (the Dockerfile's own CMD, no compose dev
+  # overrides) and drives the Reference example end to end: REST commands up,
+  # state down the socket. See scripts/smoketest.sh for what it checks and why
+  # that app is the one worth automating.
+  #
+  # It gates the publish, so a green image is one that has served a request.
+  smoketest:
+    needs: static-errorcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # uv for the WebSocket half of the test: scripts/smoketest.sh runs
+      # tools/smoketest_reference_subapp.py in the server's own locked
+      # environment, where `websockets` is already present via uvicorn[standard].
+      # Nothing new to install, and the cache below is keyed on the same lockfile
+      # the check job uses, so it is warm by the time this runs.
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: app/server-python/uv.lock
+      - run: uv python install 3.11
+
+      # The same buildx cache the publish job writes, so this build is not paid
+      # for twice: whichever job runs first populates type=gha and the other
+      # mostly hits it. `load: true` puts the image in the runner's docker daemon
+      # (amd64, which the runner is natively — no QEMU needed).
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image under test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: p-swamp:smoketest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # `docker run`, not `docker compose up`: compose overrides the command with
+      # `uvicorn --reload` for local dev, which is not what ships. This runs the
+      # image's own CMD.
+      - name: Start the server
+        run: |
+          docker run -d --name p-swamp-smoketest \
+            -p 8000:8000 -e HOST=0.0.0.0 -e PORT=8000 \
+            p-swamp:smoketest
+
+      # SMOKETEST_URL means "test this server, don't manage its lifecycle" — the
+      # script still waits for /healthz before asserting anything, so there is no
+      # sleep to tune here.
+      - name: Smoke test the running image
+        run: SMOKETEST_URL=http://127.0.0.1:8000 ./scripts/smoketest.sh
+
+      - name: Server log
+        if: always()
+        run: docker logs p-swamp-smoketest || true
+
+      - name: Stop the server
+        if: always()
+        run: docker rm -f p-swamp-smoketest || true
+
   # --- Build the image and push it to GHCR ------------------------------------
+  #
+  # Skipped entirely on a pull request. It used to run there with `push: false`,
+  # to prove the Dockerfile still built — but the smoketest job above now builds
+  # the very same image AND gets a response out of it, which is strictly more
+  # than that proved. Running this too would just be a second build of an
+  # artifact nothing would consume.
   build-and-push:
-    needs: check
+    needs: smoketest
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -151,10 +249,7 @@ jobs:
       # natively — see the `platforms` note on the build step.
       - uses: docker/setup-buildx-action@v3
 
-      # Skipped on pull requests: nothing is pushed there, and fork PRs have no
-      # write token to log in with.
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -168,7 +263,6 @@ jobs:
       # Tags produced:
       #   latest             — only on the default branch
       #   <branch>           — e.g. main
-      #   pr-<n>             — pull requests (computed, never pushed)
       #   sha-<full sha>     — immutable, the one to pin a deployment to
       #   v1.2.3 / 1.2 / 1   — when a v* tag is pushed
       - id: meta
@@ -177,7 +271,6 @@ jobs:
           images: ${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
-            type=ref,event=pr
             type=sha,format=long
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -197,7 +290,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Layer cache in GitHub's own cache backend, so an unchanged
@@ -206,7 +299,6 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Summary
-        if: github.event_name != 'pull_request'
         run: |
           {
             echo "### Pushed image tags"

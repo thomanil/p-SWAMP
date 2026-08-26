@@ -45,7 +45,10 @@ which exist to keep the "adding a page" path honest:
   of. It is also the **end-to-end smoke test** of the client-server stack — after
   a refactor or a dependency upgrade, open it and click: a working counter proves
   routing, the socket, the client id, a POST command and the generated contract
-  all still hold. So keep it boring and keep it current: change a convention here
+  all still hold. **`./scripts/smoketest.sh` now does that click-through for
+  you**, and CI runs it against the built image before publishing, so breaking
+  this app fails the pipeline rather than someone's afternoon. So keep it boring
+  and keep it current: change a convention here
   first, don't grow features on it, and don't use it for p-SWAMP experiments —
   generate a new subapp for those.
 - **`/pmu-test-streamer` is the older demo** it replaced, a PMU record streamer
@@ -740,6 +743,35 @@ Quality checks (cover both halves of the codebase):
 ./scripts/autofix_lint_formatting.sh # write counterpart: eslint --fix, ruff check --fix, ruff format
 ```
 
+The **runtime** counterpart to those static checks — the manual click-through,
+automated:
+
+```
+./scripts/smoketest.sh                                # start a server, drive the Reference example, stop it
+SMOKETEST_URL=http://host:port ./scripts/smoketest.sh # test a server already running; manages no lifecycle
+```
+
+`error_check.sh` never starts the app; this only starts it. Run both. It brings
+up the compose server (reusing one already running, and only tearing down what it
+started), checks the HTTP surface with curl — `/healthz`, the built client at `/`,
+the SPA deep-link fallback, a missing asset still 404ing, `/openapi.json` — and
+then runs the counter flow: connect a socket, POST bumps, assert the pushed
+counts, POST reset, assert zero, and assert a second client id starts at zero. Two
+things worth knowing before extending it:
+
+- **The WebSocket half is Python, and needs no new dependency.**
+  `app/server-python/tools/smoketest_reference_subapp.py` runs in the server's own
+  locked environment via `uv run --project app/server-python`, where `websockets`
+  is already present through `uvicorn[standard]`. Bash cannot speak a socket, and
+  the counter is only observable over one; nothing else about the script needs
+  Python.
+- **It tests the wire, not the UI.** It would not notice a button that stopped
+  calling its command or a panel that renders nothing. Closing that gap means
+  driving a real browser, and **Playwright is the intended tool** — one spec per
+  page against this same container, starting with the click-through this script
+  stands in for. That is a strict addition: this layer stays valid underneath it
+  as the fast, dependency-free one.
+
 Note the api-contract check is the one step that needs the **full server
 environment** rather than just the pinned linter, because it imports the FastAPI
 app to ask for its own description — so a *cold* run pays for uv to sync
@@ -961,10 +993,26 @@ in this repo touches a remote cluster**, and CI does not deploy either.
 
 ## CI
 
-**One pipeline: `.github/workflows/build-and-publish-image.yml`**, `check` →
-`build`, publishing to **GHCR** (`ghcr.io/<owner>/<repo>`). A failing check
-produces no image, and a pull request builds the image but pushes nothing (a
-smoke test). No secret to configure — the automatic `GITHUB_TOKEN` covers GHCR.
+**One pipeline: `.github/workflows/ci-pipeline.yml`**, `static-errorcheck` →
+`smoketest` → `build`, publishing to **GHCR** (`ghcr.io/<owner>/<repo>`). Both
+gates run on every branch and pull request; **only a push to `main` (or a `v*`
+tag) publishes**, and a failing check or a smoke test that cannot get a response
+out of the built image produces no image. No secret to configure — the automatic
+`GITHUB_TOKEN` covers GHCR.
+
+**A pull request no longer builds the publishable image at all.** The job used to
+run there with `push: false`, to prove the Dockerfile still built — but the
+smoketest job now builds that same image *and* gets a response out of it, which
+proves strictly more, so the publish job is skipped outright rather than run with
+the push disabled.
+
+**Blocking a merge on those gates is a repo setting, not something the workflow
+can express.** Settings → Branches → branch protection for `main` → "Require
+status checks to pass", selecting **`static-errorcheck`** and **`smoketest`**.
+Those rules match on the *job* name, not the workflow's, so renaming a job
+silently un-requires it there — rename the job and the protection rule together.
+(The job was called `check` before the workflow was renamed to `ci-pipeline.yml`;
+if protection was configured against that name it needs re-selecting.)
 
 GHCR is the only registry. A GitLab pipeline publishing to a GitLab registry was
 built and tested against the internal mirror's runners, then dropped: publishing
@@ -986,7 +1034,7 @@ runners will hit again:
   there awkward enough to skip.
 - **Docker-in-Docker needs a privileged runner**; kaniko is the fallback.
 
-What has to hold in the check job:
+What has to hold in the `static-errorcheck` job:
 
 - **Call `scripts/error_check.sh`, don't reimplement it in YAML.** It is the
   single source of truth for "is the code sound?", shared with the pre-push hook.
@@ -1010,6 +1058,10 @@ What has to hold in the check job:
   off the network.
 - **Cache keys:** npm on `app/client-web/package-lock.json`, uv on
   `app/server-python/uv.lock`. Both are committed, so both are valid keys.
+- **The push filter must list this workflow's own filename.** It is
+  `.github/workflows/ci-pipeline.yml`; a filter naming a path that no longer
+  exists fails silently, by never re-running the pipeline for a change to the
+  pipeline. Rename the file and fix the filter in the same commit.
 - **Use directory globs in path filters, never per-file lists.** An older workflow
   listed the two `.py` files individually, which silently missed
   `pyproject.toml`/`uv.lock` — a dependency-only change would not have triggered
@@ -1021,8 +1073,24 @@ What has to hold in the check job:
   changes what gets published and must rebuild. If the image's contents ever
   change again, check these filters — a stale filter fails silently, by publishing
   an image that does not match the commit.
-- **Gate ordering:** the build job `needs:` the check job, or a failing check
-  still produces an image.
+- **…but the `pull_request` trigger deliberately has NO paths filter.** The two
+  gates are required status checks, and GitHub scores a required check that never
+  ran as *pending* rather than passed — so a PR whose files all fell outside a
+  filter would sit "Expected — waiting for status to be reported" and be
+  unmergeable for ever. On the publish side a filter only decides whether to spend
+  a build; on the merge-gate side it decides whether a PR can merge at all. A
+  docs-only PR therefore pays for a heavily cached run. Don't "tidy" the two
+  triggers into agreeing.
+- **Gate ordering:** the build job `needs:` the smoke test job, which `needs:` the
+  `static-errorcheck` job, or a failing gate still produces an image.
+- **The smoke test job builds the image a second time, but rarely pays for it.**
+  It shares the publish job's `type=gha` buildx cache, so whichever runs first
+  populates it and the other mostly hits it; `load: true` (not `push`) puts the
+  image in the runner's own daemon. It runs the image with `docker run` and its
+  own CMD rather than `docker compose up`, because compose overrides the command
+  with `uvicorn --reload` for local dev — which is not what ships. It needs `uv`
+  on the runner for the WebSocket half, keyed on the same `uv.lock` cache as the
+  `static-errorcheck` job.
 - **The published image is `linux/amd64` only**, stated explicitly via
   `platforms:`. Dev boxes here are often arm64, but they build their own image via
   compose/minikube and never pull the published one, so an emulated arm64 leg

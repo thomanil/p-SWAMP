@@ -66,8 +66,8 @@ k8s/          Kubernetes manifests for the deployable. One per target: -local.ya
 scripts/      the stable developer interface — start the server, start the web client,
               run in minikube, etc. Call these rather than the underlying docker/npm/uv
               commands; they are what stays the same if the tooling changes.
-.github/      CI: workflows/build-and-publish-image.yml (check -> build -> push the
-              container image to GHCR)
+.github/      CI: workflows/ci-pipeline.yml (static-errorcheck -> smoketest ->
+              push the container image to GHCR)
 .githooks/    pre-push hook running scripts/error_check.sh. Opt in per clone with
               `git config core.hooksPath .githooks`.
 ```
@@ -178,7 +178,7 @@ TODO more notes on the remote rndp infra deployment of the app
 Build pipeline (CI)
 ==
 
-One pipeline, `.github/workflows/build-and-publish-image.yml`, publishing to
+One pipeline, `.github/workflows/ci-pipeline.yml`, publishing to
 **GHCR** — `ghcr.io/<owner>/p-swamp`. 
 
 Pull the current build with:
