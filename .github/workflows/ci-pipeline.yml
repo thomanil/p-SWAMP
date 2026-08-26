@@ -3,35 +3,37 @@
 #
 # Three jobs, in order:
 #
-#   check     — runs scripts/error_check.sh, the same gate .githooks/pre-push runs
-#               locally. CI calls the script rather than reimplementing the checks
-#               in YAML, so the two can never drift apart.
+#   static-errorcheck — runs scripts/error_check.sh, the same gate
+#               .githooks/pre-push runs locally. CI calls the script rather than
+#               reimplementing the checks in YAML, so the two can never drift
+#               apart.
 #   smoketest — builds the image, runs it, and drives the Reference example end to
-#               end (scripts/smoketest.sh). `check` is static and never starts the
-#               app; this is the half that only starts it.
+#               end (scripts/smoketest.sh). static-errorcheck is static and never
+#               starts the app; this is the half that only starts it.
 #   build     — builds Dockerfile (web client + server, one image) for amd64 and
 #               pushes it to ghcr.io/<owner>/<repo>. Gated on both above, so a
 #               failing check or a server that cannot serve produces no image.
 #
 # What runs where:
 #
-#   pull request / branch    check + smoketest. NOTHING is published. The old
-#                            "build but don't push" job used to run here to prove
-#                            the Dockerfile still built; the smoketest job now
-#                            builds the same image and gets a response out of it,
-#                            which proves strictly more, so the publish job is
+#   pull request / branch    static-errorcheck + smoketest. NOTHING is published.
+#                            The old "build but don't push" job used to run here to
+#                            prove the Dockerfile still built; the smoketest job
+#                            now builds the same image and gets a response out of
+#                            it, which proves strictly more, so the publish job is
 #                            skipped outright rather than run with push: false.
-#   push to main / v* tag    check + smoketest, then publish.
+#   push to main / v* tag    both gates, then publish.
 #
 # A branch with no PR open runs nothing: the push trigger is limited to main, so
 # that work is gated through its pull request rather than twice over.
 #
 # Blocking a merge on the two gates is a REPO SETTING, not something this file can
 # express: Settings → Branches → branch protection for main → "Require status
-# checks to pass", selecting `check` and `smoketest`. Renaming either job here
-# silently un-requires it there, so rename both together. Note the pull_request
-# trigger below deliberately carries no paths filter, for a reason that follows
-# directly from those checks being required — see the comment on it.
+# checks to pass", selecting `static-errorcheck` and `smoketest`. Those rules
+# match on the JOB name, so renaming a job here silently un-requires it there —
+# rename both together. Note the pull_request trigger below deliberately carries
+# no paths filter, for a reason that follows directly from those checks being
+# required — see the comment on it.
 #
 # Pulling what this publishes:
 #   docker pull ghcr.io/<owner>/p-swamp:latest
@@ -42,7 +44,7 @@
 # github.com/users/<owner>/packages → the package → Package settings → Change
 # visibility. The org.opencontainers.image.source label set below links the
 # package back to this repo.
-name: build-and-publish-image
+name: ci-pipeline
 
 on:
   push:
@@ -72,17 +74,20 @@ on:
       # generated rather than written, and the one that can be wrong.
       - "doc/api/**"
       - "scripts/generate-api-contract.sh"
-      - ".github/workflows/build-and-publish-image.yml"
+      # This file's own name: a filter listing a path that no longer exists fails
+      # silently, by never re-running the pipeline for a change to the pipeline.
+      - ".github/workflows/ci-pipeline.yml"
 
   # Deliberately NO paths filter here, unlike the push trigger above.
   #
-  # `check` and `smoketest` are required status checks on main, and GitHub treats
-  # a required check that never ran as *pending*, not as passed — so a PR whose
-  # files all fall outside a filter would sit "Expected — waiting for status to be
-  # reported" and could never be merged. A path filter on the publish side only
-  # decides whether to spend a build; on the merge-gate side it decides whether a
-  # PR is mergeable at all, which is not a trade worth making. A docs-only PR
-  # therefore pays for a (heavily cached) run rather than becoming unmergeable.
+  # `static-errorcheck` and `smoketest` are required status checks on main, and
+  # GitHub treats a required check that never ran as *pending*, not as passed — so
+  # a PR whose files all fall outside a filter would sit "Expected — waiting for
+  # status to be reported" and could never be merged. A path filter on the publish
+  # side only decides whether to spend a build; on the merge-gate side it decides
+  # whether a PR is mergeable at all, which is not a trade worth making. A
+  # docs-only PR therefore pays for a (heavily cached) run rather than becoming
+  # unmergeable.
   pull_request:
 
   # Lets you rebuild from the Actions tab without pushing a commit.
@@ -107,7 +112,7 @@ env:
 
 jobs:
   # --- Static checks: the local pre-push gate, run again on the server --------
-  check:
+  static-errorcheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -166,7 +171,7 @@ jobs:
   #
   # It gates the publish, so a green image is one that has served a request.
   smoketest:
-    needs: check
+    needs: static-errorcheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

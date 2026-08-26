@@ -5,7 +5,7 @@
 #
 # This is the single definition of "is the code sound?" in the repo: the
 # .githooks/pre-push hook runs it, and so does CI
-# (.github/workflows/build-and-publish-image.yml calls this script rather than
+# (.github/workflows/ci-pipeline.yml calls this script rather than
 # reimplementing the checks in YAML, so local and server can't drift apart).
 # Locally it is the fast gate — catch it here rather than in a pipeline.
 #

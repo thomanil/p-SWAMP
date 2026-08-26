@@ -993,7 +993,7 @@ in this repo touches a remote cluster**, and CI does not deploy either.
 
 ## CI
 
-**One pipeline: `.github/workflows/build-and-publish-image.yml`**, `check` →
+**One pipeline: `.github/workflows/ci-pipeline.yml`**, `static-errorcheck` →
 `smoketest` → `build`, publishing to **GHCR** (`ghcr.io/<owner>/<repo>`). Both
 gates run on every branch and pull request; **only a push to `main` (or a `v*`
 tag) publishes**, and a failing check or a smoke test that cannot get a response
@@ -1008,9 +1008,11 @@ the push disabled.
 
 **Blocking a merge on those gates is a repo setting, not something the workflow
 can express.** Settings → Branches → branch protection for `main` → "Require
-status checks to pass", selecting **`check`** and **`smoketest`**. Renaming either
-job silently un-requires it there, so rename the job and the protection rule
-together.
+status checks to pass", selecting **`static-errorcheck`** and **`smoketest`**.
+Those rules match on the *job* name, not the workflow's, so renaming a job
+silently un-requires it there — rename the job and the protection rule together.
+(The job was called `check` before the workflow was renamed to `ci-pipeline.yml`;
+if protection was configured against that name it needs re-selecting.)
 
 GHCR is the only registry. A GitLab pipeline publishing to a GitLab registry was
 built and tested against the internal mirror's runners, then dropped: publishing
@@ -1032,7 +1034,7 @@ runners will hit again:
   there awkward enough to skip.
 - **Docker-in-Docker needs a privileged runner**; kaniko is the fallback.
 
-What has to hold in the check job:
+What has to hold in the `static-errorcheck` job:
 
 - **Call `scripts/error_check.sh`, don't reimplement it in YAML.** It is the
   single source of truth for "is the code sound?", shared with the pre-push hook.
@@ -1056,6 +1058,10 @@ What has to hold in the check job:
   off the network.
 - **Cache keys:** npm on `app/client-web/package-lock.json`, uv on
   `app/server-python/uv.lock`. Both are committed, so both are valid keys.
+- **The push filter must list this workflow's own filename.** It is
+  `.github/workflows/ci-pipeline.yml`; a filter naming a path that no longer
+  exists fails silently, by never re-running the pipeline for a change to the
+  pipeline. Rename the file and fix the filter in the same commit.
 - **Use directory globs in path filters, never per-file lists.** An older workflow
   listed the two `.py` files individually, which silently missed
   `pyproject.toml`/`uv.lock` — a dependency-only change would not have triggered
@@ -1076,7 +1082,7 @@ What has to hold in the check job:
   docs-only PR therefore pays for a heavily cached run. Don't "tidy" the two
   triggers into agreeing.
 - **Gate ordering:** the build job `needs:` the smoke test job, which `needs:` the
-  check job, or a failing gate still produces an image.
+  `static-errorcheck` job, or a failing gate still produces an image.
 - **The smoke test job builds the image a second time, but rarely pays for it.**
   It shares the publish job's `type=gha` buildx cache, so whichever runs first
   populates it and the other mostly hits it; `load: true` (not `push`) puts the
@@ -1084,7 +1090,7 @@ What has to hold in the check job:
   own CMD rather than `docker compose up`, because compose overrides the command
   with `uvicorn --reload` for local dev — which is not what ships. It needs `uv`
   on the runner for the WebSocket half, keyed on the same `uv.lock` cache as the
-  check job.
+  `static-errorcheck` job.
 - **The published image is `linux/amd64` only**, stated explicitly via
   `platforms:`. Dev boxes here are often arm64, but they build their own image via
   compose/minikube and never pull the published one, so an emulated arm64 leg
