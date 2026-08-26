@@ -91,8 +91,13 @@ ABS_TYPES="$(cd "$(dirname "$OUT_TYPES")" && pwd)/$(basename "$OUT_TYPES")"
 (cd app/client-web && npx --no-install openapi-typescript "$ABS_SPEC" -o "$ABS_TYPES") >/dev/null || exit 1
 
 if [ "$CHECK" -eq 0 ]; then
-  echo "  wrote  $SPEC"
-  echo "  wrote  $TYPES"
+  if git diff --quiet -- "$SPEC" "$TYPES"; then
+    echo "No changes in api contract -> no changes in clientside schemas"
+    exit 0
+  fi
+  echo "Updated api contract json and clientside schema to match python source."
+  printf '\ncurrent diff:\n'
+  git --no-pager diff --stat -- "$SPEC" "$TYPES"
   exit 0
 fi
 
