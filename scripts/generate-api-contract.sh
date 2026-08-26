@@ -57,9 +57,10 @@ fi
 
 # The web client's devDependencies carry the generator, so `npx --no-install`
 # resolves the version pinned in package-lock.json rather than fetching whatever
-# is newest. A cold checkout has no node_modules yet.
-if [ ! -d app/client-web/node_modules ]; then
-  echo "Installing web client dependencies (first run)…"
+# is newest. A partial install can leave node_modules present without the
+# generator, which is common in development containers.
+if [ ! -x app/client-web/node_modules/.bin/openapi-typescript ]; then
+  echo "Installing web client dependencies (generator unavailable)…"
   (cd app/client-web && npm ci) || exit 1
 fi
 
