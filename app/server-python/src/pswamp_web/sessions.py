@@ -26,8 +26,8 @@ Two properties worth being deliberate about:
   navigation. A command applies to all of them, which is also the right reading:
   one browser is one viewer, and its views should agree.
 * **Registration is scoped to the connection**, via the context manager, so a
-  session cannot outlive the socket it belongs to even on an exception path --
-  and every endpoint here has one, since they all end in a bare ``except``.
+    session cannot outlive the socket it belongs to when its receive loop ends or
+    another exception unwinds the endpoint.
 """
 
 import contextlib

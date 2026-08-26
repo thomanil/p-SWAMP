@@ -41,7 +41,10 @@ from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from .bus import Bus
+from .log import get_logger
 from .wire import send_state
+
+logger = get_logger("pswamp_web.pump")
 
 
 async def wait_for_disconnect(ws: WebSocket) -> None:
@@ -54,10 +57,9 @@ async def wait_for_disconnect(ws: WebSocket) -> None:
     that pushes on events, would linger for as long as the server had nothing to
     say.
 
-    Returns rather than raises, on any ending: a disconnect is the normal way for
-    this to finish, and the bare ``except`` catches the abrupt ones (a proxy
-    dropping the connection, a browser killed mid-frame) so a caller's cleanup is
-    ordinary control flow.
+    Returns rather than raises on any connection ending: an ordinary disconnect
+    stays quiet, while an unexpected receive failure is logged before the
+    caller's cleanup continues as ordinary control flow.
     """
     try:
         while True:
@@ -65,7 +67,7 @@ async def wait_for_disconnect(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     except Exception:
-        pass
+        logger.warning("socket receive ended unexpectedly", exc_info=True)
 
 
 async def _serve(ws: WebSocket, push: Callable[[], object]) -> None:

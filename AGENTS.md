@@ -405,9 +405,9 @@ changes at all. So anything both sides need is
 **defined here and re-exported by `shared.py`**, never declared twice:
 `ClientId`, `CommandAck`, `CLIENT_ID_PATTERN`/`read_client_id`, `send_state` and
 `get_logger`. Reading the rule as "duplicate it, then keep the copies equal" is
-what produced four twins and the `collapse_titled_twins` machinery that used to
-sit in `api_contract.py` to hide them from the published contract. Don't
-reintroduce that: add to `wire.py` (or `log.py`) and re-export.
+what produced four duplicates and schema-rewriting machinery in
+`api_contract.py` to hide them from the published contract. Don't reintroduce
+that: add to `wire.py` (or `log.py`) and re-export.
 
 Two things it compensates for rather than fixing in the core, both marked in the
 code and both listed in §11 of
@@ -652,10 +652,12 @@ Notes that matter when touching routing:
   `isIndex` flag, which solved the opposite problem back when the index page's
   path was not actually `/`.)
 - WebSockets are torn down on navigation (the hook lives inside the page), so
-  leaving and returning starts a fresh client_id — and, for the monitor, a fresh
-  server-side channel selection. The grid monitor holds **five** sockets across
-  its six panels, each at its own rate so a slow one degrades alone. The islanding
-  socket is the exception: it feeds two panels, so it is hoisted into a provider
+  leaving and returning reopens the view sessions with the browser's persistent
+  client id. The pipeline survives for its idle grace period, but connection-local
+  view state such as the monitor's channel selection starts fresh. The grid
+  monitor holds **five** sockets across its six panels, each at its own rate so a
+  slow one degrades alone. The islanding socket is the exception: it feeds two
+  panels, so it is hoisted into a provider
   (`grid-monitor/islanding/IslandingData.tsx`) rather than opened twice.
 
 ## Adding a backend api

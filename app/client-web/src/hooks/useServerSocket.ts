@@ -14,9 +14,10 @@ const RECONNECT_MS = 2000
 /**
  * Close codes we must not retry after.
  *
- * Reconnecting is the right default — a dropped socket usually means the server
- * restarted or the network blinked, and the server's state survives. These two
- * are the exceptions, and retrying them is actively harmful:
+ * Reconnecting is the right default — a dropped socket usually means the network
+ * blinked or the server restarted. During a brief disconnect, the server keeps
+ * this client's state alive for its idle grace period. These two are the
+ * exceptions, and retrying them is actively harmful:
  *
  *   1008 policy violation — our client id was rejected. It will be rejected
  *        again in two seconds, and again forever.
@@ -107,7 +108,14 @@ export function useServerSocket<M = unknown>(
         setStatus({ kind: 'online' })
       }
       ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data)
+        let msg: unknown
+        try {
+          msg = JSON.parse(event.data)
+        } catch (error) {
+          console.error('ignored malformed WebSocket message', error)
+          return
+        }
+        if (typeof msg !== 'object' || msg === null || !('type' in msg)) return
         if (msg.type !== 'state') return
         if (onMessage.current) {
           onMessage.current(msg as M)

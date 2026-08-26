@@ -270,7 +270,9 @@ that name
 is the `/api/<app>` segment, the server package name with underscores, and the web
 client's page folder. So `/api/time-window/selection` lives in `time_window/` on
 the server and `pages/grid-monitor/time-window/` in the client, and Swagger UI
-groups it under `time-window`. One name, four places, no lookup table.
+groups it under `time-window`. Grid-monitor views are nested under
+`pages/grid-monitor/`; standalone pages such as `reference-subapp` live directly
+under `pages/`. One name, four places, no lookup table.
 
 `operationId` follows the same rule: `<app>_<verb>`, e.g. `time_window_resync`,
 `islanding_acknowledge`. A generated client calls those names, so we choose them
@@ -304,18 +306,23 @@ are the two that do.
 whatever each package exports under that name. An app with no socket
 (`pswamp_web/grid/`, which is HTTP only) simply omits it.
 
+Discovery does not make omissions silent: `check_apps()` runs when `server.py`
+installs the contract and refuses to start if an app serves a WebSocket without
+exporting `WS_MESSAGE`. When the socket models are merged into the HTTP schemas,
+`_merge_schemas()` likewise refuses two different shapes with the same model
+name. Rename one model or give it an explicit pydantic title rather than allowing
+the document to disagree with itself.
+
 This is why `scripts/generate-new-subapp.sh` needed no new anchor to patch: its
 template exports `WS_MESSAGE`, so a scaffolded subapp joins the contract the
 moment the script writes it. The script regenerates both artifacts before it runs
 the checks — commit them along with the rest.
 
-One rule keeps this working: **push a pydantic model, never a bare dict.** A bare
-dict drops the app out of the contract silently — the page keeps working, the type
-safety disappears, and nothing says so. Every push therefore goes through
-`wire.send_state`, which takes a `BaseModel` — the one serialiser in the backend,
-and the reason a bare `NaN` (which `JSON.parse` rejects) can never reach the
-wire. `SocketRegistry.send_to_client` is that same call, fanned out to whatever
-sockets one client has open.
+One rule keeps this working: **push a pydantic model, never a bare dict.** Every
+push goes through `wire.send_state`, which takes a `BaseModel`: the model is the
+published shape, and the one serialiser is also why a bare `NaN` (which
+`JSON.parse` rejects) can never reach the wire. `SocketRegistry.send_to_client`
+is that same call, fanned out to whatever sockets one client has open.
 
 
 Changing the api
@@ -590,17 +597,11 @@ async def bump(client_id: ClientId) -> CommandAck:
 - Bodies are pydantic models (`ChannelSelection`, `AlarmNote`), so a malformed command returns a 422 instead of crashing a
   handler.
 
-`shared.py` holds `ClientId` and `CommandAck` for the scaffold apps.
-`pswamp_web/wire.py` keeps deliberate **twins** of both, because that package may
-not import the rest of the web backend — we wrote it to move into the desktop
-package as `pswamp/web/`. Change one pair, change the other.
-
-Both `ClientId`s are a `str` matching `^\d{1,20}$`, the exact rule
-`read_client_id` applies to a socket's query parameter in both `shared.py` and
-`pswamp_web/hub.py`. They have to agree, or a page's commands address different
-state from its sockets. They once did not: `shared.py` used an `int` with `ge=1`
-while `wire.py` used this pattern, which published two schemas for one identity
-and disagreed about `"0"`.
+`ClientId`, `CommandAck` and `read_client_id` are defined once in
+`pswamp_web/wire.py`; `shared.py` re-exports them for the scaffold apps. The
+import runs inward because `pswamp_web` may not import the rest of the backend.
+`ClientId` is a string matching `^\d{1,20}$`, and `read_client_id` applies that
+same pattern to sockets, so commands and sockets cannot disagree about identity.
 
 Every handler then does two things: change the right state, and get that change
 onto the screen. The state lives in three different places, so there are three
@@ -696,13 +697,11 @@ Error and refusal semantics
 | command for a client with no open view (`time-window`) | `404` |
 | socket with an unusable client id | close `1008`, **before** accept — client stops retrying |
 | socket when every pipeline is in use | accept, then close `1013` — client stops retrying |
+| socket whose pipeline fails to start | accept, then close `1011`; the client retries |
 | unknown path under `/api/` | real `404`, never the SPA shell (`SPAStaticFiles._NO_FALLBACK`) |
 
-The server *accepts* `"0"`, incidentally: the rule reads "numeric and at most 20
-digits", not "a positive integer". Nothing generates it — the browser picks a
-random positive integer — and it works as a key like any other. It earns a mention
-only because an earlier `ge=1` on the scaffold apps rejected it, which left the
-two halves disagreeing.
+The numeric-string rule includes `"0"`, although the browser generates a positive
+value.
 
 All of which shows the practical difference the two transports make: a rejected
 command can say *why*, with a status code, in the access log and in the Network
@@ -714,7 +713,7 @@ Where the pieces live
 
 | Path | What |
 |---|---|
-| `app/server-python/src/api_contract.py` | Document metadata, `WS_MESSAGE` collection, the extension, schema-name collapsing |
+| `app/server-python/src/api_contract.py` | Document metadata, `WS_MESSAGE` validation/collection, the extension, schema merging |
 | `app/server-python/tools/dump_openapi.py` | Imports the app, writes the document to a file |
 | `scripts/generate-api-contract.sh` | Regenerates both artifacts; `--check` diffs instead |
 | `doc/api/openapi.json` | The contract (generated, committed) |
@@ -732,35 +731,12 @@ Where the pieces live
 Implementation notes
 ==
 
-**We collapse duplicate schema names.** `CommandAck` exists twice on purpose — in
-`shared.py` and in `pswamp_web/wire.py` — and the reason is this repo's central
-compromise: **one analysis core, two front ends.** We wrote the p-SWAMP web layer
-to move into the desktop package as `pswamp/web/`, a third presentation adapter
-beside `gui/` (PySide6) and `visualization/`, so it may import nothing from the
-rest of the web backend — `shared.py` included, where the scaffold apps keep their
-copy. Two packages that cannot share a module need two declarations of the same
-four-line model. The Qt and web front ends pay for their shared core here, rather
-than in the core itself.
-
-That cost lands in the published contract, not in the code. Pydantic
-disambiguates same-named classes by *module path*, so the reply to all fourteen
-commands would otherwise publish as `shared__CommandAck` and
-`pswamp_web__wire__CommandAck` — two names for one concept, one of them baking in
-a path we have documented as moving, which would rename a schema in every
-consumer's generated code the day that move lands. Both classes therefore set
-`model_config = ConfigDict(title="CommandAck")`, and `collapse_titled_twins` folds
-structurally identical twins back to that title. Twins that genuinely diverge keep
-their separate names, which is the right outcome for two different shapes.
-
-**Don't expect this to expire on its own**, and keep straight which half is the
-workaround. The *duplication* is the standing compromise; `collapse_titled_twins`
-keeps it out of the contract, and consumers depend on that piece. §7 of
-`WIP-context-port-from-qt-to-web-frontend.md` decides whether the duplication ever
-goes away, and the answer runs opposite to the intuition: if **Qt stays**,
-`pswamp_web/` moves *into* the desktop package and still cannot import the web
-backend's `shared.py`, so the twin becomes permanent. Only if **Qt goes** and the
-two Python projects merge could one `CommandAck` serve everything. Until that is
-settled, treat the twin as load-bearing and keep the two in step.
+**Shared wire primitives are defined inward.** `pswamp_web/` remains
+self-contained so it can move with either Python consolidation path, but that
+rule only forbids imports *out* of the package. `ClientId`, `CommandAck`, the
+client-id parser, `send_state` and the logger therefore live inside it and
+`shared.py` re-exports them to the scaffold apps. Keep one definition; duplicating
+them would make the code and generated contract solve the same identity twice.
 
 **`openapi-typescript` declares a stale peer.** It wants `typescript@^5.x` while
 this project runs 6, though it drives the TS 6 compiler API without complaint (we

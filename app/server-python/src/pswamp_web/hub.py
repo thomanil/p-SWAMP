@@ -107,6 +107,13 @@ class Hub:
     def start(self, loop) -> None:
         if self._started:
             return
+        try:
+            self._start(loop)
+        except Exception:
+            self.stop()
+            raise
+
+    def _start(self, loop) -> None:
         self.bus.bind(loop)
 
         # Shared across every pipeline and read-only; see load_recording().
@@ -167,8 +174,6 @@ class Hub:
 
     def stop(self) -> None:
         """Tear down, newest-dependency-first. Called off the event loop."""
-        if not self._started:
-            return
         for app in (self.line_outage_app, self.islanding_app, self.store_app):
             if app is not None:
                 app.stop()
@@ -328,8 +333,8 @@ class HubRegistry:
         """Hold a client's pipeline for the life of one WebSocket.
 
         Every endpoint goes through this rather than calling acquire/release, so
-        the release cannot be skipped on an exception path — and every endpoint
-        has one, since they all end in a bare ``except``.
+        the release cannot be skipped when its receive loop ends or another
+        exception unwinds the endpoint.
         """
         hub = await self.acquire(client_id)
         try:
@@ -540,6 +545,11 @@ async def connected_hub(ws: WebSocket) -> AsyncIterator[Hub | None]:
             REGISTRY.max_pipelines,
         )
         await ws.close(code=1013)  # try again later
+        yield None
+        return
+    except Exception:
+        logger.exception("failed to start pipeline for client %s", client_id)
+        await ws.close(code=1011)  # unexpected server error
         yield None
         return
 
