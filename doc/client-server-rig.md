@@ -300,7 +300,8 @@ pswamp_web/       the p-SWAMP web layer: a package of page packages
 
 1. New folder `src/my_thing/` (copy `src/reference_subapp/`), whose `__init__.py` exposes a
    `router`, plus `lifespan` if it needs to run something in the background.
-2. In `src/server.py`, add one line to `APPS`: `("/api/my-thing", my_thing)`.
+2. In `src/server.py`, add one entry to `APPS`:
+   `AppEntry("my-thing", my_thing, "What it is.")`.
 
 Everything the package declares is then served under that prefix — the reference
 subapp's `"/ws"` endpoint becomes `/api/reference-subapp/ws`. Endpoints all live under `/api/`,

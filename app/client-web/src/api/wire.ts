@@ -10,12 +10,13 @@
  * message shapes — those reach the document through the `x-websocket-channels`
  * extension, since OpenAPI itself has no notion of a socket. So a page hook says:
  *
- *     type PmuStreamMessage = Wire['PmuStreamState']
+ *     type PmuStreamState = Wire['PmuStreamState']
  *
  * instead of hand-copying the Python model's fields into TypeScript and hoping
- * the two stay in step. They are snake_case, as the server sends them; each hook
- * still maps to its own camelCase domain type, which is the client's own
- * vocabulary and deliberately not the server's.
+ * the two stay in step. The field names stay snake_case, as the server sends
+ * them, all the way to the components: a hook that renamed them into a camelCase
+ * mirror would have to be edited for every new field, and forgetting one is not
+ * a type error — the field would simply never appear.
  *
  * Don't edit `schema.ts`. Change the Python model, run
  * `scripts/generate-api-contract.sh`, and commit both artifacts — until you do,

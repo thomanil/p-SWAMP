@@ -13,7 +13,8 @@ import { usePhasorsSocket } from './usePhasorsSocket'
 /**
  * Voltage phasors — the web counterpart of p-SWAMP's Qt voltage phasor plot.
  *
- * Reads the same shared measurement window the live measurements panel does.
+ * Reads the same measurement window the live measurements panel does — this
+ * client's own, one per pipeline.
  * When the recorded line trip separates the northern stations, their phasors
  * drift away from the rest of the dial, coloured by the island the detector
  * assigned them.
@@ -35,15 +36,12 @@ export function PhasorsPanel({
   return (
     <Panel
       title="Voltage Phasors"
-      subtitle={
-        variant === 'focused'
-          ? 'Bus voltage phasors across the Nordic 44 grid, coloured by island'
-          : undefined
-      }
+      subtitle="Bus voltage phasors across the Nordic 44 grid, coloured by island"
       status={status}
       ready={ready}
-      className={variant === 'focused' ? 'w-full max-w-2xl' : undefined}
-      focusHref={variant === 'dashboard' ? '/phasors' : undefined}
+      focusedClassName="w-full max-w-2xl"
+      focusHref="/phasors"
+      variant={variant}
       minBodyClass="min-h-[320px]"
       badge={
         connected ? (
@@ -59,10 +57,10 @@ export function PhasorsPanel({
         )
       }
       footer={
-        state?.magRef
-          ? `max ${(state.magRef / 1e3).toFixed(1)} kV` +
-            (state.angRef !== null
-              ? ` · mean angle ${((state.angRef * 180) / Math.PI).toFixed(1)}°`
+        state?.mag_ref
+          ? `max ${(state.mag_ref / 1e3).toFixed(1)} kV` +
+            (state.ang_ref !== null
+              ? ` · mean angle ${((state.ang_ref * 180) / Math.PI).toFixed(1)}°`
               : '')
           : undefined
       }
@@ -70,8 +68,8 @@ export function PhasorsPanel({
       <div className="space-y-3">
         <PhasorDial
           phasors={state?.phasors ?? []}
-          magRef={state?.magRef ?? null}
-          angRef={state?.angRef ?? null}
+          magRef={state?.mag_ref ?? null}
+          angRef={state?.ang_ref ?? null}
           equalLengths={equalLengths}
           rotateToMean={rotateToMean}
           size={variant === 'dashboard' ? 300 : 420}

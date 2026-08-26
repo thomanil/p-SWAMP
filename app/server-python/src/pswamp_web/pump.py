@@ -1,0 +1,185 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright Contributors to the p-SWAMP Project.
+
+"""Serving one downstream socket: the part every page endpoint had written out.
+
+A page endpoint is three things — identify the client and get its pipeline, decide
+what to send, and then run the socket. The first is :func:`..hub.connected_hub`.
+This module is the third, so that what is left in a page package is the second,
+which is the only part that differs.
+
+What it replaces: five endpoints that each ended in the same fifteen lines —
+create a pusher task, sit in ``while True: await ws.receive_text()``, swallow the
+disconnect, cancel the task and suppress its ``CancelledError``. Identical in all
+five, which meant a fix to any of it was a fix in five places, and a sixth page
+would have been a sixth copy.
+
+Two shapes of page, and both are here:
+
+* **Ticker-driven** — :func:`serve_ticks`. Read the client's window on a timer and
+  send what is there. Used where there is nothing to react to: a measurement
+  stream (``time_window``, ``phasors``) or a table whose interesting case is
+  something *not* arriving (``app_status``, where "stale" is the absence of a
+  report). This is the direct translation of what the Qt widgets do, and it is
+  what keeps a 50 Hz sample stream from becoming 50 event-loop callbacks a second.
+* **Event-driven** — :func:`event_queue` + :func:`serve_updates`. Wake on the
+  client's own bus and send when there is something to send. Used for results and
+  alarms (``islanding``, ``line_outage``), which arrive about once a second, or
+  not at all while the grid is healthy.
+
+Both end in :func:`wait_for_disconnect`, which the scaffold apps under ``src/``
+use directly through ``shared.py`` — they have no pusher of their own, but they
+need the same receive loop for the same reason.
+"""
+
+import asyncio
+import contextlib
+from collections.abc import Callable, Iterator
+from typing import NamedTuple
+
+from fastapi import WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
+
+from .bus import Bus
+from .wire import send_state
+
+
+async def wait_for_disconnect(ws: WebSocket) -> None:
+    """Hold the connection open until the client goes away.
+
+    Every socket in this backend is downstream only: nothing a client sends up
+    one is ever read as a command (those are POSTs). The receive loop is not
+    vestigial even so — without a pending receive, a closed socket is noticed only
+    on the next *send*, so a page that pushes rarely, or an idle client on a page
+    that pushes on events, would linger for as long as the server had nothing to
+    say.
+
+    Returns rather than raises, on any ending: a disconnect is the normal way for
+    this to finish, and the bare ``except`` catches the abrupt ones (a proxy
+    dropping the connection, a browser killed mid-frame) so a caller's cleanup is
+    ordinary control flow.
+    """
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+
+
+async def _serve(ws: WebSocket, push: Callable[[], object]) -> None:
+    """Run ``push`` as a task for exactly as long as the client is connected."""
+    pusher = asyncio.create_task(push())
+    try:
+        await wait_for_disconnect(ws)
+    finally:
+        pusher.cancel()
+        # The task is being cancelled from outside, so its CancelledError is
+        # expected rather than an error; awaiting it is what makes sure it is
+        # finished before the caller releases the pipeline it was reading.
+        with contextlib.suppress(asyncio.CancelledError):
+            await pusher
+
+
+# --- ticker-driven pages ----------------------------------------------------
+
+
+async def serve_ticks(
+    ws: WebSocket,
+    hz: float,
+    build: Callable[[], BaseModel | None],
+) -> None:
+    """Send ``build()`` every 1/``hz`` seconds until the client disconnects.
+
+    ``build`` returning ``None`` means "nothing new" and sends nothing, which is
+    what lets a page whose window has not advanced cost nothing (see
+    ``time_window``). It is called on the event loop, so it must not block: read a
+    snapshot, don't compute.
+    """
+    interval = 1 / hz
+
+    async def push() -> None:
+        while True:
+            message = build()
+            if message is not None:
+                await send_state(ws, message)
+            await asyncio.sleep(interval)
+
+    await _serve(ws, push)
+
+
+# --- event-driven pages -----------------------------------------------------
+
+
+class Event(NamedTuple):
+    """One notification, as a push task sees it.
+
+    ``topic`` says which of the queue's topics woke it, since a page may listen
+    on several and they do not all mean the same thing. Both fields are ``None``
+    for a nudge from a *command* — an operator action changes what a page shows
+    without any application having published anything, so it has no topic and
+    carries no payload (see ``islanding``'s ``_nudge``).
+    """
+
+    topic: str | None = None
+    payload: object = None
+
+
+def offer(queue: asyncio.Queue, event: Event = Event()) -> None:
+    """Wake a push task, or drop the notification if it is already behind.
+
+    Dropping is safe *because* of how the pages are written: the message is built
+    from the store when the task wakes, never from what is on the queue, so a lost
+    notification costs latency and never content. The one thing carried on the
+    queue is the islanding result, which is re-read the same way on the next
+    wake-up.
+    """
+    with contextlib.suppress(asyncio.QueueFull):
+        queue.put_nowait(event)
+
+
+@contextlib.contextmanager
+def event_queue(bus: Bus, *topics: str, maxsize: int = 64) -> Iterator[asyncio.Queue]:
+    """A queue woken by any of ``topics`` on ``bus``, detached again on exit.
+
+    The bus is the *client's own* (``hub.bus``), so a listener only ever hears
+    about the pipeline its socket is watching.
+    """
+    queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
+
+    def listener(topic: str) -> Callable[[object], None]:
+        # A closure per topic, so the notification says which one fired rather
+        # than every listener in the loop reporting the last topic in it.
+        return lambda payload: offer(queue, Event(topic, payload))
+
+    detach = [bus.add_listener(topic, listener(topic)) for topic in topics]
+    try:
+        yield queue
+    finally:
+        for remove in detach:
+            remove()
+
+
+async def serve_updates(
+    ws: WebSocket,
+    updates: asyncio.Queue,
+    build: Callable[[Event | None], BaseModel | None],
+) -> None:
+    """Send on connect, then again on every notification, until disconnect.
+
+    ``build`` is passed the :class:`Event` that woke the task, and ``None`` for
+    the opening message — a page that does not care which topic fired takes the
+    argument and ignores it.
+    """
+
+    async def push() -> None:
+        opening = build(None)
+        if opening is not None:
+            await send_state(ws, opening)
+        while True:
+            message = build(await updates.get())
+            if message is not None:
+                await send_state(ws, message)
+
+    await _serve(ws, push)

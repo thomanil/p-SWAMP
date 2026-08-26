@@ -38,7 +38,7 @@ client never reconciles the order of two.
         │    lib/commands.ts   ?client_id=…       │      mutates that client's state
         │                      ◄── CommandAck ────┤      then pushes ↓
         │                                         │
-        └──► useServerSocket() ◄══ WS frames ═════┴──◄ push task / ConnectionManager
+        └──► useServerSocket() ◄══ WS frames ═════┴──◄ push task / SocketRegistry
              hooks/useServerSocket.ts   {type:"state",…}
 ```
 
@@ -142,10 +142,12 @@ Add it to the message model — `pswamp_web/wire.py` for the p-SWAMP apps, the a
 own `api.py` for a standalone one — and fill it in wherever `state_message()` (or
 the page's push task) builds it.
 
-Run `./scripts/generate-api-contract.sh` and `Wire['<Model>']` carries the
-field. The page still will not see it: each hook maps the wire shape to its own
-camelCase domain type, so add it there too. We write that mapping by hand on
-purpose — the server's field names stay the server's business.
+Run `./scripts/generate-api-contract.sh` and `Wire['<Model>']` carries the field
+— and so does the page, which reads the message as the contract types it. There
+is deliberately no mapping layer to extend: hooks used to rename every field into
+a camelCase mirror, which meant a new field reached the page only if someone
+remembered to add it there too, and a `useMemo` that forgot one type-checks
+perfectly. Render it and you are done.
 
 Commit `doc/api/openapi.json` and `app/client-web/src/api/schema.ts` with the
 model change.
@@ -309,9 +311,11 @@ the checks — commit them along with the rest.
 
 One rule keeps this working: **push a pydantic model, never a bare dict.** A bare
 dict drops the app out of the contract silently — the page keeps working, the type
-safety disappears, and nothing says so. `ConnectionManager.send_to_client` and
-`wire.send_state` therefore both take a `BaseModel` (and because `json.dumps`
-emits bare `NaN`, which `JSON.parse` rejects).
+safety disappears, and nothing says so. Every push therefore goes through
+`wire.send_state`, which takes a `BaseModel` — the one serialiser in the backend,
+and the reason a bare `NaN` (which `JSON.parse` rejects) can never reach the
+wire. `SocketRegistry.send_to_client` is that same call, fanned out to whatever
+sockets one client has open.
 
 
 Changing the api
@@ -401,8 +405,12 @@ whole connection half for every app. It:
 4. tracks a `status` — `connecting` / `online` / `offline` — which separates
    "never reached the server" from "an established connection dropped".
 
-It knows nothing about message *shape*. Each page's own hook maps the raw payload
-to a typed object, and turns snake_case into camelCase on the way.
+It knows nothing about message *shape*. Each page's own hook types the payload
+with the generated `Wire['<Model>']` and hands it on as-is — snake_case field
+names included, because those come from the contract and are checked against it.
+A hook may still *derive* something (`useLineOutageSocket` parses branch names
+out of the channel labels, `useTimeWindowSocket` accumulates a ring buffer); what
+it no longer does is rename.
 
 **Reach for the `onMessage` escape hatch when the stream is fast.** Storing a
 message in React state costs a render pass — right for a small payload drawn as
@@ -415,7 +423,7 @@ Server side
 --
 
 `src/server.py` does wiring and nothing else. It mounts each app package's
-`router` under its prefix from `APPS`, tags it with the app's url name, composes
+`router` under its prefix from `APPS`, tags it with the app's url slug, composes
 every package's `lifespan` into one, serves `/healthz`, and mounts the built
 client at `/` last — a mount at `/` is greedy and swallows anything registered
 after it.
@@ -426,8 +434,10 @@ From there the two families of app part ways.
 
 - `states: dict[str, ReferenceSubappModel]` — the entire store, keyed by client
   id;
-- `ConnectionManager` (`src/shared.py`) — client id → the set of live sockets,
-  pure transport, one instance per app;
+- `SocketRegistry` (`src/shared.py`) — client id → this client's live sockets,
+  pure transport, one instance per app. It is `SessionRegistry` (see
+  `pswamp_web/sessions.py`) with the socket itself as the session, which is the
+  same structure the page packages register their view state in;
 - a command handler that mutates one client's state and pushes it, and a socket
   handler that pushes on connect and then only waits.
 
@@ -598,7 +608,7 @@ arrangements.
 
 **1. State in a module dict** — `reference_subapp`, `pmu_test_streamer`, and
 anything the scaffold generates. The simplest case, and it needs no new plumbing:
-`ConnectionManager` already addresses a client id and already runs on this same
+`SocketRegistry` already addresses a client id and already runs on this same
 event loop.
 
 ```
@@ -714,7 +724,7 @@ Where the pieces live
 | `app/client-web/src/hooks/useServerSocket.ts` | The connection half, shared by every page |
 | `app/client-web/src/lib/servers.ts` | `resolveApiUrl` / `resolveServerUrl` and the path consts |
 | `app/server-python/src/server.py` | Wiring: mounts routers from `APPS`, composes lifespans |
-| `app/server-python/src/shared.py` | `ClientId`, `CommandAck`, `ConnectionManager`, `read_client_id` |
+| `app/server-python/src/shared.py` | `SocketRegistry`, and `ClientId` / `CommandAck` / `read_client_id` re-exported from `pswamp_web/wire.py` |
 | `app/server-python/src/pswamp_web/wire.py` | Every p-SWAMP message model, and `send_state` |
 | `app/server-python/src/pswamp_web/hub.py` | One pipeline per client, and the registry over them |
 

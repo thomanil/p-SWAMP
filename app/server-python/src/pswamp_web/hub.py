@@ -49,7 +49,7 @@ from .replay import (
     load_recording,
 )
 from .stores import AlarmStore, AppStatusStore, IslandStore, LineOutageStore
-from .wire import ReplayStatus
+from .wire import ReplayStatus, read_client_id
 
 logger = get_logger("pswamp_web.hub")
 
@@ -58,6 +58,10 @@ logger = get_logger("pswamp_web.hub")
 # the topic; status and alarm messages already name their application.
 ISLANDING_RESULT_TOPIC = "islanding.result"
 LINE_OUTAGE_RESULT_TOPIC = "line_outage.result"
+
+# Topics the applications publish under names of their own; spelled here so a
+# page subscribes to the same string the stores listen on.
+ALARM_TOPIC = "alarms"
 
 # How many pipelines may exist at once. Sized from memory and the GIL rather than
 # CPU time: one pipeline is ~1.4% of a core but ~30 MB that never comes back, and
@@ -226,7 +230,7 @@ class Hub:
         through a queue they would have to be drained from."""
         self._detach = [
             self.bus.add_listener("status", self.statuses.handle),
-            self.bus.add_listener("alarms", self.alarms.handle),
+            self.bus.add_listener(ALARM_TOPIC, self.alarms.handle),
             self.bus.add_listener(ISLANDING_RESULT_TOPIC, self.islands.handle),
             self.bus.add_listener(LINE_OUTAGE_RESULT_TOPIC, self.line_outages.handle),
         ]
@@ -257,28 +261,6 @@ class Hub:
             position=(cursor % recording.n_samples) / recording.data_rate,
             duration=recording.duration,
         )
-
-
-def read_client_id(ws: WebSocket) -> str | None:
-    """The pipeline key from ``?client_id=``, or None if it is unusable.
-
-    The web client persists one integer per browser profile in localStorage and
-    sends it on every socket, so all of a page's panels resolve to the same
-    pipeline. Kept numeric and bounded because the value ends up in thread names
-    and log lines. ``shared.read_client_id`` is the twin the scaffold apps use and
-    applies the identical rule, so one browser addresses one identity everywhere.
-
-    This is not authentication and does not pretend to be: supply someone else's
-    id and you share their stream.
-    """
-    raw = ws.query_params.get("client_id")
-    if raw is None:
-        return None
-    raw = raw.strip()
-    # Bounded and numeric: this string ends up in thread names and log lines.
-    if not raw.isdigit() or len(raw) > 20:
-        return None
-    return raw
 
 
 class _Entry:

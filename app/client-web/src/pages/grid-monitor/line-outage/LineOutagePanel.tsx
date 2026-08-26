@@ -42,15 +42,12 @@ export function LineOutagePanel({
   return (
     <Panel
       title="Line Outages"
-      subtitle={
-        variant === 'focused'
-          ? 'Branches whose current magnitude dropped to zero, and their recovery'
-          : undefined
-      }
+      subtitle="Branches whose current magnitude dropped to zero, and their recovery"
       status={status}
       ready={ready}
-      className={variant === 'focused' ? 'w-full max-w-4xl' : undefined}
-      focusHref={variant === 'dashboard' ? '/line-outage' : undefined}
+      focusedClassName="w-full max-w-4xl"
+      focusHref="/line-outage"
+      variant={variant}
       minBodyClass="min-h-[152px]"
       contentClassName="px-0 pt-0"
       badge={
@@ -67,9 +64,9 @@ export function LineOutagePanel({
         )
       }
       footer={
-        state?.windowLength
-          ? `${state.appName ?? 'LineOutageDetectionApp'} · ` +
-            `${state.windowLength.toFixed(2)}s window`
+        state?.window_length
+          ? `${state.app_name ?? 'LineOutageDetectionApp'} · ` +
+            `${state.window_length.toFixed(2)}s window`
           : undefined
       }
     >

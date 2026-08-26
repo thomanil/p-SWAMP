@@ -2,15 +2,16 @@
 
 This module deliberately owns no domain logic. It does four things:
 
-  1. mounts each app package's router under its own /api/<app> prefix (APPS below),
+  1. mounts each app package's router under its own /api/<slug> prefix (APPS below),
   2. composes their lifespans into the single FastAPI lifespan,
   3. serves GET /healthz, the cheap liveness probe for Docker/k8s,
   4. serves the web client (the Vite build in static/) at / — same app, port, and
      origin as the api, so one image and one Service serve both.
 
-Each app under src/<app>/ is a self-contained package exposing `router` and
-optionally `lifespan` (see src/pmu_test_streamer/__init__.py). Adding a backend
-api is one new package plus one line in APPS; nothing else in this file changes.
+Each app under src/<app>/ is a self-contained package exposing `router`, and
+optionally `WS_MESSAGE` and `lifespan` (see src/reference_subapp/__init__.py).
+Adding a backend api is one new package plus one entry in APPS; nothing else in
+this file changes.
 
 The server is entirely stateless in the persistence sense: there is no database
 and nothing is written to disk. All state lives in the app packages' memory and is
@@ -40,6 +41,7 @@ import pswamp_web.islanding
 import pswamp_web.line_outage
 import pswamp_web.phasors
 import pswamp_web.time_window
+from api_contract import AppEntry
 
 # --- shared services --------------------------------------------------------
 #
@@ -47,34 +49,73 @@ import pswamp_web.time_window
 # before any app package handles a request. Entered before everything in APPS and
 # exited after it, so a websocket handler can assume its dependencies are up.
 #
-# pswamp_web is the one: it owns the PMU replay and the monitoring application
-# threads that its page packages all read from. Unlike the app packages, whose
-# state is per client, that pipeline is process-wide and shared — there is one
-# grid being monitored no matter how many browsers are watching.
+# pswamp_web is the one: it owns the registry of per-client PMU pipelines that
+# its page packages all draw theirs from. Its lifespan starts no pipeline — those
+# are built on a client's first connect and evicted when idle — it only binds the
+# registry to this event loop and drains it on shutdown.
 
 SERVICES = [pswamp_web]
 
 # --- the app registry -------------------------------------------------------
 #
-# (url prefix, app package). One entry per backend api. The prefix namespaces
-# each package's endpoints, so several apps can each have a "ws" or a "status"
-# without colliding — the streamer's "/ws" is served as /api/pmu-test-streamer/ws.
-# Keep the prefix aligned with the web client's route for the same app so the two
-# halves read the same. Note that only the URL is hyphenated: the package must be
-# a valid Python identifier, hence pmu_test_streamer → /api/pmu-test-streamer.
+# One AppEntry per backend api: its url slug, the package that serves it, and one
+# line saying what it is (which becomes the group heading in /docs).
+#
+# The slug is the single spelling of an app's name. It is the url segment — the
+# router is mounted at /api/<slug>, so the streamer's own "/ws" is served as
+# /api/pmu-test-streamer/ws and several apps can each have a "ws" without
+# colliding — and it is also the web client's route for the same app, so the two
+# halves read the same. The package name is that word with underscores, which is
+# a Python identifier requirement rather than a choice: pmu_test_streamer →
+# /api/pmu-test-streamer.
 #
 # src/shared.py is NOT an app package and never appears here — it holds the
 # domain-free helpers the packages import (see its docstring).
 
 APPS = [
-    ("/api/pmu-test-streamer", pmu_test_streamer),
-    ("/api/app-status", pswamp_web.app_status),
-    ("/api/grid", pswamp_web.grid),
-    ("/api/time-window", pswamp_web.time_window),
-    ("/api/islanding", pswamp_web.islanding),
-    ("/api/line-outage", pswamp_web.line_outage),
-    ("/api/phasors", pswamp_web.phasors),
-    ("/api/reference-subapp", reference_subapp),
+    AppEntry(
+        "pmu-test-streamer",
+        pmu_test_streamer,
+        "Scaffold demo: replays sample PMU records line by line.",
+    ),
+    AppEntry(
+        "app-status",
+        pswamp_web.app_status,
+        "Health and status of the running p-SWAMP monitoring applications. "
+        "Only downstream status overview, no upstream commands to it yet.",
+    ),
+    AppEntry(
+        "grid",
+        pswamp_web.grid,
+        "The static Nordic 44 topology. HTTP only — no socket.",
+    ),
+    AppEntry(
+        "time-window",
+        pswamp_web.time_window,
+        "The measurement window: channel selection and the sample stream.",
+    ),
+    AppEntry(
+        "islanding",
+        pswamp_web.islanding,
+        "Islanding detection results and the alarms derived from them.",
+    ),
+    AppEntry(
+        "line-outage",
+        pswamp_web.line_outage,
+        "Detected line disconnect/reconnect events. "
+        "Only downstream event log, no upstream commands to it yet.",
+    ),
+    AppEntry(
+        "phasors",
+        pswamp_web.phasors,
+        "Voltage phasors, referred to a rotating reference. "
+        "Only downstream snapshots, no upstream commands to it yet.",
+    ),
+    AppEntry(
+        "reference-subapp",
+        reference_subapp,
+        "The reference example: a per-client counter over the whole stack.",
+    ),
 ]
 
 
@@ -91,8 +132,8 @@ async def lifespan(app: FastAPI):
     async with AsyncExitStack() as stack:
         for module in SERVICES:
             await stack.enter_async_context(module.lifespan(app))
-        for _, module in APPS:
-            app_lifespan = getattr(module, "lifespan", None)
+        for entry in APPS:
+            app_lifespan = getattr(entry.module, "lifespan", None)
             if app_lifespan is not None:
                 await stack.enter_async_context(app_lifespan(app))
         yield
@@ -153,12 +194,12 @@ async def healthz() -> api_contract.HealthStatus:
     return api_contract.HealthStatus()
 
 
-for _prefix, _module in APPS:
-    # Tagged with the app's own url name, so the generated api description groups
-    # each app's operations together rather than listing them flat. Derived from
-    # the prefix rather than written out, so a new entry in APPS above needs
+for _app in APPS:
+    # Tagged with the app's own url slug, so the generated api description groups
+    # each app's operations together rather than listing them flat. Taken from
+    # the entry rather than written out, so a new entry in APPS above needs
     # nothing here.
-    app.include_router(_module.router, prefix=_prefix, tags=[_prefix[len("/api/") :]])
+    app.include_router(_app.module.router, prefix=_app.prefix, tags=[_app.slug])
 
 
 # --- the published api contract ---------------------------------------------

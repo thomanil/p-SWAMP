@@ -4,24 +4,15 @@ import { useServerSocket } from '@/hooks/useServerSocket'
 import { LINE_OUTAGE_WS_PATH } from '@/lib/servers'
 import type { Wire } from '@/api/wire'
 
-export type LineOutageEvent = {
-  t: number
-  kind: 'disconnect' | 'connect'
-  /** One entry per channel that flipped, parallel to `measurements`. */
-  stations: string[]
-  measurements: string[]
-  /** Branch names recovered from the channel labels — see `branchesOf`. */
-  branches: string[]
-}
+/** One event as the detector reported it, plus the branch names recovered from
+ *  its channel labels — see `branchesOf`. The wire fields are spread in rather
+ *  than copied out one by one, so a field added server-side arrives here without
+ *  an edit. */
+export type LineOutageEvent = Wire['LineOutageEvent'] & { branches: string[] }
 
-export type LineOutageState = {
-  appName: string | null
-  windowLength: number | null
-  /** Newest first, as the server sends them. */
-  events: LineOutageEvent[]
-} | null
-
-type LineOutageMessage = Wire['LineOutageLog']
+export type LineOutageState =
+  | (Omit<Wire['LineOutageLog'], 'events'> & { events: LineOutageEvent[] })
+  | null
 
 /**
  * The detector reports the *channels* that changed, e.g.
@@ -31,7 +22,9 @@ type LineOutageMessage = Wire['LineOutageLog']
  * as noise.
  *
  * This recovers the branch name from the label and de-duplicates, which is what
- * an operator is actually looking at.
+ * an operator is actually looking at. It is also the reason this hook still has
+ * a `useMemo` where the other panels' hooks pass the message straight through:
+ * it *derives* something, rather than renaming what the server already sent.
  *
  * It is the one place in this port that encodes anything about p-SWAMP's own
  * naming, so keep it *cosmetic*: the raw `stations` and `measurements` the
@@ -48,21 +41,17 @@ function branchesOf(measurements: string[]): string[] {
 
 export function useLineOutageSocket() {
   const { message, status, connected } =
-    useServerSocket<LineOutageMessage>(LINE_OUTAGE_WS_PATH)
+    useServerSocket<Wire['LineOutageLog']>(LINE_OUTAGE_WS_PATH)
 
   const state = useMemo<LineOutageState>(
     () =>
       message === null
         ? null
         : {
-            appName: message.app_name,
-            windowLength: message.window_length,
-            events: message.events.map((e) => ({
-              t: e.t,
-              kind: e.kind,
-              stations: e.stations,
-              measurements: e.measurements,
-              branches: branchesOf(e.measurements),
+            ...message,
+            events: message.events.map((event) => ({
+              ...event,
+              branches: branchesOf(event.measurements),
             })),
           },
     [message],

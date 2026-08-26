@@ -54,7 +54,7 @@ now except review.
 
 **Server** — `app/server-python/src/pswamp_web/` (~2200 LOC):
 `wire.py` (the schema the Qt side never needed), `bus.py` (thread→loop),
-`hub.py` (the process-wide pipeline), `replay.py` (source + the counting-window
+`hub.py` (one pipeline per client, and the registry over them), `replay.py` (source + the counting-window
 subclass), `recorded_io.py` (replay through p-SWAMP's `io` seam), `channels.py`,
 `grid_model.py`, `stores.py`, `data/n44_line_trip_50hz.npz`, and five page
 packages. Plus `tools/record_n44_dataset.py`, which regenerates the recording
@@ -891,9 +891,10 @@ exercises:
 - **Reconnect, gaps and backfill become real.** A recording never disconnects.
   A broker does, and `TimeWindowApp`'s queue behaviour under a reconnect burst is
   exactly the §4.4 landmine again.
-- **`replicas: 1` stops being acceptable.** State is process-wide and in-memory
+- **`replicas: 1` stops being acceptable.** State is in-memory and per client
   (`AGENTS.md`), which is fine for a demo and not for something operators depend
-  on. Horizontal scaling needs an external live store — a real design change, not
+  on — and the per-client pipeline makes it sharper, since a browser's five
+  sockets landing on different pods would be five unrelated replays. Horizontal scaling needs an external live store — a real design change, not
   a manifest tweak. This is the single largest piece of unscoped work in this
   document.
 - **Auth and CORS.** Both are wide open because every endpoint is a read of

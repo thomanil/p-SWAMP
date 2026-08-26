@@ -21,21 +21,23 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Literal
 
-from fastapi import APIRouter, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, WebSocket
 from pydantic import BaseModel, Field
 from shared import (
     ClientId,
     CommandAck,
-    ConnectionManager,
-    make_logger,
+    SocketRegistry,
+    get_logger,
     read_client_id,
+    send_state,
+    wait_for_disconnect,
 )
 
 from .model import LINES, TICKS_PER_SECOND, PmuStreamModel
 
 # Discrete client events only — never the ticker's auto-advance, which fires
 # TICKS_PER_SECOND times a second per playing client.
-logger = make_logger("pmu")
+logger = get_logger("pmu")
 
 
 # --- authoritative in-memory state ------------------------------------------
@@ -106,7 +108,7 @@ def roster_table(acting_id: str | None = None) -> str:
     stream and whether it's playing. Disconnected-but-remembered seeds are excluded
     — this is the live roster, not the state table. The client that triggered the
     current event is flagged with an arrow."""
-    ids = sorted(manager.conns, key=int)
+    ids = sorted(sockets.clients(), key=int)
     if not ids:
         return "    (no clients connected)"
     headers = ("", "CLIENT", "RECORD", "STATE")
@@ -142,7 +144,7 @@ def log_event(action: str, client_id: str) -> None:
 # Transport bookkeeping only, so it comes from shared.py; this app's own state lives
 # in `states` above and deliberately outlives a disconnect.
 
-manager = ConnectionManager()
+sockets = SocketRegistry()
 
 
 # --- server-side playback ticker -------------------------------------------
@@ -173,7 +175,7 @@ async def ticker() -> None:
         for client_id, state in list(states.items()):
             if state.playing:
                 state.model.step_forward()
-                await manager.send_to_client(client_id, state_message(state))
+                await sockets.send_to_client(client_id, state_message(state))
 
 
 @asynccontextmanager
@@ -203,7 +205,7 @@ router = APIRouter()
 async def applied(client_id: str, state: ClientState, action: str) -> CommandAck:
     """Log the command, push this client its new state, acknowledge the request."""
     log_event(action, client_id)
-    await manager.send_to_client(client_id, state_message(state))
+    await sockets.send_to_client(client_id, state_message(state))
     return CommandAck(applied=action)
 
 
@@ -256,21 +258,17 @@ async def ws_endpoint(ws: WebSocket) -> None:
 
     # Resuming an existing seed vs. a brand-new one changes the connect message.
     known = client_id in states
-    await manager.connect(ws, client_id)
-    state = get_state(client_id)  # born here so it shows in the roster below
-    log_event("reconnected" if known else "connected", client_id)
-    try:
-        # Initial full state for this client (resumes prior position if known).
-        await ws.send_text(state_message(state).model_dump_json())
-        # Nothing is sent up this socket; the receive loop is what surfaces a
-        # disconnect. Without it a closed socket is only noticed on the next
-        # send, so a paused client would linger for ever.
-        while True:
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
-    finally:
-        manager.disconnect(ws, client_id)
-        log_event("disconnected", client_id)
+    async with sockets.connected(ws, client_id):
+        state = get_state(client_id)  # born here so it shows in the roster below
+        log_event("reconnected" if known else "connected", client_id)
+        # Straight down this socket, not through the registry: the opening
+        # message is for the connection that just arrived (and resumes its prior
+        # position if known), while a command's result goes to every socket the
+        # client has open.
+        await send_state(ws, state_message(state))
+        # Nothing is sent up this socket; this is what notices the client going
+        # away. See pswamp_web/pump.py -- the page packages share it.
+        await wait_for_disconnect(ws)
+    # Outside the block, so the socket is already out of the registry and the
+    # roster this logs shows who is left rather than who is leaving.
+    log_event("disconnected", client_id)

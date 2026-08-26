@@ -153,9 +153,12 @@ Two deployables, one wire protocol:
   fixture and nothing generates it. (The *grid monitor* is the one that really
   runs the desktop package's code; the streamer does not, and should not start.)
   Don't add tooling or deps to regenerate it unless asked;
-  replacing it is a file swap, since no code parses the contents. **`src/shared.py`** holds the
-  domain-free helpers the app packages use — `ConnectionManager` and
-  `make_logger(name)`; it is *not* an app package and never appears in `APPS`.
+  replacing it is a file swap, since no code parses the contents. **`src/shared.py`** is what an app
+  package imports its domain-free helpers from — `SocketRegistry`, plus
+  `ClientId`, `CommandAck`, `read_client_id`, `get_logger` re-exported from
+  `pswamp_web/` (see "The p-SWAMP web layer" for why the definitions live down
+  there and the import runs inward); it is *not* an app package and never appears
+  in `APPS`.
   Note the spelling split: a package dir must be a Python identifier
   (`reference_subapp`) while its URL prefix is hyphenated to match the page route
   (`/api/reference-subapp`). The image mirrors the **repo root** —
@@ -194,9 +197,10 @@ Two deployables, one wire protocol:
   `pswamp_web/time_window/`. `/reference-subapp` (`ReferenceSubappPage`) is the
   standalone scaffold demo to copy — a counter over a WebSocket plus two POST
   commands, where the connection half lives once in
-  `src/hooks/useServerSocket.ts` and the app adds only its snake_case → camelCase
-  mapping (`useReferenceSubappSocket`). `/pmu-test-streamer`
-  (`PmuTestStreamerPage`) is the older demo beside it, on its way out. See
+  `src/hooks/useServerSocket.ts` and the app's own hook
+  (`useReferenceSubappSocket`) adds only its wire type and its commands.
+  `/pmu-test-streamer` (`PmuTestStreamerPage`) is the older demo beside it, on
+  its way out. See
   "Adding a p-SWAMP view" and "Adding a page" below.
 
 Key invariants to preserve:
@@ -278,14 +282,40 @@ Key invariants to preserve:
     other change — so there is exactly one path for state and no ordering to
     reconcile between two of them. Don't be tempted to return the new state
     "to save a round trip": that is the whole design being undone.
-  - **`ClientId` and `CommandAck` are how every endpoint declares itself**, from
-    `shared.py` — or from `pswamp_web/wire.py`, which keeps deliberate twins of
-    both because that package may not import the rest of the backend. Change one
-    pair, change the other.
-  - **A socket that receives nothing still needs its receive loop.** Every WS
-    handler ends in `while True: await ws.receive_text()`. It is not vestigial:
-    without a pending receive, a closed socket is only noticed on the next send,
-    so an idle client lingers for ever.
+  - **`ClientId` and `CommandAck` are how every endpoint declares itself.** Both
+    are defined once, in `pswamp_web/wire.py`, and re-exported by `shared.py` for
+    the app packages beside it — so a command's caller and its reply have one
+    spelling across the whole backend, and the client id one regex
+    (`CLIENT_ID_PATTERN`, which both the query parameter and `read_client_id`
+    apply). These used to be deliberate twins, one pair per side, kept equal by
+    hand and reunified in the contract by ~90 lines of `api_contract.py`; see the
+    import-direction note under "The p-SWAMP web layer" for why that was never
+    necessary.
+  - **`send_state` is the only serialiser, and a message is always a model.**
+    Every push in the backend ends at `pswamp_web/wire.py:send_state` — a page's
+    push task calls it directly, a scaffold app's command calls it through
+    `SocketRegistry.send_to_client`, and an opening message calls it on the one
+    socket that just arrived. Don't reach for `ws.send_json` or hand-roll
+    `model_dump_json`: the NaN guard and the "it must be a model, or it drops out
+    of the contract" rule then exist in one place instead of three, which is
+    where they were.
+  - **A client's live views are one structure.** `SessionRegistry[T]` in
+    `pswamp_web/sessions.py`, keyed by client id and scoped to the connection.
+    The page packages register what a command has to reach (a selection, a
+    wake-up queue); the scaffold apps register the socket itself, via
+    `SocketRegistry`. One dict, not two implementations of it.
+  - **A socket that receives nothing still needs its receive loop**, which is
+    `wait_for_disconnect(ws)` in `pswamp_web/pump.py` — every endpoint in the
+    backend ends in it, page packages directly and scaffold apps through
+    `shared.py`. It is not vestigial: without a pending receive, a closed socket
+    is only noticed on the next send, so an idle client lingers for ever.
+  - **A page endpoint is three lines of plumbing and its own logic, nothing
+    else.** `connected_hub(ws)` identifies the client and gets its pipeline;
+    `serve_ticks` or `serve_updates` (`pswamp_web/pump.py`) runs the socket. What
+    is left in the package is what to send, which is the only part that differs.
+    Those five endpoints each carried their own copy of the pusher-task /
+    receive-loop / cancel-and-suppress tail until it was extracted; don't write a
+    sixth.
 - **One message shape, downstream.** The server pushes `state_message()` on
   connect and every change; the client renders it. Changing that shape means
   touching both sides.
@@ -308,10 +338,11 @@ Key invariants to preserve:
   the compose healthcheck). The server has no external dependencies, so "is the
   process serving?" is the whole health story; there is no `/readyz`. It stays at
   the root, not under `/api`: it is the process's health, not any one app's.
-- **Every api lives under `/api/<app>/`.** The prefix comes from `APPS` in
-  `server.py`, not from the package, so a router declares plain paths (`"/ws"`,
-  `"/count/bump"`) and is reachable at `/api/reference-subapp/ws`. Keep the
-  prefix aligned with the web client's route for the same app. `/api` is also the only
+- **Every api lives under `/api/<app>/`.** The prefix is `AppEntry.prefix`,
+  derived from that entry's slug in `APPS` in `server.py` rather than from the
+  package, so a router declares plain paths (`"/ws"`, `"/count/bump"`) and is
+  reachable at `/api/reference-subapp/ws`. The slug is also the web client's
+  route for the same app, which is what keeps the two halves reading alike. `/api` is also the only
   thing the Vite dev proxy forwards, so an endpoint outside it won't reach the
   backend in dev. The `include_router` loop tags each app with its own url name,
   so the generated api description groups a package's operations together for
@@ -349,19 +380,34 @@ Key invariants to preserve:
 the **desktop `p-swamp` package** at the repo root. It is the only code in `app/`
 that imports `pswamp.*`.
 
-**It is written to move into that package.** The intended end state is
-`src/pswamp/web/` — the sibling of the existing `gui/` (PySide6) and
-`visualization/` (pyqtgraph) packages, a third presentation adapter over the same
-Qt-free core. So the package obeys two rules that are otherwise unusual here:
-*nothing inside it imports from the rest of the web backend* (not `shared.py`, not
-`server.py`), and *every import between its own modules is relative*. Moving it is
-then a `git mv` plus the handful of import lines in `server.py` that name it.
-Don't add a dependency that breaks that. Note this is only **one of two**
-possible directions: §7 of `doc/WIP-context-port-from-qt-to-web-frontend.md` sets
-it against the opposite move — root `src/` under `app/server-python/` — and argues
-the choice follows from whether the Qt front end is being retired, not from
-tidiness. Either way, the invariant that keeps this package self-contained is what
-makes both moves cheap.
+**It is kept self-contained, because it has to be movable.** Two things are
+settled: the client-server stack is the direction this project is going, and the
+analysis core at the repo root stays whatever happens to the front ends. The open
+question is **how long the Qt desktop path lives alongside them** — and that is
+what decides where the shared Python ends up, which is why this package must be
+cheap to move. §7 of `doc/WIP-context-port-from-qt-to-web-frontend.md` lays out
+the two mutually exclusive moves: while Qt stays, this package moves in under
+`pswamp/` as a third presentation adapter beside `gui/` and `visualization/`; once
+Qt is gone, "the core" and "the web backend's only Python dependency" are the same
+thing, so the root package moves in *here* instead and the root becomes repo
+furniture. Don't write either destination down as decided. What both rely on is
+the same, so the package obeys two rules that are otherwise unusual here:
+*nothing inside it imports from the rest of the web backend* (not `shared.py`, not `server.py`), and
+*every import between its own modules is relative*. That is what makes moving it a
+`git mv` plus the handful of import lines in `server.py` that name it. Don't add a
+dependency that breaks it.
+
+**The rule is one-way, and that matters.** It forbids importing *outward*; the
+rest of the backend importing *inward* is fine, and stays fine either way — if
+this package ends up under `pswamp/`, `from pswamp_web.wire import …` simply
+becomes `from pswamp.web.wire import …`; if the core moves here instead, nothing
+changes at all. So anything both sides need is
+**defined here and re-exported by `shared.py`**, never declared twice:
+`ClientId`, `CommandAck`, `CLIENT_ID_PATTERN`/`read_client_id`, `send_state` and
+`get_logger`. Reading the rule as "duplicate it, then keep the copies equal" is
+what produced four twins and the `collapse_titled_twins` machinery that used to
+sit in `api_contract.py` to hide them from the published contract. Don't
+reintroduce that: add to `wire.py` (or `log.py`) and re-export.
 
 Two things it compensates for rather than fixing in the core, both marked in the
 code and both listed in §11 of
@@ -460,8 +506,14 @@ Client side, four edits:
 
 1. Add `src/pages/grid-monitor/<slug>/` with the socket hook, the drawing
    component, and a `<Name>Panel.tsx` that renders them inside `<Panel>`. Copy
-   `app-status/` for a simple one. Give it a `variant?: PanelVariant` prop and use
-   it for size and for `focusHref` (a focused route must not link to itself).
+   `app-status/` for a simple one. Give it a `variant?: PanelVariant` prop and
+   pass it straight to `<Panel variant={variant}>`, along with the facts it
+   needs — `subtitle`, `focusHref`, `focusedClassName`. **Don't branch on the
+   variant for those**: `<Panel>` owns the convention (subtitle when focused,
+   expand link when not, width when it owns the page), and it owns it precisely
+   because six panels each writing the ternaries out is six chances to differ.
+   Branch on `variant` only for what is genuinely this panel's business, such as
+   how tall to draw a canvas.
 2. Place it in the grid in `GridMonitorPage.tsx`. Use `minmax(0,1fr)` columns,
    never `1fr` — a grid item's default `min-width:auto` lets a canvas or a table
    force its column wider than the viewport.
@@ -487,15 +539,22 @@ note the context object and its hook must live in a separate `.ts` file, because
 
 Server side, the backend package under `src/pswamp_web/<app>/` exporting `router`
 (and registered in `APPS`) is unchanged — see "Adding a backend api". Copy
-`app_status/` for a ticker-driven api or `islanding/` for an event-driven one.
-Decide which of the two delivery patterns fits:
+`app_status/` for a ticker-driven api or `line_outage/` for an event-driven one.
+Decide which of the two delivery patterns fits; `pswamp_web/pump.py` has one
+function per pattern, so the choice is which one you call:
 
-- **Poll the client's window** (`time_window`, and any measurement plot) — read
-  the snapshot on your own asyncio ticker. This is the direct translation of what
-  the Qt widgets do, and it is what keeps the 50 Hz sample stream off the event
-  loop.
-- **Subscribe to the client's bus** (`islanding`, alarms, status) — for results
-  and events, which arrive about once a second.
+- **Poll the client's window** (`time_window`, and any measurement plot) —
+  `await serve_ticks(ws, PUSH_HZ, lambda: build(hub))`, reading the snapshot on
+  the ticker. This is the direct translation of what the Qt widgets do, and it is
+  what keeps the 50 Hz sample stream off the event loop. Return `None` from the
+  builder when nothing has advanced, and an idle client costs nothing.
+- **Subscribe to the client's bus** (`islanding`, alarms, status) — `with
+  event_queue(hub.bus, TOPIC) as updates:` then `await serve_updates(ws, updates,
+  build)`, for results and events, which arrive about once a second. The builder
+  is handed the `Event` that woke it, so a page listening on several topics can
+  tell them apart; build the message from the client's stores rather than from
+  the payload wherever you can, since that is what makes a dropped notification
+  cost latency and never content.
 
 Either way the endpoint opens with `async with connected_hub(ws) as hub:` and
 reads everything off that `hub`, never a module-level singleton.
@@ -613,8 +672,10 @@ Dockerfile/compose change (both copy `src/` wholesale and watch the directory):
    Copy `src/reference_subapp/__init__.py`. Use **relative** imports inside the
    package (`from .model import ...`); for a `lifespan`, see
    `src/pswamp_web/__init__.py`.
-2. Add one `("/api/<app>", <app>)` entry to `APPS` in `src/server.py`, with the
-   matching `import <app>`.
+2. Add one `AppEntry("<app>", <app>, "One line on what it is.")` to `APPS` in
+   `src/server.py`, with the matching `import <app>`. The slug is the url
+   segment, the web client's route and the tag in the published document, all
+   from that one spelling; the description becomes the group heading in `/docs`.
 
 `server.py` does the rest: it includes the router under that prefix and enters the
 package's `lifespan` (via `AsyncExitStack`) if present, so packages never need to
@@ -624,10 +685,13 @@ know about each other. Keep domain logic out of `server.py` — it is wiring onl
 registry for it.** `api_contract.py` walks that same `APPS` list and collects
 whatever each package exports under the name — the identical `getattr` trick
 `server.py` uses for `lifespan`. So the socket payload **must be a pydantic
-model**: return a bare dict from `state_message()` and the app silently drops out
-of the contract, the page keeps working, and nothing says the type safety is gone.
-`ConnectionManager.send_to_client` takes a `BaseModel` for that reason (and
-because `json.dumps` emits bare `NaN`, which `JSON.parse` rejects). An app with no
+model**: return a bare dict from `state_message()` and the app drops out of the
+contract while the page keeps working. Forgetting the export *entirely* used to
+be silent in the same way; `api_contract.check_apps` now refuses to start a
+server whose app serves a WebSocket and publishes no message for it, so that half
+of the mistake is a startup error naming the package.
+`SocketRegistry.send_to_client` takes a `BaseModel` for that reason (and because
+`json.dumps` emits bare `NaN`, which `JSON.parse` rejects). An app with no
 socket — `pswamp_web/grid/` — just omits the name.
 
 `src/reference_subapp/` is the one to copy: the smallest complete api, and
@@ -691,10 +755,17 @@ before touching the api:
   consumes — come through as ordinary models. Revisit that choice if a channel
   ever grows a second message shape or an upstream direction; today every channel
   runs downstream only and carries one model.
-- **The web client's wire types are GENERATED.** A page hook says
-  `type XMessage = Wire['XState']` (`src/api/wire.ts`), never a hand-copy of the
-  Python model. Its camelCase mapping stays hand-written — that is the client's
-  own vocabulary.
+- **The web client's wire types are GENERATED, and nothing renames them.** A page
+  hook says `type XState = Wire['XState']` (`src/api/wire.ts`), never a hand-copy
+  of the Python model, and the components read the server's own field names —
+  `app_name`, `mag_ref`, `t_start`. Every hook used to map those into a camelCase
+  mirror, ~150 lines of pure renaming whose real cost was that it failed
+  *silently*: a field added server-side and regenerated into `schema.ts` simply
+  never reached the screen, because a `useMemo` that omits a key is valid
+  TypeScript. That is the exact failure the generated contract exists to abolish.
+  A hook may still **derive** — `useLineOutageSocket` parses branch names out of
+  channel labels, `useTimeWindowSocket` accumulates a ring buffer — and those
+  keep their own vocabulary, because they are not the message.
 - **`postCommand` is typed against the document**, so a typo'd path, a missing
   path parameter or a wrong body is a `tsc` error. Path-parameterised commands
   take the contract's templated path plus a `path` object:

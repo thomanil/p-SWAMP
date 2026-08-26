@@ -36,15 +36,12 @@ export function MeasurementsPanel({
   return (
     <Panel
       title="Live Measurements"
-      subtitle={
-        variant === 'focused'
-          ? 'A moving window of the Nordic 44 PMU stream, as the monitoring applications see it'
-          : undefined
-      }
+      subtitle="A moving window of the Nordic 44 PMU stream, as the monitoring applications see it"
       status={status}
       ready={ready}
-      className={variant === 'focused' ? 'w-full max-w-5xl' : undefined}
-      focusHref={variant === 'dashboard' ? '/time-window' : undefined}
+      focusedClassName="w-full max-w-5xl"
+      focusHref="/time-window"
+      variant={variant}
       minBodyClass="min-h-[260px]"
       badge={
         connected ? (

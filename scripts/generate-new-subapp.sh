@@ -160,7 +160,18 @@ def edit(path, pattern, addition, before=False):
 
 server_py = PY_SRC / "server.py"
 edit(server_py, r"^import [a-z_][a-z0-9_]*\n", f"import {pkg}\n")
-edit(server_py, r"^\]\n", f'    ("/api/{slug}", {pkg}),\n', before=True)
+# The description is what /docs shows as this app's group heading; the label is
+# the best guess available here, and is worth replacing with a real sentence.
+edit(
+    server_py,
+    r"^\]\n",
+    f'    AppEntry(\n'
+    f'        "{slug}",\n'
+    f'        {pkg},\n'
+    f'        "{label}.",\n'
+    f'    ),\n',
+    before=True,
+)
 
 # Two separate blocks in that file, each anchored on its own pattern — the
 # entry goes after the last line of its own block, not at the end of the other's.

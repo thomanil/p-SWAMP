@@ -15,16 +15,15 @@ Only the most recent row is sent, so this is a snapshot rather than a stream:
 44 stations at 10 Hz is a few kilobytes a second with no history to maintain.
 """
 
-import asyncio
-import contextlib
 import functools
 
 import numpy as np
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket
 
 from ..hub import Hub, connected_hub
+from ..pump import serve_ticks
 from ..replay import load_recording
-from ..wire import Phasor, PhasorSnapshot, sample, send_state
+from ..wire import Phasor, PhasorSnapshot, sample
 
 # Half the time window page's rate. Unlike a scrolling trace, where the eye
 # follows motion, a dial of 44 arrows reads the same at 5 Hz as at 10 -- and each
@@ -124,22 +123,4 @@ async def ws_endpoint(ws: WebSocket) -> None:
     async with connected_hub(ws) as hub:
         if hub is None:
             return
-
-        async def push() -> None:
-            interval = 1 / PUSH_HZ
-            while True:
-                await send_state(ws, snapshot_message(hub))
-                await asyncio.sleep(interval)
-
-        pusher = asyncio.create_task(push())
-        try:
-            while True:
-                await ws.receive_text()
-        except WebSocketDisconnect:
-            pass
-        except Exception:
-            pass
-        finally:
-            pusher.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await pusher
+        await serve_ticks(ws, PUSH_HZ, lambda: snapshot_message(hub))

@@ -19,13 +19,11 @@ applications ignore; a recording made without those channels leaves this
 detector running happily and finding nothing, forever.
 """
 
-import asyncio
-import contextlib
-
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket
 
 from ..hub import LINE_OUTAGE_RESULT_TOPIC, Hub, connected_hub
-from ..wire import LineOutageLog, send_state
+from ..pump import event_queue, serve_updates
+from ..wire import LineOutageLog
 
 router = APIRouter()
 
@@ -45,42 +43,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
     async with connected_hub(ws) as hub:
         if hub is None:
             return
-
-        updates: asyncio.Queue = asyncio.Queue(maxsize=64)
-
         # This client's own bus, so the listener only ever hears about this
-        # client's replay. The payload is re-read from the store rather than
-        # carried on the queue, so a dropped notification costs latency and never
-        # content -- the same arrangement the islanding endpoint uses.
-        detach = hub.bus.add_listener(
-            LINE_OUTAGE_RESULT_TOPIC, lambda _payload: _offer(updates)
-        )
-
-        async def push() -> None:
-            await send_state(ws, current_message(hub))
-            while True:
-                await updates.get()
-                await send_state(ws, current_message(hub))
-
-        pusher = asyncio.create_task(push())
-        try:
-            # No commands: this page is read-only. Reading anyway, because that
-            # is what detects the client going away.
-            while True:
-                await ws.receive_text()
-        except WebSocketDisconnect:
-            pass
-        except Exception:
-            pass
-        finally:
-            detach()
-            pusher.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await pusher
-
-
-def _offer(queue: asyncio.Queue) -> None:
-    try:
-        queue.put_nowait(None)
-    except asyncio.QueueFull:
-        pass
+        # client's replay. The log is re-read from the store on every wake-up
+        # rather than carried on the queue, which is why a dropped notification
+        # costs latency and never content -- and why the event itself is ignored.
+        with event_queue(hub.bus, LINE_OUTAGE_RESULT_TOPIC) as updates:
+            await serve_updates(ws, updates, lambda _event: current_message(hub))

@@ -1,46 +1,18 @@
-import { useMemo } from 'react'
-
 import { useServerSocket } from '@/hooks/useServerSocket'
 import { PHASORS_WS_PATH } from '@/lib/servers'
 import type { Wire } from '@/api/wire'
 
-export type Phasor = {
-  station: string
-  channel: string
-  /** Volts. Null when the measurement is missing. */
-  mag: number | null
-  /** Radians. */
-  ang: number | null
-  /** Island index from the detector; 0 is the main system, null if unknown. */
-  island: number | null
-}
+/** One station's voltage phasor: `mag` in volts, `ang` in radians, `island` the
+ *  detector's group (0 is the main system). Straight from the contract. */
+export type Phasor = Wire['Phasor']
 
-export type PhasorsState = {
-  t: number
-  phasors: Phasor[]
-  /** Largest magnitude in this snapshot, for a per-unit view. */
-  magRef: number | null
-  /** Circular mean angle, for a rotating-reference view. */
-  angRef: number | null
-}
-
-type PhasorsMessage = Wire['PhasorSnapshot']
+/** The snapshot the panel draws. `mag_ref` / `ang_ref` are sent rather than
+ *  applied, so the dial can offer per-unit and rotating-reference views. */
+export type PhasorsState = Wire['PhasorSnapshot']
 
 export function usePhasorsSocket() {
-  const { message, status, connected } = useServerSocket<PhasorsMessage>(PHASORS_WS_PATH)
+  const { message, status, connected } =
+    useServerSocket<PhasorsState>(PHASORS_WS_PATH)
 
-  const state = useMemo<PhasorsState | null>(
-    () =>
-      message === null
-        ? null
-        : {
-            t: message.t,
-            phasors: message.phasors,
-            magRef: message.mag_ref,
-            angRef: message.ang_ref,
-          },
-    [message],
-  )
-
-  return { state, status, connected }
+  return { state: message, status, connected }
 }

@@ -24,7 +24,7 @@ export function AlarmsPanel({
   const { state, status, connected, acknowledge, silence, annotate } = useIslandingData()
   const [selectedUuid, setSelectedUuid] = useState<string | null>(null)
 
-  const alarms = state?.alarms ?? []
+  const alarms = state?.alarms.alarms ?? []
   // Resolved from the live list rather than held in state, so an open pane keeps
   // updating as events land on that alarm. A selection that disappears (the
   // store is bounded) simply closes the pane.
@@ -35,10 +35,11 @@ export function AlarmsPanel({
   return (
     <Panel
       title="Alarms"
-      subtitle={variant === 'focused' ? 'Raised by the monitoring applications' : undefined}
+      subtitle="Raised by the monitoring applications"
       status={status}
       ready={ready}
-      focusHref={variant === 'dashboard' ? '/islanding' : undefined}
+      focusHref="/islanding"
+      variant={variant}
       minBodyClass="min-h-[160px]"
       contentClassName="px-0 pt-0"
       badge={

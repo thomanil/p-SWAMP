@@ -1,90 +1,24 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback } from 'react'
 
 import { useServerSocket } from '@/hooks/useServerSocket'
-import { postCommand } from '@/lib/commands'
+import { fireCommand, postCommand } from '@/lib/commands'
 import { ISLANDING_API_PATH, ISLANDING_WS_PATH } from '@/lib/servers'
 import type { Wire } from '@/api/wire'
 
-export type Island = {
-  /** 0 is the main system; anything higher has separated from it. */
-  index: number
-  stations: string[]
-  meanFreq: number | null
-}
+/** One detected island; index 0 is the main system. Straight from the contract. */
+export type Island = Wire['Island']
 
-export type AlarmStatus = 'unseen' | 'acknowledged' | 'silenced' | 'not_critical'
+export type Alarm = Wire['Alarm']
+export type AlarmStatus = Alarm['status']
 
-export type Alarm = {
-  uuid: string
-  appName: string
-  tStart: number
-  tEnd: number | null
-  status: AlarmStatus
-  events: { t: number; type: string; message: string }[]
-}
-
-export type IslandingState = {
-  t: number
-  appName: string
-  status: string
-  islands: Island[]
-  parameters: {
-    windowLength: number
-    meanThreshold: number
-    evalFreq: number
-  }
-} | null
-
-export type IslandingPageState = {
-  islanding: IslandingState
-  alarms: Alarm[]
-}
-
-type IslandingMessage = Wire['IslandingState']
-
-/** Fire an operator action and carry on; the updated alarm list arrives on the
- *  socket, which the server pushes as soon as it has applied the change. */
-function fire(promise: Promise<void>): void {
-  promise.catch((error) => console.error('islanding command failed', error))
-}
+/** Both halves of the page in one message: the detection result and the alarm
+ *  list. They change together and are read together, so the server sends them
+ *  together and a client cannot render them inconsistently. */
+export type IslandingPageState = Wire['IslandingState']
 
 export function useIslandingSocket() {
   const { message, status, connected } =
-    useServerSocket<IslandingMessage>(ISLANDING_WS_PATH)
-
-  const state = useMemo<IslandingPageState | null>(
-    () =>
-      message === null
-        ? null
-        : {
-            islanding: message.islanding
-              ? {
-                  t: message.islanding.t,
-                  appName: message.islanding.app_name,
-                  status: message.islanding.status,
-                  islands: message.islanding.islands.map((i) => ({
-                    index: i.index,
-                    stations: i.stations,
-                    meanFreq: i.mean_freq,
-                  })),
-                  parameters: {
-                    windowLength: message.islanding.parameters.window_length,
-                    meanThreshold: message.islanding.parameters.mean_threshold,
-                    evalFreq: message.islanding.parameters.eval_freq,
-                  },
-                }
-              : null,
-            alarms: message.alarms.alarms.map((a) => ({
-              uuid: a.uuid,
-              appName: a.app_name,
-              tStart: a.t_start,
-              tEnd: a.t_end,
-              status: a.status,
-              events: a.events,
-            })),
-          },
-    [message],
-  )
+    useServerSocket<IslandingPageState>(ISLANDING_WS_PATH)
 
   // One url per action on the alarm they apply to:
   //   POST /api/islanding/alarms/<uuid>/acknowledge
@@ -92,9 +26,13 @@ export function useIslandingSocket() {
   // The path is written the way the contract spells it -- placeholder and all --
   // and the uuid goes in as a parameter, so postCommand checks it against the
   // generated operation and url-encodes it on the way out.
+  //
+  // Nothing here waits for the reply: the updated alarm list arrives on the
+  // socket, which the server pushes as soon as it has applied the change.
   const acknowledge = useCallback(
     (uuid: string) =>
-      fire(
+      fireCommand(
+        'islanding',
         postCommand(`${ISLANDING_API_PATH}/alarms/{alarm_uuid}/acknowledge`, {
           path: { alarm_uuid: uuid },
         }),
@@ -103,7 +41,8 @@ export function useIslandingSocket() {
   )
   const silence = useCallback(
     (uuid: string) =>
-      fire(
+      fireCommand(
+        'islanding',
         postCommand(`${ISLANDING_API_PATH}/alarms/{alarm_uuid}/silence`, {
           path: { alarm_uuid: uuid },
         }),
@@ -112,7 +51,8 @@ export function useIslandingSocket() {
   )
   const annotate = useCallback(
     (uuid: string, message: string) =>
-      fire(
+      fireCommand(
+        'islanding',
         postCommand(`${ISLANDING_API_PATH}/alarms/{alarm_uuid}/annotate`, {
           path: { alarm_uuid: uuid },
           body: { message },
@@ -121,5 +61,5 @@ export function useIslandingSocket() {
     [],
   )
 
-  return { state, status, connected, acknowledge, silence, annotate }
+  return { state: message, status, connected, acknowledge, silence, annotate }
 }

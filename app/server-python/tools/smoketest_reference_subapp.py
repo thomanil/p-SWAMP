@@ -146,9 +146,14 @@ async def counter_flow(base_url: str, ws_url: str) -> None:
 async def rejects_bad_callers(base_url: str, ws_url: str) -> None:
     """Both halves of the api must refuse a caller with no client id.
 
-    They validate it the same way on purpose (`ClientId` and `read_client_id` in
-    shared.py), so a page's socket and its commands can never address different
-    state -- checking only one half would miss the two drifting apart.
+    They validate it the same way on purpose: `ClientId` (the query parameter)
+    and `read_client_id` (the socket's) both apply `CLIENT_ID_PATTERN`, so a
+    page's socket and its commands can never address different state. Checking
+    only one half would miss the two drifting apart.
+
+    All three are defined once, in `pswamp_web/wire.py`, and re-exported by
+    `shared.py` -- which is where an app package imports them from, and the name
+    to grep for.
     """
     print("\n  Caller validation")
 

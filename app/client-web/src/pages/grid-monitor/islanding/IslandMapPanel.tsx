@@ -35,18 +35,15 @@ export function IslandMapPanel({
   return (
     <Panel
       title="Islanding Detection"
-      subtitle={
-        variant === 'focused'
-          ? 'Frequency-based island detection across the Nordic 44 grid'
-          : undefined
-      }
+      subtitle="Frequency-based island detection across the Nordic 44 grid"
       status={status}
       ready={ready}
       // The topology is static and fetched over HTTP, independently of the
       // detector's socket — so the grid is drawn as soon as it loads, and the
       // socket only supplies the colouring.
       drawsWithoutData
-      focusHref={variant === 'dashboard' ? '/islanding' : undefined}
+      focusHref="/islanding"
+      variant={variant}
       minBodyClass="min-h-[300px]"
       badge={
         connected ? (
@@ -70,7 +67,7 @@ export function IslandMapPanel({
       }
       footer={
         state?.islanding
-          ? `${state.islanding.parameters.windowLength.toFixed(0)}s window · threshold ${state.islanding.parameters.meanThreshold}`
+          ? `${state.islanding.parameters.window_length.toFixed(0)}s window · threshold ${state.islanding.parameters.mean_threshold}`
           : undefined
       }
     >
@@ -92,8 +89,8 @@ export function IslandMapPanel({
                 </span>
                 <span className="ml-2 text-muted-foreground tabular-nums">
                   {island.stations.length} stations
-                  {island.meanFreq !== null &&
-                    ` · ${island.meanFreq.toFixed(3)} Hz`}
+                  {island.mean_freq !== null &&
+                    ` · ${island.mean_freq.toFixed(3)} Hz`}
                 </span>
                 {island.index > 0 && (
                   <div className="truncate font-mono text-xs text-muted-foreground">

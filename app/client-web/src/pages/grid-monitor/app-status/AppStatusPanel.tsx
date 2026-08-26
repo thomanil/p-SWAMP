@@ -11,10 +11,11 @@ import { useAppStatusSocket } from './useAppStatusSocket'
  * Which monitoring applications are running and what they report — the web
  * counterpart of p-SWAMP's Qt status dock.
  *
- * The applications listed here are process-wide, not per client, so every
- * browser sees the same rows. The Qt version's Stop and Open-console buttons are
- * deliberately absent: both publish to a command topic that only exists with a
- * broker behind it.
+ * The applications listed here are this browser's own: every client gets its own
+ * pipeline, so two browsers watching at once see two independent sets of rows at
+ * two points in the recording. The Qt version's Stop and Open-console buttons
+ * are deliberately absent: both publish to a command topic that only exists with
+ * a broker behind it.
  */
 export function AppStatusPanel({
   variant = 'dashboard',
@@ -28,15 +29,12 @@ export function AppStatusPanel({
   return (
     <Panel
       title="Application Status"
-      subtitle={
-        variant === 'focused'
-          ? 'Monitoring applications running against the replayed PMU stream'
-          : undefined
-      }
+      subtitle="Monitoring applications running against the replayed PMU stream"
       status={status}
       ready={ready}
-      className={variant === 'focused' ? 'w-full max-w-3xl' : undefined}
-      focusHref={variant === 'dashboard' ? '/app-status' : undefined}
+      focusedClassName="w-full max-w-3xl"
+      focusHref="/app-status"
+      variant={variant}
       minBodyClass="min-h-[152px]"
       contentClassName="px-0 pt-0"
       badge={
@@ -56,11 +54,11 @@ export function AppStatusPanel({
       footer={
         replay
           ? `PMU replay · ${replay.position.toFixed(1)}s / ${replay.duration.toFixed(0)}s · ` +
-            `${replay.nChannels} channels @ ${replay.dataRate} Hz`
+            `${replay.n_channels} channels @ ${replay.data_rate} Hz`
           : undefined
       }
     >
-      <AppStatusTable apps={state?.apps ?? []} serverTime={state?.serverTime ?? 0} />
+      <AppStatusTable apps={state?.apps ?? []} serverTime={state?.server_time ?? 0} />
     </Panel>
   )
 }
