@@ -29,22 +29,20 @@ export function ChannelPicker({
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    let cancelled = false
+    const controller = new AbortController()
     // State is only touched from the fetch callbacks, never synchronously in the
     // effect body — the same reason useServerSocket defers its first setState.
-    fetch(channelsUrl())
+    fetch(channelsUrl(), { signal: controller.signal })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((body: Wire['ChannelCatalogue']) => {
-        if (cancelled) return
+        if (controller.signal.aborted) return
         setAll(body.channels)
         setError(null)
       })
       .catch(() => {
-        if (!cancelled) setError('Could not load the channel list.')
+        if (!controller.signal.aborted) setError('Could not load the channel list.')
       })
-    return () => {
-      cancelled = true
-    }
+    return () => controller.abort()
   }, [])
 
   const measurements = useMemo(

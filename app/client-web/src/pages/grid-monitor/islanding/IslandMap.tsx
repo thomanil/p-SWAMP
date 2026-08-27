@@ -39,19 +39,17 @@ export function IslandMap({
   const [model, setModel] = useState<GridModel | null>(null)
 
   useEffect(() => {
-    let cancelled = false
+    const controller = new AbortController()
     const url = resolveApiUrl(GRID_MODEL_PATH)
-    fetch(url)
+    fetch(url, { signal: controller.signal })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((body) => {
-        if (!cancelled) setModel(body as GridModel)
+        if (!controller.signal.aborted) setModel(body as GridModel)
       })
       .catch(() => {
-        if (!cancelled) setModel(null)
+        if (!controller.signal.aborted) setModel(null)
       })
-    return () => {
-      cancelled = true
-    }
+    return () => controller.abort()
   }, [])
 
   // station -> island index, so a node or a branch can be coloured in O(1).
