@@ -19,8 +19,8 @@ export default defineConfig({
     alias: { '@': path.resolve(__dirname, './src') },
   },
   // Dev server only. In the shipped build the server serves these assets and the
-  // api from one origin; here Vite is a separate origin (:5173), so proxy /api to
-  // the backend on :8000 to keep the client's same-origin URLs working unchanged.
+  // api from one origin; here Vite is a separate origin (:5173), so proxy the
+  // backend surfaces to :8000 to keep same-origin URLs working unchanged.
   // The whole /api prefix, not one endpoint: every backend app package is mounted
   // under it (see APPS in app/server-python/src/server.py), so a new api needs no
   // change here. An http:// target with `ws: true` carries both plain requests and
@@ -28,6 +28,8 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': { target: 'http://localhost:8000', ws: true },
+      '/docs': { target: 'http://localhost:8000' },
+      '/openapi.json': { target: 'http://localhost:8000' },
     },
   },
 })

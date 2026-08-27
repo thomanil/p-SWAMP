@@ -1,6 +1,8 @@
+import { ExternalLinkIcon } from 'lucide-react'
 import { NavLink, Outlet } from 'react-router'
 
 import { CLIENT_ID } from '@/lib/clientId'
+import { BASE_PATH } from '@/lib/basePath'
 import { cn } from '@/lib/utils'
 
 /**
@@ -45,6 +47,15 @@ export function AppLayout() {
               {label}
             </NavLink>
           ))}
+          <a
+            href={`${BASE_PATH}/docs`}
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
+          >
+            API doc
+            <ExternalLinkIcon className="size-3.5" aria-hidden="true" />
+          </a>
         </nav>
       </header>
 
