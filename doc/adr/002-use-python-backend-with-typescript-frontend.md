@@ -10,10 +10,9 @@
 ## Context
 
 P-SWAMP started as a single-process desktop application: Python throughout, with a
-PySide6/pyqtgraph UI reading straight from the objects the analysis threads
-write. That analysis core is the project's real value, it is owned by the domain experts/researchers
-, and it is not going to be rewritten. The desktop application is not being
-retired either.
+ PySide6/pyqtgraph UI reading straight from the objects the analysis threads write. 
+ That analysis core is the project's real value, it is owned by the domain experts/researchers
+, and it is not going to be rewritten. The desktop application is not being retired either.
 
 We now want the same analysis reachable in a browser, without an install. That
 means splitting the application across a network boundary and choosing a
@@ -24,8 +23,7 @@ rather than algorithms.
 ## Decision
 
 We will build the web stack as a Python backend and a TypeScript frontend, split
-at an HTTP/WebSocket boundary: FastAPI on uvicorn in `app/server-python/`, React
-+ Vite in `app/client-web/`. The backend exists to put the *existing* core on a
+at an HTTP/WebSocket boundary: FastAPI on uvicorn in `app/server-python/`, Vite and Typescript in `app/client-web/` (React currently as the SPA framework but that may change) The backend exists to put the *existing* core on a
 socket — it imports `pswamp.*` and holds no domain logic of its own.
 
 ## Consequences

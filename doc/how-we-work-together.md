@@ -35,11 +35,11 @@ _TODO Also need to clear in statnett how to set up a shared teams type text chat
 
 These are the minimum things we need to do to not trip over each other:
 
-- `main` branch is protected, eg. you cannot push commits directly to it
+- **`main` branch is protected**, eg. you cannot push commits directly to it
 
-- Instead, use feature branches, and create pull requests to merge your code into main
+- Instead, **use feature branches, and create pull requests** to merge your code into main
 
-- We do not require other people to approve your branches before you merge.
+- **We do not require other people to approve your branches before you merge**.
 However, we have some automated tests and checks. If your branch breaks any of these,
 you will not be able to merge until those are fixed in your branch.
 
@@ -71,32 +71,27 @@ comment in `CODEOWNERS` explains the details, and tells you how to add yourself 
 
 ## Always keep the repo testable/runnable locally
 
-The main branch should always be runnable. Eg. anytime we push an update to the public Linux Foundation Energy mirror,
+**The main branch should always be runnable** Eg. anytime we push an update to the public Linux Foundation Energy mirror,
 the project should be in a state where it can be launched and played with by interested developers/stakeholders.
 
-When you introduce new functionality, we highly suggest you include some unit tests that automate regression testing, eg.
-if something gets broken down the line, an automated test should be able to catch it. If some test is very hard to automate,
-ask the rest of the projects participants for ideas! If the functionality is still truly hard to automoate testing,
+**When you introduce new functionality, we highly suggest you include some unit tests** that automate regression testing. Eg.
+if breaks later on, an automated test should be able to catch it. If some test is very hard to automate,
+ask the rest of the projects participants for ideas! If the functionality is still truly hard to automate testing,
 a fallback can be to at least write a .md checklist about how that service/component/part can be tested manually.
 
-If/when we introduce more subprocesses, services etc, make sure they are defined both in the kubernetes deployments as well as the
-local docker compose file for local testing, so it is replicated in some way locally.
-
-If you introduce some infrastructure that only "truly work" in the deployed cloud env, we should also make sure that it remains
-testable locally. Eg. synthetic data, stubs/mocks etc to make sure the project can still be verified end-to-end localy.
+**Any additional services need to be defined in docker compose for local testing** If/when we introduce more subprocesses, services etc, make sure they are defined both in the kubernetes deployments as well as the
+local docker compose file for local testing, so it is replicated in some way locally. If you introduce some infrastructure that only "truly work" in the deployed cloud env, we should also make sure that it remains
+testable locally for example via synthetic data, stubs/mocks etc.
 
 ## Do not put any secrets in this repo
 
-This repo will periodically be published to a public mirror (Linux Foundation Energy).
-Do not check in any sensitive api keys, tokens etc.
+**This repo will periodically be published to a public mirror**. Do not check in any sensitive api keys, tokens etc.
 
-If this happens by accident, they are hard to remove again fully, so secrets added to the git repo are considered compromised and
-have to immediately be updated/rotated in the system they access/belong to.
+If this happens by accident, such "leaks" are hard to remove again fully from git due to its distributed nature, so secrets added to the git repo are considered compromised and have to immediately be updated/rotated in the system they access/belong to.
 
 ## "Holding off" sharing some algorithms with published code?
 
-Remember: the main branch of the repo will periodically be published in the public
-[Linux Foundation Energy](https://lfenergy.org/projects/p-swamp/] mirror/project] project) project.
+Remember: the main branch of the repo will periodically be published in the public [Linux Foundation Energy](https://lfenergy.org/projects/p-swamp/project) project.
 
 If you have any algorithms or other sensitive work that should not land there right away,
 raise that concern and lets chat about it together *before* you do a pull request into main - so we can figure out
@@ -104,7 +99,8 @@ together if those bits should just live in branch or something else, depending o
 
 ## Only complicate the rig when you have to :)
 
-The project will do some computation intensive operations, and we may well have to split it into multiple processes/services at some point.
+The project will do some computation intensive operations, and we may well have to split it into multiple processes/services to make it work.
+
 But we try to start as simple as we can, and do more elaborate rigging only when/where actually needed, supported by performance numbers and experiments.
 
 When you see that we need to add new infra/services/, keep the rest of the project/team in the loop.

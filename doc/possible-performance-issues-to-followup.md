@@ -1,5 +1,7 @@
 # Possible performance issues to follow up
 
+**ONLY RELEVANT IF WE KEEP ITERATING ON THE INITIAL PSWAMP MONITOR FRONTEND (AS OF AUG 2026)**
+
 Notes from a review of the streaming path, in the context of P-SWAMP's actual
 target: streaming energy grid data from backend streams to the browser, where
 **throughput and latency matter**. 
