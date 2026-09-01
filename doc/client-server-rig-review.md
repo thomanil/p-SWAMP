@@ -312,3 +312,72 @@ minikube deployment, or any browser-driven UI test. Several legacy tests require
 Kafka/NQKafka, GUI components, or simulation infrastructure, and the repository
 contains no browser test layer. Claims of that kind in the earlier draft were not
 independently re-verified here and should be treated as unconfirmed.
+
+## Addendum: independent re-verification and follow-up fixes (2026-09-01)
+
+A later independent pass re-checked every finding directly against the code and
+**agrees with all four findings and every readiness gap**. It also applied fixes
+for three of them. Corrections, clarifications and status below.
+
+**Commit mapping.** This document reviews `0fd300fa…`; the same logical commit is
+now `58e7e22cfe4d381e96b5e12092dd170692c4179d` in history (a reword/rebase). The
+two differ in only two files — `AGENTS.md` and `AppLayout.tsx` — and none of the
+findings' target files changed between them, so every finding transfers to
+`58e7e22` unchanged (finding 3's cited `generate-new-subapp.sh` line numbers still
+match).
+
+**Finding 1 — confirmed; one clarification.** The bypass requires ≥`MAX_PIPELINES`
+*distinct* client ids arriving within one construction window. The normal
+single-browser case is safe by design: the grid monitor's five sockets share one
+client id and therefore one lock, so they build one pipeline. "Trivial to induce"
+holds for an adversarial or mass-concurrent burst, not for ordinary single-user
+load. **Fixed** (below).
+
+**Finding 2 — confirmed; wording and severity.** "A send to a socketless client is
+a no-op" is right, but the ticker still *builds* `state_message(state)` (a
+`visible_window()` plus a pydantic model) each tick for every zombie, so there is
+genuine per-tick CPU — only the delivery is a no-op. Severity is a judgement call:
+High is defensible as unbounded ongoing work shipping in every image, but the
+retirement status, the unauthenticated-by-design surface, and the modest
+per-zombie cost put it as low as Medium. **Left as-is** pending the streamer's
+planned retirement; the clean fix is to retire it, or at minimum pause on
+disconnect and bound `states`.
+
+**Finding 3 — confirmed; "injection" overstates it.** The label is typed by the
+same person running the generator, so this is a self-inflicted footgun in the
+onboarding tool rather than a security-boundary crossing — but a real
+tooling-robustness defect, Medium. **Fixed** (below).
+
+**Finding 4 — confirmed as written**, including that the `not lock.locked()` guard
+is deliberate. **Fixed** (below).
+
+### Follow-up fixes applied
+
+- **Finding 1** — `HubRegistry` now counts pipelines *under construction* against
+  the cap. `acquire` reserves a slot (`_pending`) before the off-loop `Hub.start`,
+  and `_make_room` tests `live + _pending >= max_pipelines`, so a concurrent burst
+  of distinct clients is admitted only up to the cap and the rest get the `1013`
+  refusal. Verified with a stubbed `Hub`: a six-way concurrent burst against a cap
+  of two yields `acquired=2 refused=4`, `live=2`.
+- **Finding 4** — the idle path no longer leaks a lock. Reclamation is keyed on a
+  new `_acquiring` counter (incremented *before* the lock is taken, so a queued
+  waiter counts) instead of `lock.locked()`, so the idle evictor can drop the lock
+  it is holding while still refusing to drop one a concurrent connect is racing on.
+  Verified: after five clients idle-evict, `_locks` is empty and `live` is 0.
+- **Finding 3** — `generate-new-subapp.sh` now escapes the label at both code sites
+  (a single-quoted TS literal and a Python string literal) and validates it against
+  the characters that would break the prose sites it also lands in (docstrings, JSX
+  text, JS comments). Generation is now **atomic**: the whole change set — rendered
+  files and registry patches — is computed in memory and committed only once
+  everything validates, with rollback on a write error, so bad input can no longer
+  leave a half-generated subapp. Verified end-to-end: generating a subapp with the
+  label `Operator's View` now passes `error_check.sh` (it previously emitted
+  unterminated TypeScript).
+
+The readiness/coverage gaps largely still stand, but the specific "no unit tests
+for `HubRegistry`" gap is now **closed**: `app/server-python/tests/test_hub_registry.py`
+is a committed suite that pins both registry fixes (and fails on the pre-fix code),
+run with `./scripts/run-python-server-tests.sh`. Broader web-backend coverage is
+still thin, and the desktop suite (repo-root `tests/`) remains infra-bound and
+ungated — it has its own deliberately-run script, `./scripts/run-core-python-tests.sh`,
+and is intentionally kept out of `error_check.sh` and CI.

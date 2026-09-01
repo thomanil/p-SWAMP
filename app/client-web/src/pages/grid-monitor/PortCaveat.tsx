@@ -27,7 +27,7 @@ export function PortCaveat() {
       </AlertTitle>
       <AlertDescription className="text-amber-900/90 dark:text-amber-100/90">
           An exploratory early port of some of the prexisting QT GUI to TS+React, connecting existing pSWAMP models and algorithms.
-          Only the Qt GUI is ported here: the python server process reuses Hallvards existing Python models and algorithms, which still live in <code>/src/pswamp/</code> (for now).
+          Only the Qt GUI is ported here: the python server process reuses Hallvars existing Python models and algorithms, which still live in <code>/src/pswamp/</code> (for now).
           &nbsp;<b>Note that this web frontend draft currently is largely LLM-generated, probably incomplete, may very well have serious flaws, and it needs to be reviewed before it is iterated on further.</b>
       </AlertDescription>
     </Alert>

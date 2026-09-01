@@ -826,8 +826,37 @@ change, or a change to where the path points, is silently ignored until
 Quality checks (cover both halves of the codebase):
 
 ```
-./scripts/error_check.sh             # READ-ONLY: uv lock --check + py_compile + ruff check F (python), tsc -b + eslint (web), api contract vs code. Runs all checks even if one fails, exits non-zero on any failure.
+./scripts/error_check.sh             # READ-ONLY static gate, NO test suites: uv lock --check + py_compile + ruff check F (python), tsc -b + eslint (web), api contract vs code. Runs all checks even if one fails, exits non-zero on any failure.
+./scripts/run-python-server-tests.sh # the server unit tests (app/server-python/tests/), fast + hermetic; args pass through to pytest (-k, -v, a node id).
+./scripts/run-core-python-tests.sh   # the desktop "core" tests (repo-root tests/) in the [full] env; needs Kafka/NQKafka/MQTT/Qt infra — run deliberately, not in CI.
 ```
+
+Test suites are their own step, **not** part of `error_check.sh` — that gate is
+strictly static (lockfile / AST / lint / api contract) and starts nothing. Two
+scripts run the two Python projects' tests, kept separate because they live in
+separate envs and are hermetic to very different degrees:
+
+- **`./scripts/run-python-server-tests.sh`** — the server tests under
+  `app/server-python/tests/`. Fast and hermetic: `HubRegistry` is driven with a
+  **stubbed Hub**, so nothing binds a port. The first suite,
+  `test_hub_registry.py`, pins the registry's resource bounds — the per-client
+  pipeline cap holds under a concurrent-connect burst, and the per-client lock is
+  reclaimed on eviction rather than leaked (the two fixes in
+  `doc/client-server-rig-review.md`). New files under that `tests/` are picked up
+  automatically (`test_*.py`; `testpaths=["tests"]`), and arguments pass straight
+  through to pytest. `pytest` + `pytest-asyncio` are pinned in the server's locked
+  dev group and kept out of the image by the Dockerfile's `--no-dev` (`tests/` is
+  also excluded from the build context by `.dockerignore` and never copied — only
+  `src/` is). Add a suite here for any new backend api with non-trivial lifecycle
+  logic.
+- **`./scripts/run-core-python-tests.sh`** — the desktop package's tests
+  (repo-root `tests/`), in the root project's `[full]` env. A **starting point,
+  not a gate**: most need external infrastructure (Kafka / NQKafka / MQTT brokers,
+  a Qt display) with no skip guards, so a bare run fails without it — which is why
+  they are a separate, deliberately-run script and why neither `error_check.sh`
+  nor CI touches them (CI only syntax-checks the root `src/`). The natural next
+  step is to mark the infra-bound tests so a bare run executes the hermetic
+  subset.
 
 The **runtime** counterpart to those static checks — the manual click-through,
 automated:
@@ -1063,11 +1092,15 @@ mind when editing that script:
 ## CI
 
 **One pipeline: `.github/workflows/ci-pipeline.yml`**, `static-errorcheck` →
-`smoketest` → `build`, publishing to **GHCR** (`ghcr.io/<owner>/<repo>`). Both
-gates run on every branch and pull request; **only a push to `main` (or a `v*`
-tag) publishes**, and a failing check or a smoke test that cannot get a response
-out of the built image produces no image. No secret to configure — the automatic
-`GITHUB_TOKEN` covers GHCR.
+`unit-tests` → `smoketest` → `build`, publishing to **GHCR**
+(`ghcr.io/<owner>/<repo>`). The three gates run on every branch and pull request;
+**only a push to `main` (or a `v*` tag) publishes**, and a failing check, a
+failing unit test, or a smoke test that cannot get a response out of the built
+image produces no image. No secret to configure — the automatic `GITHUB_TOKEN`
+covers GHCR. The `unit-tests` job runs the Python suites through their runner
+scripts (`run-python-server-tests.sh`; the desktop `run-core-python-tests.sh`
+step is commented out with a TODO until its missing-module failure is resolved),
+so `error_check.sh` stays strictly static.
 
 **A pull request no longer builds the publishable image at all.** The job used to
 run there with `push: false`, to prove the Dockerfile still built — but the
@@ -1077,9 +1110,11 @@ the push disabled.
 
 **Blocking a merge on those gates is a repo setting, not something the workflow
 can express.** Settings → Branches → branch protection for `main` → "Require
-status checks to pass", selecting **`static-errorcheck`** and **`smoketest`**.
-Those rules match on the *job* name, not the workflow's, so renaming a job
-silently un-requires it there — rename the job and the protection rule together.
+status checks to pass", selecting **`static-errorcheck`**, **`unit-tests`** and
+**`smoketest`**. Those rules match on the *job* name, not the workflow's, so
+renaming a job silently un-requires it there — rename the job and the protection
+rule together. `unit-tests` is the newest gate; add it to the required set, or a
+PR could merge with a failing test.
 (The job was called `check` before the workflow was renamed to `ci-pipeline.yml`;
 if protection was configured against that name it needs re-selecting.)
 

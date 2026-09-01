@@ -70,8 +70,8 @@ comment in `CODEOWNERS` explains the details, and tells you how to add yourself 
 
 ## Always keep the repo testable/runnable locally
 
-**The main branch should always be runnable** Eg. anytime we push an update to the public Linux Foundation Energy mirror,
-the project should be in a state where it can be launched and played with by interested developers/stakeholders.
+**The main branch should always be runnable** Eg. anytime we merge something to main,
+the project overall should still be in a state where it can be launched and tested fully by anyone.
 
 **When you introduce new functionality, we highly suggest you include some unit tests** that automate regression testing. Eg.
 if breaks later on, an automated test should be able to catch it. If some test is very hard to automate,
@@ -94,7 +94,6 @@ Due to current landscape of LLM tooling, risks like supply chain attacks etc is 
 Therefore, our dependencies (python modules and npm packages that we depend on) 
 need to be kept up to date frequently/continously.
 
-
 ## "Holding off" sharing some algorithms with published code?
 
 Remember: the main branch of the repo will periodically be published in the public [Linux Foundation Energy](https://lfenergy.org/projects/p-swamp/project) project.
@@ -102,14 +101,6 @@ Remember: the main branch of the repo will periodically be published in the publ
 If you have any algorithms or other sensitive work that should not land there right away,
 raise that concern and lets chat about it together *before* you do a pull request into main - so we can figure out
 together if those bits should just live in branch or something else, depending on timeline and sensitivity.
-
-## Only complicate the rig when you have to :)
-
-The project will do some computation intensive operations, and we may well have to split it into multiple processes/services to make it work.
-
-But we try to start as simple as we can, and do more elaborate rigging only when/where actually needed, supported by performance numbers and experiments.
-
-When you see that we need to add new infra/services/, keep the rest of the project/team in the loop.
 
 ## Write down the decisions that shape the system
 
@@ -123,3 +114,12 @@ choices inside your own team's code do not need one.
 
 An ADR is history, not documentation: we do not rewrite old ones, we write a new
 one that supersedes them.
+
+## Only complicate the rig when you have to :)
+
+The project will do some computation intensive operations, and we may well have to split it into multiple processes/services to make it work.
+
+But we try to start as simple as we can, and do more elaborate rigging only when/where actually needed, supported by performance numbers and experiments.
+
+When you see that we need to add new infra/services/, keep the rest of the project/team in the loop 
+(one possible way of doing this could be a PR with an ADR explaining the change - see above)

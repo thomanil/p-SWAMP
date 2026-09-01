@@ -290,9 +290,12 @@ class HubRegistry:
     * **A pipeline outlives its sockets, briefly.** Closing the last one starts
       an idle timer rather than tearing down, so a reload rejoins the same
       stream. Reconnecting cancels the timer.
-    * **Never more than the cap.** At the cap a new client reclaims the
-      least-recently-used pipeline that nobody is watching; if every one is in
-      use, the connection is refused rather than the machine oversubscribed.
+    * **Never more than the cap, even mid-build.** At the cap a new client
+      reclaims the least-recently-used pipeline that nobody is watching; if every
+      one is in use, the connection is refused rather than the machine
+      oversubscribed. Pipelines still under construction count against the cap
+      too (``_pending``), so a burst of distinct clients connecting at once cannot
+      each see room and overshoot it together.
 
     Everything here runs on the event loop, so ``_entries`` needs no lock of its
     own — the per-client locks exist to bracket the *awaits* inside ``acquire``,
@@ -307,6 +310,18 @@ class HubRegistry:
     ) -> None:
         self._entries: dict[str, _Entry] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # In-flight acquire() calls per client, incremented *before* the client's
+        # lock is taken so a caller merely queued on the lock counts too. A
+        # client's lock is reclaimable only while this is zero; see
+        # _drop_lock_if_unused, which is what keeps the idle path from leaking one
+        # lock per distinct client id ever seen.
+        self._acquiring: dict[str, int] = {}
+        # Pipelines past the capacity check in _make_room but not yet registered
+        # in _entries. Counted against the cap so a burst of distinct clients
+        # cannot all pass the check during each other's ~40-50 ms construction
+        # window and collectively blow past MAX_PIPELINES (and the pod memory
+        # limit sized from it).
+        self._pending = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self.max_pipelines = max_pipelines
         self.idle_seconds = idle_seconds
@@ -343,40 +358,58 @@ class HubRegistry:
             self.release(client_id)
 
     async def acquire(self, client_id: str) -> Hub:
-        lock = self._locks.setdefault(client_id, asyncio.Lock())
-        async with lock:
-            entry = self._entries.get(client_id)
-            if entry is not None:
-                # Cancel the pending eviction *inside* the lock. If the evictor
-                # already started, it holds this lock and we waited for it — so
-                # we find no entry below and build a fresh pipeline, rather than
-                # handing back one that is being torn down.
-                if entry.evict_task is not None:
-                    entry.evict_task.cancel()
-                    entry.evict_task = None
-                entry.sockets += 1
-                entry.last_used = time.monotonic()
-                self._report_dead_threads(client_id, entry.hub)
-                return entry.hub
+        # Count this acquire before taking the lock, so a caller still queued on
+        # the lock keeps that lock from being reclaimed out from under it. The
+        # matching decrement is in the finally; _drop_lock_if_unused does the
+        # reclaiming.
+        self._acquiring[client_id] = self._acquiring.get(client_id, 0) + 1
+        try:
+            lock = self._locks.setdefault(client_id, asyncio.Lock())
+            async with lock:
+                entry = self._entries.get(client_id)
+                if entry is not None:
+                    # Cancel the pending eviction *inside* the lock. If the evictor
+                    # already started, it holds this lock and we waited for it — so
+                    # we find no entry below and build a fresh pipeline, rather than
+                    # handing back one that is being torn down.
+                    if entry.evict_task is not None:
+                        entry.evict_task.cancel()
+                        entry.evict_task = None
+                    entry.sockets += 1
+                    entry.last_used = time.monotonic()
+                    self._report_dead_threads(client_id, entry.hub)
+                    return entry.hub
 
-            await self._make_room()
+                await self._make_room()
 
-            hub = Hub(client_id=client_id)
-            # Off the loop: start() constructs three applications and prefills
-            # their windows (~40-50 ms of blocking work). On the loop that would
-            # stall every other client's push task.
-            await asyncio.to_thread(hub.start, self._loop)
+                # Reserve the slot *before* the await below. _make_room left room
+                # for exactly one more counting live + pending; claim it now, while
+                # still on the loop, so a concurrent acquire for a different client
+                # sees the reservation and does not also build. Released in the
+                # finally whether construction succeeds or raises.
+                self._pending += 1
+                try:
+                    hub = Hub(client_id=client_id)
+                    # Off the loop: start() constructs three applications and
+                    # prefills their windows (~40-50 ms of blocking work). On the
+                    # loop that would stall every other client's push task.
+                    await asyncio.to_thread(hub.start, self._loop)
 
-            entry = _Entry(hub)
-            entry.sockets = 1
-            self._entries[client_id] = entry
-            logger.info(
-                "pipeline started for client %s (%s/%s live)",
-                client_id,
-                self.live,
-                self.max_pipelines,
-            )
-            return hub
+                    entry = _Entry(hub)
+                    entry.sockets = 1
+                    self._entries[client_id] = entry
+                finally:
+                    self._pending -= 1
+                logger.info(
+                    "pipeline started for client %s (%s/%s live)",
+                    client_id,
+                    self.live,
+                    self.max_pipelines,
+                )
+                return hub
+        finally:
+            self._acquiring[client_id] -= 1
+            self._drop_lock_if_unused(client_id)
 
     def release(self, client_id: str) -> None:
         entry = self._entries.get(client_id)
@@ -414,12 +447,17 @@ class HubRegistry:
     async def _make_room(self) -> None:
         """Free a slot if we are at the cap. Caller holds the new client's lock.
 
+        Counts pipelines still under construction (``_pending``) as well as live
+        ones, so simultaneous first-connects from distinct clients cannot each see
+        room and collectively overshoot the cap — leaving room for the one slot
+        the caller reserves right after this returns.
+
         Note this evicts *another* client's pipeline while holding ours. That is
         the only place two clients' bookkeeping is touched at once, and it is
         deadlock-free because it never waits on the victim's lock — ``Hub.stop``
         is idempotent, so racing with the victim's own idle evictor is harmless.
         """
-        while self.live >= self.max_pipelines:
+        while self.live + self._pending >= self.max_pipelines:
             victim = min(
                 (cid for cid, e in self._entries.items() if e.sockets == 0),
                 key=lambda cid: self._entries[cid].last_used,
@@ -446,13 +484,14 @@ class HubRegistry:
 
     async def _evict(self, client_id: str, reason: str) -> None:
         entry = self._entries.pop(client_id, None)
-        # Drop the lock only when nobody holds it. A held lock implies a waiter
-        # may be queued behind it, and removing it would let that waiter and the
-        # next caller each setdefault a *different* lock, take them both, and
-        # build two pipelines for one client — orphaning four threads.
-        lock = self._locks.get(client_id)
-        if lock is not None and not lock.locked():
-            self._locks.pop(client_id, None)
+        # Reclaim the client's lock now its pipeline is gone. Keyed on _acquiring
+        # rather than lock.locked(): the idle evictor calls this while *holding*
+        # the lock, so lock.locked() is True on the very path that most needs the
+        # lock dropped — which is how the lock used to leak one entry per distinct
+        # client id. _acquiring stays > 0 exactly while a concurrent connect still
+        # needs this same lock object (a queued waiter counts), so the lock is
+        # dropped only when nothing is racing to rebuild it.
+        self._drop_lock_if_unused(client_id)
         if entry is None:
             return
         if entry.evict_task is not None:
@@ -468,6 +507,23 @@ class HubRegistry:
             self.live,
             self.max_pipelines,
         )
+
+    def _drop_lock_if_unused(self, client_id: str) -> None:
+        """Reclaim a client's per-client lock once nothing needs it.
+
+        "Nothing needs it" is: no ``acquire`` for this client is in flight or
+        queued (``_acquiring`` is zero) *and* it has no live pipeline. While an
+        acquire is outstanding the lock object must not change — two acquires that
+        serialised on two *different* locks would each find no entry and build a
+        pipeline apiece, orphaning four threads. ``_acquiring`` is incremented
+        before the lock is taken, so a caller merely *waiting* on the lock still
+        counts; that is what makes it safe to drop the lock even from the idle
+        evictor, which calls this while holding the lock itself.
+        """
+        if self._acquiring.get(client_id, 0) <= 0:
+            self._acquiring.pop(client_id, None)
+            if client_id not in self._entries:
+                self._locks.pop(client_id, None)
 
     def _report_dead_threads(self, client_id: str, hub: Hub) -> None:
         dead = hub.dead_threads()

@@ -44,11 +44,17 @@ dependencies = [
 p-swamp = { path = "../../", editable = true }
 
 # Tooling that must never ship in the image — the Dockerfile installs with
-# --no-dev. Declared here so the linter version is locked and hash-verified like
+# --no-dev. Declared here so the versions are locked and hash-verified like
 # everything else, and defined in exactly one place rather than duplicated across
-# the two scripts that invoke it.
+# the scripts that invoke them. ruff is pinned exactly so everyone runs the
+# identical linter; pytest drives the server unit tests under tests/, which
+# error_check.sh runs alongside the static checks.
 [dependency-groups]
-dev = ["ruff==0.16.4"]
+dev = [
+    "ruff==0.16.4",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
 
 # Not an installable package: src/ is a plain source folder that the process runs
 # from, not a packaging layout. src/server.py is the one entrypoint and imports
@@ -66,3 +72,14 @@ dev = ["ruff==0.16.4"]
 # opinionated defaults).
 [tool.uv]
 package = false
+
+# Unit tests live in tests/ and import the server packages under src/ by name
+# (`from pswamp_web...`), so put src/ on sys.path the same way the running server
+# does — its working directory is src/. asyncio_mode = "auto" lets the async
+# registry tests run without a per-test marker. This section does not make ruff
+# treat the file as config; only a [tool.ruff] section would, and there
+# deliberately isn't one (see the note above).
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"

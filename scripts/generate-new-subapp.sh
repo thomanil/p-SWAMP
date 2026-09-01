@@ -30,9 +30,11 @@ fi
 # python3 does the work: derive the name's spellings, render the templates, and
 # insert into the registries by anchor. (Already required by error_check.sh.)
 SLUG="$1" LABEL="$2" python3 - <<'PY'
+import json
 import keyword
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -71,6 +73,43 @@ if (
 ):
     die(f"{slug!r} is not usable: give lowercase words joined by hyphens, max 32 chars.")
 
+# The label is free text a person types, and it lands in six places: a single-quoted
+# TS string (the nav entry), a double-quoted Python string (the AppEntry
+# description), two Python docstrings, a JSX text node and two JS comments. The two
+# code-string sites are escaped when written (py_str / ts_squote below). The four
+# prose sites a blind token substitution cannot escape, so reject the handful of
+# characters that would break *them* — angle brackets and braces (JSX), a backtick
+# or backslash, and the comment (`*/`) / docstring (`\"\"\"`) terminators — rather
+# than emit a subapp that will not compile. Everyday punctuation stays allowed:
+# "Operator's View" is a perfectly good label, and used to produce broken TypeScript.
+if (
+    not label.strip()
+    or len(label) > 48
+    or set(label) & set("<>{}\\`")
+    or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in label)
+    or "*/" in label
+    or '"""' in label
+):
+    die(
+        f"{label!r} is not usable as a nav label: give a short human phrase "
+        "(max 48 chars) without angle brackets, braces, backslashes, backticks "
+        "or control characters."
+    )
+
+
+def py_str(value):
+    """`value` as a Python string literal. JSON strings are a subset of Python's,
+    so json.dumps escapes quotes and backslashes correctly for this use."""
+    return json.dumps(value)
+
+
+def ts_squote(value):
+    """`value` as a single-quoted TS/JS string literal, matching the style already
+    in servers.ts and AppLayout.tsx. Validation rules a backslash out, but escape
+    it too so this stays correct if that ever loosens."""
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
 WEB = Path("app/client-web/src")
 PY_SRC = Path("app/server-python/src")
 page_dir = WEB / "pages" / slug
@@ -107,9 +146,9 @@ sources = [
     (Path("scripts/templates/client-web"), page_dir),
 ]
 
-# Validate every template before writing anything. Bailing out mid-render would
-# leave a half-generated subapp with the registries unpatched — worse than the
-# name collision above, which is caught before the first mkdir.
+# Validate every template's name before rendering. This, the slug/label checks
+# above and the anchor checks below all run before the commit phase touches the
+# working tree, so any of them can die() with nothing half-written.
 for templates, _ in sources:
     if not templates.is_dir():
         die(f"Missing {templates}/ — the templates live beside this script.")
@@ -117,46 +156,54 @@ for templates, _ in sources:
         if not template.name.endswith(".template"):
             die(f"{template} must be named <filename>.template — see the note above.")
 
+# Everything below computes the whole change set — every rendered file and every
+# registry patch — in memory first, and only then touches the working tree. So a
+# missing anchor (or any other failure) aborts with nothing written, instead of
+# the old behaviour: folders and half the registries on disk, no rollback, and a
+# re-run blocked by "already exists".
+
+# --- render scripts/templates/ into the two new folders (in memory) ---------
+
+rendered = {}  # dest Path -> file contents
 for templates, dest_dir in sources:
-    dest_dir.mkdir(parents=True)
     for template in sorted(templates.iterdir()):
         dest = dest_dir / render(template.name).removesuffix(".template")
-        dest.write_text(render(template.read_text()))
-        print(f"  new      {dest}")
+        rendered[dest] = render(template.read_text())
 
 
 # --- the registries ---------------------------------------------------------
 #
 # Anchored on a pattern, not a line number, and loud if the anchor is gone — a
 # silently skipped edit would leave a subapp reachable from nowhere. Each entry
-# goes last in its list.
+# goes last in its list. Patches accumulate in memory (chained, so a file edited
+# twice sees the first edit); they are written in the commit phase below.
+
+patches = {}  # path -> patched contents
 
 
-patched = []
-
-
-def edit(path, pattern, addition, before=False):
-    text = path.read_text()
+def plan_edit(path, pattern, addition, before=False):
+    text = patches.get(path)
+    if text is None:
+        text = path.read_text()
     found = list(re.finditer(pattern, text, re.M))
     if not found:
         die(f"Could not find {pattern!r} in {path} — add the entry by hand.")
     at = found[0].start() if before else found[-1].end()
-    path.write_text(text[:at] + addition + text[at:])
-    if path not in patched:
-        patched.append(path)
+    patches[path] = text[:at] + addition + text[at:]
 
 
 server_py = PY_SRC / "server.py"
-edit(server_py, r"^import [a-z_][a-z0-9_]*\n", f"import {pkg}\n")
+plan_edit(server_py, r"^import [a-z_][a-z0-9_]*\n", f"import {pkg}\n")
 # The description is /docs' group heading for this app; the label is a best guess,
-# worth replacing with a real sentence.
-edit(
+# worth replacing with a real sentence. Written as a Python string literal so a
+# quote in the label cannot break server.py.
+plan_edit(
     server_py,
     r"^\]\n",
     f'    AppEntry(\n'
     f'        "{slug}",\n'
     f'        {pkg},\n'
-    f'        "{label}.",\n'
+    f'        {py_str(label + ".")},\n'
     f'    ),\n',
     before=True,
 )
@@ -164,40 +211,65 @@ edit(
 # Two separate blocks in that file, each anchored on its own pattern — the
 # entry goes after the last line of its own block, not at the end of the other's.
 servers_ts = WEB / "lib" / "servers.ts"
-edit(
+plan_edit(
     servers_ts,
     r"^export const \w+_WS_PATH = .*\n",
     f"export const {ws_path_const} = '/api/{slug}/ws'\n",
 )
-edit(
+plan_edit(
     servers_ts,
     r"^export const \w+_API_PATH = .*\n",
     f"export const {api_path_const} = '/api/{slug}'\n",
 )
 
 app_tsx = WEB / "App.tsx"
-edit(
+plan_edit(
     app_tsx,
     r"^import .*@/pages/.*\n",
     f"import {{ {name}Page }} from '@/pages/{slug}/{name}Page'\n",
 )
 # Above the catch-all route: below it, the new route would never match.
-edit(
+plan_edit(
     app_tsx,
     r'^ *<Route path="\*".*\n',
     f'          <Route path="{slug}" element={{<{name}Page />}} />\n',
     before=True,
 )
 
-edit(
+# Written as a single-quoted TS string literal: an apostrophe in the label (the
+# classic "Operator's View") used to terminate this string and emit broken TS.
+plan_edit(
     WEB / "components" / "AppLayout.tsx",
     r"^\]\n",
-    f"  {{ to: '/{slug}', label: '{label}', end: false }},\n",
+    f"  {{ to: '/{slug}', label: {ts_squote(label)}, end: false }},\n",
     before=True,
 )
 
-for path in patched:
-    print(f"  patched  {path}")
+
+# --- commit: create dirs, write files, write patches, or roll back ----------
+#
+# The first write to the working tree happens here. If any write fails part way,
+# restore every patched file and remove the new folders, so a failure never
+# leaves a partial subapp for the contributor to untangle by hand.
+
+created_dirs = []
+originals = {path: path.read_text() for path in patches}
+try:
+    for dest_dir in (api_dir, page_dir):
+        dest_dir.mkdir(parents=True)
+        created_dirs.append(dest_dir)
+    for dest, content in rendered.items():
+        dest.write_text(content)
+        print(f"  new      {dest}")
+    for path, text in patches.items():
+        path.write_text(text)
+        print(f"  patched  {path}")
+except Exception:
+    for path, text in originals.items():
+        path.write_text(text)
+    for dest_dir in reversed(created_dirs):
+        shutil.rmtree(dest_dir, ignore_errors=True)
+    raise
 
 print(f"\n\033[1m{label}: page /{slug}, socket /api/{slug}/ws, "
       f"commands POST /api/{slug}/count/…\033[0m")

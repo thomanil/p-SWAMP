@@ -1,39 +1,37 @@
 # Build the deployable container image and publish it to GitHub Container
 # Registry (GHCR).
 #
-# Three jobs, in order:
+# Four jobs, in order:
 #
 #   static-errorcheck — runs scripts/error_check.sh, the same gate
 #               .githooks/pre-push runs locally. CI calls the script rather than
 #               reimplementing the checks in YAML, so the two can never drift
 #               apart.
+#   unit-tests — runs the Python test suites via the runner scripts
 #   smoketest — builds the image, runs it, and drives the Reference example end to
-#               end (scripts/smoketest.sh). static-errorcheck is static and never
-#               starts the app; this is the half that only starts it.
+#               end (scripts/smoketest.sh). The static and unit-test jobs never
+#               start the app; this is the half that only starts it.
 #   build     — builds Dockerfile (web client + server, one image) for amd64 and
-#               pushes it to ghcr.io/<owner>/<repo>. Gated on both above, so a
-#               failing check or a server that cannot serve produces no image.
+#               pushes it to ghcr.io/<owner>/<repo>. Gated on all above, so a
+#               failing check, a failing test, or a server that cannot serve
+#               produces no image.
 #
 # What runs where:
 #
-#   pull request / branch    static-errorcheck + smoketest. NOTHING is published.
-#                            The old "build but don't push" job used to run here to
-#                            prove the Dockerfile still built; the smoketest job
-#                            now builds the same image and gets a response out of
-#                            it, which proves strictly more, so the publish job is
-#                            skipped outright rather than run with push: false.
-#   push to main / v* tag    both gates, then publish.
+#   pull request / branch    static-errorcheck + unit-tests + smoketest. NOTHING
+#                            is published.
 #
 # A branch with no PR open runs nothing: the push trigger is limited to main, so
 # that work is gated through its pull request rather than twice over.
 #
-# Blocking a merge on the two gates is a REPO SETTING, not something this file can
+# Blocking a merge on these gates is a REPO SETTING, not something this file can
 # express: Settings → Branches → branch protection for main → "Require status
-# checks to pass", selecting `static-errorcheck` and `smoketest`. Those rules
-# match on the JOB name, so renaming a job here silently un-requires it there —
-# rename both together. Note the pull_request trigger below deliberately carries
-# no paths filter, for a reason that follows directly from those checks being
-# required — see the comment on it.
+# checks to pass", selecting `static-errorcheck`, `unit-tests` and `smoketest`.
+# (`unit-tests` is the new gate — add it to the required set, or a PR could merge
+# with a failing test.) Those rules match on the JOB name, so renaming a job here
+# silently un-requires it there — rename both together. Note the pull_request
+# trigger below deliberately carries no paths filter, for a reason that follows
+# directly from those checks being required — see the comment on it.
 #
 # Pulling what this publishes:
 #   docker pull ghcr.io/<owner>/p-swamp:latest
@@ -67,6 +65,11 @@ on:
       - ".dockerignore"
       - "scripts/error_check.sh" # a change to the gate re-runs the gate
       - "scripts/smoketest.sh" # …and so does a change to the other gate
+      # The unit-test runner scripts are gates too, so a change to one re-runs CI.
+      # (run-core-python-tests.sh is listed for when its step is re-enabled; it is
+      # harmless while the step is commented out.)
+      - "scripts/run-python-server-tests.sh"
+      - "scripts/run-core-python-tests.sh"
       # The published api contract. error_check.sh verifies that these two
       # generated artifacts still match the code, so a change to either — or to
       # the script that produces them — has to re-run the gate. Note doc/ is
@@ -159,6 +162,44 @@ jobs:
       - name: Static checks (tsc, eslint, uv lock --check, py_compile, ruff, api contract)
         run: ./scripts/error_check.sh
 
+  # --- Unit tests: the Python test suites, via their runner scripts -----------
+  #
+  # Runs the runner scripts rather than a bare `pytest` so CI and a developer
+  # invoke the identical command — the same principle the static job follows with
+  # error_check.sh. Gates the smoketest/publish, so a failing test produces no
+  # image.
+  unit-tests:
+    needs: static-errorcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # uv drives both suites' envs (the server project, and — once re-enabled —
+      # the root desktop project). Cache keyed on the server lockfile, warm from
+      # the static job that shares it.
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: app/server-python/uv.lock
+      - run: uv python install 3.11
+
+      # The fast, hermetic server suite (app/server-python/tests/): HubRegistry is
+      # driven with a stubbed Hub, so nothing binds a port. A cold run syncs the
+      # server env first (warm from the shared cache above).
+      - name: Server unit tests
+        run: ./scripts/run-python-server-tests.sh
+
+      # TODO Figure out why the existing tests are failing: the desktop "core"
+      # suite (repo-root tests/) aborts at collection because
+      # tests/test_run_simple_case_{kafka,nqkafka}.py import
+      # pswamp.monitoring.utils.TimeWindowRTApp, a module removed from the package
+      # (commit 15a3f7a "Removed unused TimeWindowRTApp") without updating its
+      # importers. It also needs Kafka/NQKafka/MQTT brokers and a Qt display,
+      # none of which this runner provides. Re-enable once the maintainer has
+      # resolved the missing module and the infra-bound tests are skip-guarded(?)
+      # - name: Core (desktop) unit tests
+      #   run: ./scripts/run-core-python-tests.sh
+
   # --- Does the built image actually work? -----------------------------------
   #
   # error_check.sh above is entirely static and deliberately never starts the
@@ -170,7 +211,7 @@ jobs:
   #
   # It gates the publish, so a green image is one that has served a request.
   smoketest:
-    needs: static-errorcheck
+    needs: unit-tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
