@@ -63,6 +63,11 @@ on:
       - "pyproject.toml"
       - "Dockerfile"
       - ".dockerignore"
+      # Local-run infra for the Kafka-vs-NATS experiment. A change to how the
+      # stack is composed or deployed should re-run the pipeline; both were
+      # missing before that experiment added broker + producer services.
+      - "docker-compose.yml"
+      - "k8s/**"
       - "scripts/error_check.sh" # a change to the gate re-runs the gate
       - "scripts/e2e-smoke-test.sh" # …and so does a change to the other gate
       # The unit-test runner scripts are gates too, so a change to one re-runs CI.

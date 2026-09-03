@@ -1,75 +1,125 @@
-"""Pure domain model for the PMU test streamer: a position in a file of records.
+"""Pure domain model for the PMU streamer's consumer side.
 
-No I/O beyond loading the data file once at import, and no knowledge of
-WebSockets — api.py owns all of that.
+No I/O and no knowledge of WebSockets or brokers' network clients — api.py owns
+all of that. This holds only what one client is looking at: a small scrolling
+window of the most recent records, plus the live latency/throughput metrics for
+whichever broker it currently has selected. It is deliberately unit-testable
+without a broker or a socket (see tests/test_stream_model.py).
 
-sample_data.txt is a **one-off sample committed for testing**, not a live feed or a
-generated artifact: 300 PMU records extracted by hand from the Nordic 44 grid
-simulation in the p-SWAMP project
+This replaces the file-cursor model the streamer had before the Kafka-vs-NATS
+pub/sub layer: there is no longer a position in a file to seek within — the source
+is a live topic — so what stays is the view of the live tail and the numbers that
+make the two brokers comparable.
 
-It exists purely to give the streamer something realistic to replay while the
-client-server shape is being worked out. Nothing here parses it — a record is
-whatever one line says it is — so replacing or extending the file needs no code
-change as long as it stays one record per line.
+`sample_data.txt` still lives beside this package (the producer reads it by path),
+but nothing here loads it any more.
 """
 
-from pathlib import Path
+import time
+from collections import deque
+from dataclasses import dataclass
+from typing import Literal
 
-# Replay at the rate the data was recorded, i.e. real time. The records are PMU
-# frames sampled every 50ms (20 Hz) at five stations, so one timestamp is five
-# consecutive lines and wall-clock speed is 20 * 5 = 100 lines/s. Derived rather
-# than hardcoded, so re-extracting the data with a different station count or sample
-# rate keeps playback honest — just update these two numbers to match the file.
-SAMPLE_HZ = 20  # PMU frames per second in sample_data.txt
-STATIONS_PER_FRAME = 5  # lines sharing one timestamp
-TICKS_PER_SECOND = SAMPLE_HZ * STATIONS_PER_FRAME
-WINDOW_RADIUS = 4  # records shown on each side of the current one → 9 rows
+from brokers.envelope import Envelope
 
-# The data file lives inside this package, so the Dockerfile's `COPY src/ ./src/`
-# ships it with no build change — the same "beside my own source" trick server.py
-# uses to find static/. Read once at import: it is small, immutable, and shared by
-# every client (each client has only its own *position*, below).
-DATA_FILE = Path(__file__).parent / "sample_data.txt"
-LINES: list[str] = DATA_FILE.read_text().splitlines()
+# The two pipes under evaluation. The default is NATS because it connects
+# essentially instantly, so a freshly opened page shows data without waiting on
+# Kafka's slower first-connect — a difference that is itself part of the story.
+Broker = Literal["kafka", "nats"]
+BROKERS: tuple[Broker, ...] = ("kafka", "nats")
+DEFAULT_BROKER: Broker = "nats"
+
+# Records kept for the scrolling view. Nine matches the old file-window height, so
+# StreamWindow.tsx renders unchanged.
+WINDOW_SIZE = 9
+
+# Throughput is "records seen in the trailing second". A one-second trailing count
+# reads directly as records/s and needs no rate estimation.
+_THROUGHPUT_WINDOW_S = 1.0
+
+# Weight of the newest sample in the latency EMA. Smooths the per-record jitter
+# without lagging a real shift between brokers.
+_LATENCY_EMA_ALPHA = 0.2
 
 
-class PmuStreamModel:
-    """One client's position in the record stream.
+@dataclass
+class Record:
+    """One record in the scrolling view."""
 
-    Playback **loops**: stepping past the last record wraps to the first and
-    stepping back from the first wraps to the last, so a demo left playing never
-    runs dry. `line_at` still reports None outside the file's bounds — the wrap
-    happens when the position moves, not when a window is rendered, so the window
-    thins out at the edges instead of pretending the file is circular mid-view.
+    seq: int
+    text: str
+
+
+class StreamMetrics:
+    """Rolling end-to-end latency and throughput for the active broker.
+
+    Reset on a broker switch so the readout reflects the pipe now selected rather
+    than a blend of both.
     """
 
-    def __init__(self, start: int = 0):
-        self.index = start if 0 <= start < len(LINES) else 0
+    def __init__(self) -> None:
+        self.received = 0
+        self.latency_ms = 0.0  # EMA of now - produced_at
+        self._stamps: deque[float] = deque()  # monotonic receive times, trailing 1s
 
-    def step_forward(self) -> None:
-        self.index = (self.index + 1) % len(LINES)
+    def record(self, latency_ms: float, now_mono: float) -> None:
+        self.received += 1
+        self.latency_ms = (
+            latency_ms
+            if self.received == 1
+            else _LATENCY_EMA_ALPHA * latency_ms
+            + (1 - _LATENCY_EMA_ALPHA) * self.latency_ms
+        )
+        self._stamps.append(now_mono)
+        self._prune(now_mono)
 
-    def step_back(self) -> None:
-        self.index = (self.index - 1) % len(LINES)
+    def _prune(self, now_mono: float) -> None:
+        cutoff = now_mono - _THROUGHPUT_WINDOW_S
+        while self._stamps and self._stamps[0] < cutoff:
+            self._stamps.popleft()
 
-    def line_at(self, index: int) -> str | None:
-        """The record at a position, or None for positions outside the file."""
-        if 0 <= index < len(LINES):
-            return LINES[index]
-        return None
+    def throughput_hz(self, now_mono: float | None = None) -> float:
+        """Records/s over the trailing second. Pass the current time so an idle or
+        paused stream decays to zero rather than reporting a stale count."""
+        if now_mono is not None:
+            self._prune(now_mono)
+        return len(self._stamps) / _THROUGHPUT_WINDOW_S
 
-    def visible_window(self) -> list[dict | None]:
-        """The records visible around the current position.
+    def reset(self) -> None:
+        self.received = 0
+        self.latency_ms = 0.0
+        self._stamps.clear()
 
-        Each entry is `{"line_number": int, "text": str}` or None where the window
-        runs off either end of the file. Line numbers are 1-based, matching how an
-        editor or `wc -l` would count the source file.
-        """
-        window: list[dict | None] = []
-        for i in range(self.index - WINDOW_RADIUS, self.index + WINDOW_RADIUS + 1):
-            text = self.line_at(i)
-            if text is None:
-                window.append(None)
-            else:
-                window.append({"line_number": i + 1, "text": text})
-        return window
+
+class StreamModel:
+    """One client's view of the live stream: selected broker, play state, the
+    scrolling window, and the metrics for the active pipe."""
+
+    def __init__(self, broker: Broker = DEFAULT_BROKER) -> None:
+        self.broker: Broker = broker
+        self.playing = True  # auto-start: an opened page shows the live tail
+        self.window: deque[Record] = deque(maxlen=WINDOW_SIZE)
+        self.metrics = StreamMetrics()
+        # A human-readable reason the current pipe is unavailable, or None when
+        # healthy. Surfaced to the page so a down broker reads as a message rather
+        # than a hang.
+        self.error: str | None = None
+
+    def ingest(self, envelope: Envelope, now_ms: int, now_mono: float) -> None:
+        """Record one arrived envelope: update metrics and the scrolling window."""
+        latency_ms = max(0.0, now_ms - envelope.produced_at_ms)
+        self.metrics.record(latency_ms, now_mono)
+        self.window.append(Record(seq=envelope.seq, text=envelope.text))
+
+    def switch(self, broker: Broker) -> None:
+        """Change the selected pipe and clear everything specific to the old one."""
+        self.broker = broker
+        self.window.clear()
+        self.metrics.reset()
+        self.error = None
+
+
+def now_ms() -> int:
+    """Wall clock in milliseconds — the same clock the producer stamps with, so the
+    difference is a real end-to-end latency (see brokers/envelope.py)."""
+    return int(time.time() * 1000)

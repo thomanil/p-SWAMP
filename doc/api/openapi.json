@@ -204,6 +204,52 @@
         "title": "AppStatusTable",
         "type": "object"
       },
+      "BrokerMetrics": {
+        "description": "Live comparison numbers for the active pipe.",
+        "properties": {
+          "latency_ms": {
+            "description": "Smoothed end-to-end latency, ms.",
+            "title": "Latency Ms",
+            "type": "number"
+          },
+          "received": {
+            "description": "Records seen since the last broker switch.",
+            "title": "Received",
+            "type": "integer"
+          },
+          "throughput_hz": {
+            "description": "Records/s over the trailing second.",
+            "title": "Throughput Hz",
+            "type": "number"
+          }
+        },
+        "required": [
+          "latency_ms",
+          "throughput_hz",
+          "received"
+        ],
+        "title": "BrokerMetrics",
+        "type": "object"
+      },
+      "BrokerSelection": {
+        "description": "Body of POST /broker/select.",
+        "properties": {
+          "broker": {
+            "description": "Which pipe to retransmit from.",
+            "enum": [
+              "kafka",
+              "nats"
+            ],
+            "title": "Broker",
+            "type": "string"
+          }
+        },
+        "required": [
+          "broker"
+        ],
+        "title": "BrokerSelection",
+        "type": "object"
+      },
       "Channel": {
         "description": "One column of a labelled time window.\n\nFlattened from p-SWAMP's three-row header, plus a precomputed display label so\nthe client never has to join the parts itself.",
         "properties": {
@@ -813,21 +859,21 @@
         "type": "object"
       },
       "PmuRecord": {
-        "description": "One record in the visible window: a 1-based line number and its text.",
+        "description": "One record in the scrolling window.",
         "properties": {
-          "line_number": {
-            "description": "1-based, matching how `wc -l` counts.",
-            "title": "Line Number",
+          "seq": {
+            "description": "Producer sequence number; gaps reveal drops.",
+            "title": "Seq",
             "type": "integer"
           },
           "text": {
-            "description": "The raw record, verbatim from sample_data.txt.",
+            "description": "The raw PMU record, verbatim from the sample.",
             "title": "Text",
             "type": "string"
           }
         },
         "required": [
-          "line_number",
+          "seq",
           "text"
         ],
         "title": "PmuRecord",
@@ -857,22 +903,37 @@
         "type": "object"
       },
       "PmuStreamState": {
-        "description": "The single message shape pushed to a client on connect and every change.\n\nA declared model rather than a loose dict, because this IS the downstream half\nof the published contract: api_contract.py collects it via this package's\nWS_MESSAGE export, and a bare dict would silently drop the app out of it.\n\n`total_lines` lets the client show \"record N of M\" \u2014 which is also how the\nwrap-around at the end of the file becomes visible in the UI.",
+        "description": "The single message shape pushed on connect and every change.\n\nA declared model, not a loose dict, because this IS the downstream half of the\npublished contract (collected via this package's WS_MESSAGE export); a bare\ndict would drop the app out of the contract the web client generates types\nfrom.",
         "properties": {
-          "index": {
-            "description": "0-based cursor into the sample file.",
-            "title": "Index",
-            "type": "integer"
+          "broker": {
+            "description": "Which pipe is being retransmitted.",
+            "enum": [
+              "kafka",
+              "nats"
+            ],
+            "title": "Broker",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Why the selected pipe is unavailable, or null when healthy.",
+            "title": "Error"
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/BrokerMetrics"
           },
           "playing": {
-            "description": "Whether the server is advancing this client.",
+            "description": "Whether records are being forwarded.",
             "title": "Playing",
             "type": "boolean"
-          },
-          "total_lines": {
-            "description": "How many records the sample file holds.",
-            "title": "Total Lines",
-            "type": "integer"
           },
           "type": {
             "const": "state",
@@ -881,26 +942,19 @@
             "type": "string"
           },
           "window": {
-            "description": "Records around the cursor; null where it runs off an end.",
+            "description": "Most-recent records, oldest first.",
             "items": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/PmuRecord"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "$ref": "#/components/schemas/PmuRecord"
             },
             "title": "Window",
             "type": "array"
           }
         },
         "required": [
+          "broker",
+          "playing",
           "window",
-          "index",
-          "total_lines",
-          "playing"
+          "metrics"
         ],
         "title": "PmuStreamState",
         "type": "object"
@@ -1121,7 +1175,7 @@
   "info": {
     "description": "The api between the p-SWAMP web client and its state server.\n\n**Two directions, two transports.** Anything a user triggers goes up as an HTTP\n`POST` under `/api/<app>/`; everything the server has to say comes down a\nWebSocket at `/api/<app>/ws`, which is downstream only. A command's reply is a\nsmall `CommandAck`, never state, so state has exactly one path and there is no\nordering to reconcile between two of them.\n\n**The operations below are therefore only half the api.** The socket half is\ndescribed by the `x-websocket-channels` extension at the root of this document,\nwhose message schemas are ordinary `components.schemas` entries \u2014 so a code\ngenerator picks them up like any other model even though OpenAPI itself has no\nnotion of a socket.\n\n**The first path segment after `/api/` is the routing key.** The server itself\nholds no domain logic: it mounts one self-contained backend package under each\n`/api/<app>` prefix, so `/api/pmu-test-streamer/...` is served by\n`src/pmu_test_streamer/`, `/api/time-window/...` by\n`src/pswamp_web/time_window/`, and so on for every tag listed below \u2014 the paths\na package declares are relative to its own prefix.\n`/healthz` sits outside `/api` because it is the process's health rather than any\none app's, and everything else is the built web client, served from the same\norigin with unknown paths falling back to its `index.html` so deep links work.\n\n**Every request carries `?client_id=`**, a numeric string the browser resolves\nonce per profile and persists. It is the sharding key for all server state and\nall of a browser's sockets must send the same one. It is *not* authentication and\ndoes not pretend to be: supply someone else's id and you drive their session.\n\n**The web client's types are generated from the API contract.**\n`openapi-typescript` compiles it into `app/client-web/src/api/schema.ts`, which is\ncommitted in git, and a page hook takes its downstream type from there rather\nthan hand-copying the Python model's fields \u2014 `Wire['ReferenceSubappState']` for\n`/api/reference-subapp/ws`. Field names stay as the server sends them, snake_case\nand all, all the way to the frontend components.\n\nThis document is generated from the server and committed at `doc/api/openapi.json`;\n`scripts/error_check.sh` fails if the two disagree. See\n`doc/the-client-server-api.md` for more detail.\n",
     "title": "p-SWAMP api",
-    "version": "1.0.0"
+    "version": "2.0.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -1322,10 +1376,10 @@
         ]
       }
     },
-    "/api/pmu-test-streamer/playback/back": {
+    "/api/pmu-test-streamer/broker/select": {
       "post": {
-        "description": "Step one record back, independently of the play/pause flag.",
-        "operationId": "pmu_test_streamer_back",
+        "description": "Switch which of the two live pipes this client retransmits from.\n\nChanges the selection and, if a consumer is running, asks it to drop the\ncurrent pipe and pick up the new one. Metrics reset so the readout reflects the\nnewly selected broker, not a blend.",
+        "operationId": "pmu_test_streamer_select_broker",
         "parameters": [
           {
             "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
@@ -1340,6 +1394,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrokerSelection"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -1362,53 +1426,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Back",
-        "tags": [
-          "pmu-test-streamer"
-        ]
-      }
-    },
-    "/api/pmu-test-streamer/playback/forward": {
-      "post": {
-        "description": "Step one record forward, independently of the play/pause flag.",
-        "operationId": "pmu_test_streamer_forward",
-        "parameters": [
-          {
-            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
-            "in": "query",
-            "name": "client_id",
-            "required": true,
-            "schema": {
-              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
-              "pattern": "^\\d{1,20}$",
-              "title": "Client Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommandAck"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Forward",
+        "summary": "Select Broker",
         "tags": [
           "pmu-test-streamer"
         ]
@@ -1416,7 +1434,7 @@
     },
     "/api/pmu-test-streamer/playback/play": {
       "post": {
-        "description": "Start advancing this client through the recorded stream.",
+        "description": "Resume forwarding records to this client.",
         "operationId": "pmu_test_streamer_play",
         "parameters": [
           {
@@ -1462,7 +1480,7 @@
     },
     "/api/pmu-test-streamer/playback/stop": {
       "post": {
-        "description": "Pause this client where it is in the stream.",
+        "description": "Pause forwarding. The stream keeps flowing in the broker; we stop\nretransmitting it, so resuming is instant.",
         "operationId": "pmu_test_streamer_stop",
         "parameters": [
           {
@@ -1744,7 +1762,7 @@
   },
   "tags": [
     {
-      "description": "Scaffold demo: replays sample PMU records line by line.",
+      "description": "Kafka-vs-NATS experiment: retransmits a live PMU topic (Kafka or NATS, selectable per client) with live latency/throughput metrics.",
       "name": "pmu-test-streamer"
     },
     {

@@ -1,12 +1,12 @@
 # Local minikube deployment of the p-swamp client-server stack (the FastAPI
 # state server, with the web client baked in and served from the same origin).
 #
-# Single replica on purpose: the server holds per-client state in memory and
-# runs one ticker for everyone (see src/pmu_test_streamer/api.py), so it must
-# never be scaled past 1 — a second pod would have its own independent state and
-# the Service would split clients across them. The strategy is Recreate (not the
-# default RollingUpdate) so the old pod is gone before the new one serves, for
-# the same reason.
+# Single replica on purpose: the server holds per-client state in memory (each
+# client's selected broker, play flag and metrics, plus its own broker consumer —
+# see src/pmu_test_streamer/api.py), so it must never be scaled past 1 — a second
+# pod would have its own independent state and the Service would split clients
+# across them. The strategy is Recreate (not the default RollingUpdate) so the old
+# pod is gone before the new one serves, for the same reason.
 #
 # Nothing is persisted: no DB, no volumes. A rollout resets every client's state,
 # which is the expected behavior for this stateless deployment.
@@ -52,6 +52,14 @@ spec:
             # the Dockerfile's ENV, so it's not repeated here.
             - name: HOST
               value: "0.0.0.0"
+            # Kafka-vs-NATS experiment: where the per-client consumers reach the
+            # two brokers (the Services defined below). The server still boots
+            # without them — consumers connect lazily and report a down pipe — so
+            # readiness stays /healthz and this Deployment has no broker dependency.
+            - name: KAFKA_BOOTSTRAP
+              value: "kafka:9092"
+            - name: NATS_URL
+              value: "nats://nats:4222"
           # Both probes hit /healthz: with no external dependencies there is
           # nothing readiness could check that liveness doesn't. Readiness still
           # earns its keep by holding the pod out of the Service until the app
@@ -113,3 +121,213 @@ spec:
       port: 8000        # cluster-internal Service port
       targetPort: 8000  # container port
       nodePort: 30080   # fixed external port (valid range 30000-32767)
+---
+# --- Kafka-vs-NATS experiment (branch kafka-nats-experiments) -----------------
+#
+# The pub/sub transfer layer, mirroring docker-compose.yml: a producer loops the
+# PMU sample into both brokers, the server consumes whichever pipe a client picks.
+# All ephemeral (emptyDir, no PersistentVolumes) — nothing here is persisted, in
+# keeping with the stateless deployment. Kept in this one file so the minikube
+# script's single `kubectl apply -f k8s/p-swamp-local.yaml` picks it up.
+#
+# NATS: one small server, the whole broker. -m 8222 enables the monitoring
+# endpoint used by the probes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+  labels:
+    app: nats
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nats
+  template:
+    metadata:
+      labels:
+        app: nats
+    spec:
+      containers:
+        - name: nats
+          image: nats:2.10-alpine
+          args: ["-m", "8222"]
+          ports:
+            - name: client
+              containerPort: 4222
+            - name: monitor
+              containerPort: 8222
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8222
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8222
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  labels:
+    app: nats
+spec:
+  selector:
+    app: nats
+  ports:
+    - name: client
+      port: 4222
+      targetPort: 4222
+---
+# Kafka: single-node KRaft (no ZooKeeper), combined broker+controller. The env
+# block below is the minimum a single node needs — that surface, against NATS's
+# one flag above, is the ops-complexity half of the experiment. emptyDir: the log
+# dir is ephemeral, so a pod restart is a fresh broker (fine for a live replay).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+  labels:
+    app: kafka
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # single writer to the (ephemeral) log dir
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+        - name: kafka
+          image: apache/kafka:3.9.0
+          ports:
+            - name: client
+              containerPort: 9092
+          env:
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: "broker,controller"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@kafka:9093"
+            - name: KAFKA_LISTENERS
+              value: "PLAINTEXT://:9092,CONTROLLER://:9093"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka:9092"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "true"
+          volumeMounts:
+            - name: kafka-logs
+              mountPath: /var/lib/kafka/data
+          readinessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: kafka-logs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  labels:
+    app: kafka
+spec:
+  # Headless so the advertised name "kafka:9092" resolves to the pod directly —
+  # a single-broker KRaft node advertises its own hostname to clients.
+  clusterIP: None
+  selector:
+    app: kafka
+  ports:
+    - name: client
+      port: 9092
+      targetPort: 9092
+    - name: controller
+      port: 9093
+      targetPort: 9093
+---
+# Producer: the same p-swamp image as the server, different entrypoint. Built into
+# minikube (imagePullPolicy: Never); retries its broker connects, so no init gate.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: producer
+  labels:
+    app: producer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: producer
+  template:
+    metadata:
+      labels:
+        app: producer
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: producer
+          image: p-swamp:latest
+          imagePullPolicy: Never
+          command: ["python", "producer.py"]
+          env:
+            - name: KAFKA_BOOTSTRAP
+              value: "kafka:9092"
+            - name: NATS_URL
+              value: "nats://nats:4222"
+            # - name: PRODUCER_RATE_HZ
+            #   value: "100"   # raise to stress the brokers
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"

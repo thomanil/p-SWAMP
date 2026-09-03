@@ -57,6 +57,15 @@ which exist to keep the "adding a page" path honest:
   retirement**: it still works and is still described below where it does
   something the reference app does not, but don't cite it as the example to copy
   and don't make anything new depend on it.
+  > **On the `kafka-nats-experiments` branch this app has been repurposed** into a
+  > Kafka-vs-NATS side-by-side experiment: a separate producer service loops the
+  > sample into BOTH a Kafka topic and a NATS subject, and the streamer consumes
+  > whichever pipe the page selects, showing live latency/throughput. This adds an
+  > **opt-in broker layer** (`src/brokers/`, `producer.py`, broker services in
+  > compose + k8s) and deliberately relaxes the "server has no external
+  > dependencies" invariant for this app. Some streamer descriptions below (the
+  > file-cursor model, back/forward controls) describe the pre-experiment shape.
+  > See `doc/kafka-vs-nats-experiment.md`.
 
 **The client-server stack is stateless on purpose.** There is no database and no
 persistent volume anywhere under `app/` or `k8s/`. Don't reintroduce one without

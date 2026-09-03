@@ -76,7 +76,8 @@ APPS = [
     AppEntry(
         "pmu-test-streamer",
         pmu_test_streamer,
-        "Scaffold demo: replays sample PMU records line by line.",
+        "Kafka-vs-NATS experiment: retransmits a live PMU topic (Kafka or NATS, "
+        "selectable per client) with live latency/throughput metrics.",
     ),
     AppEntry(
         "app-status",

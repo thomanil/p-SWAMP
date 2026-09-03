@@ -89,7 +89,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/pmu-test-streamer/playback/back": {
+    "/api/pmu-test-streamer/broker/select": {
         parameters: {
             query?: never;
             header?: never;
@@ -99,30 +99,14 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Back
-         * @description Step one record back, independently of the play/pause flag.
+         * Select Broker
+         * @description Switch which of the two live pipes this client retransmits from.
+         *
+         *     Changes the selection and, if a consumer is running, asks it to drop the
+         *     current pipe and pick up the new one. Metrics reset so the readout reflects the
+         *     newly selected broker, not a blend.
          */
-        post: operations["pmu_test_streamer_back"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/pmu-test-streamer/playback/forward": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Forward
-         * @description Step one record forward, independently of the play/pause flag.
-         */
-        post: operations["pmu_test_streamer_forward"];
+        post: operations["pmu_test_streamer_select_broker"];
         delete?: never;
         options?: never;
         head?: never;
@@ -140,7 +124,7 @@ export interface paths {
         put?: never;
         /**
          * Play
-         * @description Start advancing this client through the recorded stream.
+         * @description Resume forwarding records to this client.
          */
         post: operations["pmu_test_streamer_play"];
         delete?: never;
@@ -160,7 +144,8 @@ export interface paths {
         put?: never;
         /**
          * Stop
-         * @description Pause this client where it is in the stream.
+         * @description Pause forwarding. The stream keeps flowing in the broker; we stop
+         *     retransmitting it, so resuming is instant.
          */
         post: operations["pmu_test_streamer_stop"];
         delete?: never;
@@ -389,6 +374,39 @@ export interface components {
              * @constant
              */
             type: "state";
+        };
+        /**
+         * BrokerMetrics
+         * @description Live comparison numbers for the active pipe.
+         */
+        BrokerMetrics: {
+            /**
+             * Latency Ms
+             * @description Smoothed end-to-end latency, ms.
+             */
+            latency_ms: number;
+            /**
+             * Received
+             * @description Records seen since the last broker switch.
+             */
+            received: number;
+            /**
+             * Throughput Hz
+             * @description Records/s over the trailing second.
+             */
+            throughput_hz: number;
+        };
+        /**
+         * BrokerSelection
+         * @description Body of POST /broker/select.
+         */
+        BrokerSelection: {
+            /**
+             * Broker
+             * @description Which pipe to retransmit from.
+             * @enum {string}
+             */
+            broker: "kafka" | "nats";
         };
         /**
          * Channel
@@ -688,17 +706,17 @@ export interface components {
         };
         /**
          * PmuRecord
-         * @description One record in the visible window: a 1-based line number and its text.
+         * @description One record in the scrolling window.
          */
         PmuRecord: {
             /**
-             * Line Number
-             * @description 1-based, matching how `wc -l` counts.
+             * Seq
+             * @description Producer sequence number; gaps reveal drops.
              */
-            line_number: number;
+            seq: number;
             /**
              * Text
-             * @description The raw record, verbatim from sample_data.txt.
+             * @description The raw PMU record, verbatim from the sample.
              */
             text: string;
         };
@@ -713,31 +731,32 @@ export interface components {
         };
         /**
          * PmuStreamState
-         * @description The single message shape pushed to a client on connect and every change.
+         * @description The single message shape pushed on connect and every change.
          *
-         *     A declared model rather than a loose dict, because this IS the downstream half
-         *     of the published contract: api_contract.py collects it via this package's
-         *     WS_MESSAGE export, and a bare dict would silently drop the app out of it.
-         *
-         *     `total_lines` lets the client show "record N of M" — which is also how the
-         *     wrap-around at the end of the file becomes visible in the UI.
+         *     A declared model, not a loose dict, because this IS the downstream half of the
+         *     published contract (collected via this package's WS_MESSAGE export); a bare
+         *     dict would drop the app out of the contract the web client generates types
+         *     from.
          */
         PmuStreamState: {
             /**
-             * Index
-             * @description 0-based cursor into the sample file.
+             * Broker
+             * @description Which pipe is being retransmitted.
+             * @enum {string}
              */
-            index: number;
+            broker: "kafka" | "nats";
+            /**
+             * Error
+             * @description Why the selected pipe is unavailable, or null when healthy.
+             * @default null
+             */
+            error: string | null;
+            metrics: components["schemas"]["BrokerMetrics"];
             /**
              * Playing
-             * @description Whether the server is advancing this client.
+             * @description Whether records are being forwarded.
              */
             playing: boolean;
-            /**
-             * Total Lines
-             * @description How many records the sample file holds.
-             */
-            total_lines: number;
             /**
              * Type
              * @default state
@@ -746,9 +765,9 @@ export interface components {
             type: "state";
             /**
              * Window
-             * @description Records around the cursor; null where it runs off an end.
+             * @description Most-recent records, oldest first.
              */
-            window: (components["schemas"]["PmuRecord"] | null)[];
+            window: components["schemas"]["PmuRecord"][];
         };
         /**
          * ReferenceSubappState
@@ -989,7 +1008,7 @@ export interface operations {
             };
         };
     };
-    pmu_test_streamer_back: {
+    pmu_test_streamer_select_broker: {
         parameters: {
             query: {
                 /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
@@ -999,39 +1018,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CommandAck"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BrokerSelection"];
             };
         };
-    };
-    pmu_test_streamer_forward: {
-        parameters: {
-            query: {
-                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
-                client_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

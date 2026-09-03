@@ -16,6 +16,14 @@ dependencies = [
     "fastapi>=0.141.1,<0.142",
     "uvicorn[standard]>=0.52.4,<0.53",
     "p-swamp",
+    # Kafka-vs-NATS experiment (branch kafka-nats-experiments): the async broker
+    # clients for the pub/sub transfer layer under src/brokers/. Both are
+    # asyncio-native, so consuming adds no thread seam to the single-event-loop
+    # server (unlike the desktop package's blocking kafka-python). Used by both the
+    # consumer (this server) and the producer service (same image, python
+    # producer.py). See doc/kafka-vs-nats-experiment.md.
+    "aiokafka>=0.11,<0.13",
+    "nats-py>=2.6,<3",
 ]
 
 # p-swamp is the desktop package at the repo root (root pyproject.toml, root

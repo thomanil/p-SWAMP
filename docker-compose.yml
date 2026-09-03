@@ -10,9 +10,21 @@ services:
     environment:
       HOST: "0.0.0.0"
       PORT: "8000"
+      # Kafka-vs-NATS experiment: where the server's per-client consumers reach
+      # the two brokers. The server still BOOTS without them (consumers connect
+      # lazily and report a down pipe to the page), which is why depends_on below
+      # uses service_started, not service_healthy — the "server has no external
+      # dependencies" invariant is relaxed only for this experiment branch.
+      KAFKA_BOOTSTRAP: "kafka:9092"
+      NATS_URL: "nats://nats:4222"
       # Compose sync writes may not always emit inotify events in-container;
       # polling keeps reload reliable across host/container boundaries.
       WATCHFILES_FORCE_POLLING: "true"
+    depends_on:
+      kafka:
+        condition: service_started
+      nats:
+        condition: service_started
     # Dev-only override: run uvicorn with --reload so the files synced in by
     # `watch` (below) trigger an in-process hot reload. The Dockerfile's prod
     # CMD (plain `python server.py`) is left untouched — this reloader never
@@ -80,3 +92,79 @@ services:
           action: rebuild
         - path: app/server-python/uv.lock
           action: rebuild
+
+  # --- Kafka-vs-NATS experiment (branch kafka-nats-experiments) ---------------
+  #
+  # The pub/sub transfer layer that now sits between sample_data.txt and the
+  # WebSocket: a producer loops the file into BOTH brokers, the server consumes
+  # from whichever pipe a client selected. See doc/kafka-vs-nats-experiment.md.
+  # All local-dev only; nothing here is persisted (no volumes).
+
+  # NATS: one tiny server. This is the whole broker — the ops-complexity contrast
+  # with Kafka below is the point of the experiment. Alpine variant so the image
+  # has a shell + wget for the healthcheck; -m 8222 enables the monitoring
+  # endpoint the healthcheck hits. 4222 is exposed so a host-run producer/consumer
+  # can reach it too.
+  nats:
+    image: nats:2.10-alpine
+    command: ["-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8222/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+    restart: unless-stopped
+
+  # Kafka: single-node KRaft (no ZooKeeper), combined broker+controller. Even the
+  # minimum viable single node needs the block of listener/quorum/replication env
+  # below — that surface, versus NATS's one line, is exactly what this experiment
+  # is measuring. Auto-create topics on, so the producer's first publish makes the
+  # topic. Not exposed to the host: reaching Kafka from outside its network needs a
+  # second advertised listener, and only the in-network producer/server consume it.
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test:
+        ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
+  # Producer: reuses the SERVER image (code + sample data already baked in) and
+  # just runs a different entrypoint. It reads sample_data.txt and publishes each
+  # record to both brokers in real time. Retries its broker connects, so
+  # service_started is enough — it need not wait for health.
+  producer:
+    image: p-swamp:latest
+    build: .
+    command: ["python", "producer.py"]
+    environment:
+      KAFKA_BOOTSTRAP: "kafka:9092"
+      NATS_URL: "nats://nats:4222"
+      # PRODUCER_RATE_HZ: "100"   # uncomment / raise to stress the brokers
+    depends_on:
+      kafka:
+        condition: service_started
+      nats:
+        condition: service_started
+    restart: unless-stopped

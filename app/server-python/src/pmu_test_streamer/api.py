@@ -1,26 +1,41 @@
-"""The PMU test streamer's backend: WebSocket api, per-client position, ticker.
+"""The PMU streamer's backend: consume one broker, retransmit over the socket.
 
-Streams sample grid records line by line, keeping per-client state keyed by the
-client id. There is nothing to pick: one data file, one stream.
+This is the right end of the Kafka-vs-NATS experiment. It used to read
+sample_data.txt directly; now the data arrives over a live pub/sub topic (a
+separate producer service loops the file into BOTH a Kafka topic and a NATS
+subject), and this app consumes from whichever pipe the client currently selected
+and pushes the records — plus live latency/throughput metrics — down the socket.
 
-Commands come up over REST and state goes down over the socket; the reasoning is
-in AGENTS.md and doc/the-client-server-api.md.
+The wiring, per client:
 
-server.py mounts this `router` under /api/pmu-test-streamer, so the endpoint below
-is reachable at /api/pmu-test-streamer/ws. Nothing here knows about that prefix.
+  - `states[client_id]`  — the StreamModel (selected broker, play flag, scrolling
+     window, metrics). Outlives a disconnect, so a reconnect resumes the same
+     broker choice. This is view state only.
+  - `consumers[client_id]` — a ConsumerRunner: the asyncio task actually reading
+     the broker. Exists only while the client has at least one live socket; started
+     on first connect, stopped on last disconnect, so an idle client runs no broker
+     connection (a pipeline is cheap here, but an orphaned consumer is still waste).
+  - `sockets`            — this client's live WebSockets, for pushing.
 
-All state is in memory and dies with the process, and everything
-runs on the one asyncio event loop — the WS handlers, the request handlers, the
-ticker, and broadcasts are cooperatively scheduled and never truly parallel, so no
-locking is needed.
+Commands come up over REST (select a broker, play/pause), state goes down the
+socket; the reasoning is in AGENTS.md and doc/the-client-server-api.md. server.py
+mounts this `router` under /api/pmu-test-streamer.
+
+Concurrency: aiokafka and nats-py are asyncio-native, so the consume tasks are
+cooperatively scheduled on the one event loop like everything else here — no new
+thread seam (contrast the desktop package's blocking kafka-python). Nothing
+connects to a broker at import; that only happens when a ConsumerRunner starts.
 """
 
 import asyncio
+import contextlib
+import itertools
+import os
 import time
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from typing import Literal
 
+from brokers import config
+from brokers.consumers import KafkaConsumerClient, NatsConsumerClient
 from fastapi import APIRouter, FastAPI, WebSocket
 from pydantic import BaseModel, Field
 from shared import (
@@ -33,212 +48,287 @@ from shared import (
     wait_for_disconnect,
 )
 
-from .model import LINES, TICKS_PER_SECOND, PmuStreamModel
+from .model import Broker, StreamModel, now_ms
 
-# Discrete client events only — never the ticker's auto-advance, which fires
-# TICKS_PER_SECOND times a second per playing client.
 logger = get_logger("pmu")
+
+# How the consume loop paces itself. POLL_TIMEOUT bounds each broker read so the
+# loop regains control to notice a switch, refresh throughput and detect silence;
+# PUSH_INTERVAL throttles socket pushes to ~10 Hz (the raw stream is ~100/s, and a
+# 100 Hz push would run React far more often than the DOM changes — the same
+# reasoning as "keep the sample path off React" in pswamp_web/); RETRY_SECONDS
+# spaces reconnects while a broker is unavailable. START_TIMEOUT bounds the
+# connect: aiokafka's start() otherwise blocks on its ~40 s request timeout when
+# the broker is down, so without this a page selecting a dead pipe would sit
+# blank for most of a minute instead of showing "pipe unavailable".
+POLL_TIMEOUT = 0.1
+PUSH_INTERVAL = 0.1
+RETRY_SECONDS = 2.0
+START_TIMEOUT = 5.0
+
+# Makes each Kafka consumer its own group, so every client (and every re-subscribe
+# after a switch) live-tails independently rather than sharing partitions. The
+# per-process nonce is what makes the group unique across server *restarts* too:
+# without it a restarted server would reuse "pmu-web-<client>-0" and could resume a
+# group offset left in Kafka by an earlier run, draining the retained backlog
+# instead of tailing.
+_PROCESS_NONCE = os.urandom(4).hex()
+_group_counter = itertools.count()
 
 
 # --- authoritative in-memory state ------------------------------------------
-#
-# One position + play flag per client seed (the ?client_id= URL param), kept across
-# reconnects so a dropped client resumes mid-stream, and never evicted (a bounded,
-# acceptable leak for a local dev demo). This dict is the only store; nothing is
-# persisted, so a restart puts every client back at the first record.
+
+states: dict[str, StreamModel] = {}
 
 
-@dataclass
-class ClientState:
-    model: PmuStreamModel = field(default_factory=PmuStreamModel)
-    playing: bool = False
+def get_state(client_id: str) -> StreamModel:
+    """The single place per-client view state is born; called on connect and on
+    every command, so a command can never hit a missing client."""
+    model = states.get(client_id)
+    if model is None:
+        model = states[client_id] = StreamModel()
+    return model
 
-
-states: dict[str, ClientState] = {}
-
-
-def get_state(client_id: str) -> ClientState:
-    """The single place per-client state is born; called on connect and on every
-    command, so a command can never hit a missing client."""
-    state = states.get(client_id)
-    if state is None:
-        state = states[client_id] = ClientState()
-    return state
-
-
-class PmuRecord(BaseModel):
-    """One record in the visible window: a 1-based line number and its text."""
-
-    line_number: int = Field(description="1-based, matching how `wc -l` counts.")
-    text: str = Field(description="The raw record, verbatim from sample_data.txt.")
-
-
-class PmuStreamState(BaseModel):
-    """The single message shape pushed to a client on connect and every change.
-
-    A declared model rather than a loose dict, because this IS the downstream half
-    of the published contract: api_contract.py collects it via this package's
-    WS_MESSAGE export, and a bare dict would silently drop the app out of it.
-
-    `total_lines` lets the client show "record N of M" — which is also how the
-    wrap-around at the end of the file becomes visible in the UI.
-    """
-
-    type: Literal["state"] = "state"
-    window: list[PmuRecord | None] = Field(
-        description="Records around the cursor; null where it runs off an end.",
-    )
-    index: int = Field(description="0-based cursor into the sample file.")
-    total_lines: int = Field(description="How many records the sample file holds.")
-    playing: bool = Field(description="Whether the server is advancing this client.")
-
-
-def state_message(state: ClientState) -> PmuStreamState:
-    """The single message shape pushed to a client on connect and every change."""
-    return PmuStreamState(
-        window=state.model.visible_window(),
-        index=state.model.index,
-        total_lines=len(LINES),
-        playing=state.playing,
-    )
-
-
-def roster_table(acting_id: str | None = None) -> str:
-    """An aligned table of every currently connected client: where it is in the
-    stream and whether it's playing. Disconnected-but-remembered seeds are excluded
-    — this is the live roster, not the state table. The client that triggered the
-    current event is flagged with an arrow."""
-    ids = sorted(sockets.clients(), key=int)
-    if not ids:
-        return "    (no clients connected)"
-    headers = ("", "CLIENT", "RECORD", "STATE")
-    rows = [headers]
-    for cid in ids:
-        state = states[cid]
-        rows.append(
-            (
-                "->" if cid == acting_id else "",
-                str(cid),
-                f"{state.model.index + 1}/{len(LINES)}",
-                "playing" if state.playing else "paused",
-            )
-        )
-    widths = [max(len(row[i]) for row in rows) for i in range(len(headers))]
-
-    def fmt(row: tuple[str, ...]) -> str:
-        return "    " + "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row))
-
-    rule = "    " + "-" * (sum(widths) + 2 * (len(widths) - 1))
-    return "\n".join([fmt(headers), rule, *(fmt(row) for row in rows[1:])])
-
-
-def log_event(action: str, client_id: str) -> None:
-    """The single logging entry point: the triggering client + action, then the full
-    live roster, so the console always shows the complete picture after any
-    operation."""
-    logger.info("client %s: %s\n\n%s\n", client_id, action, roster_table(client_id))
-
-
-# --- connection tracking ----------------------------------------------------
-#
-# Transport bookkeeping only, so it comes from shared.py; this app's own state lives
-# in `states` above and deliberately outlives a disconnect.
 
 sockets = SocketRegistry()
 
 
-# --- server-side playback ticker -------------------------------------------
+# --- wire message -----------------------------------------------------------
 
 
-async def ticker() -> None:
-    """One driver for every client: each tick, advance only the clients that are
-    currently playing and push each its own updated state.
+class PmuRecord(BaseModel):
+    """One record in the scrolling window."""
 
-    Paced against a monotonic deadline rather than `sleep(interval)`, because the
-    latter waits interval *plus* the time the tick's own work took — a 5% shortfall
-    at this app's 100 ticks/s, which would compound over a long replay and quietly
-    make "real time" a lie. If a tick ever overruns by more than one interval (a
-    stalled client, a throttled CPU) the deadline is reset to now instead of firing
-    a catch-up burst: better to drop time than to flood the socket.
+    seq: int = Field(description="Producer sequence number; gaps reveal drops.")
+    text: str = Field(description="The raw PMU record, verbatim from the sample.")
 
-    Iterate a snapshot of `states` because a connect/disconnect can mutate it
-    across the `await`.
+
+class BrokerMetrics(BaseModel):
+    """Live comparison numbers for the active pipe."""
+
+    latency_ms: float = Field(description="Smoothed end-to-end latency, ms.")
+    throughput_hz: float = Field(description="Records/s over the trailing second.")
+    received: int = Field(description="Records seen since the last broker switch.")
+
+
+class PmuStreamState(BaseModel):
+    """The single message shape pushed on connect and every change.
+
+    A declared model, not a loose dict, because this IS the downstream half of the
+    published contract (collected via this package's WS_MESSAGE export); a bare
+    dict would drop the app out of the contract the web client generates types
+    from.
     """
-    interval = 1 / TICKS_PER_SECOND
-    next_tick = time.monotonic()
-    while True:
-        next_tick += interval
-        now = time.monotonic()
-        if now > next_tick + interval:
-            next_tick = now
-        await asyncio.sleep(max(0.0, next_tick - now))
-        for client_id, state in list(states.items()):
-            if state.playing:
-                state.model.step_forward()
-                await sockets.send_to_client(client_id, state_message(state))
+
+    type: Literal["state"] = "state"
+    broker: Broker = Field(description="Which pipe is being retransmitted.")
+    playing: bool = Field(description="Whether records are being forwarded.")
+    window: list[PmuRecord] = Field(description="Most-recent records, oldest first.")
+    metrics: BrokerMetrics
+    error: str | None = Field(
+        default=None,
+        description="Why the selected pipe is unavailable, or null when healthy.",
+    )
 
 
-@asynccontextmanager
+def state_message(model: StreamModel) -> PmuStreamState:
+    """Build the downstream message from a client's model."""
+    return PmuStreamState(
+        broker=model.broker,
+        playing=model.playing,
+        window=[PmuRecord(seq=r.seq, text=r.text) for r in model.window],
+        metrics=BrokerMetrics(
+            latency_ms=round(model.metrics.latency_ms, 1),
+            throughput_hz=round(model.metrics.throughput_hz(time.monotonic()), 1),
+            received=model.metrics.received,
+        ),
+        error=model.error,
+    )
+
+
+# --- per-client consumer task -----------------------------------------------
+
+
+def _make_consumer(broker: Broker, client_id: str):
+    """One broker client, with the same poll interface either way."""
+    if broker == "kafka":
+        group = f"pmu-web-{client_id}-{_PROCESS_NONCE}-{next(_group_counter)}"
+        return KafkaConsumerClient(group_id=group)
+    return NatsConsumerClient()
+
+
+class ConsumerRunner:
+    """The asyncio task that reads one client's selected broker and pushes state.
+
+    A single long-lived task per client. A broker switch does not replace the task;
+    it sets `_switch`, which breaks the inner consume loop so the outer loop tears
+    down the current broker client and subscribes to the newly selected one.
+    """
+
+    def __init__(self, client_id: str, model: StreamModel) -> None:
+        self.client_id = client_id
+        self.model = model
+        self._switch = asyncio.Event()
+        self._stopped = False
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._run())
+
+    def request_switch(self) -> None:
+        """Ask the loop to drop the current pipe and pick up model.broker."""
+        self._switch.set()
+
+    async def stop(self) -> None:
+        self._stopped = True
+        self._switch.set()  # break any in-progress poll wait
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+            self._task = None
+
+    async def _push(self) -> None:
+        await sockets.send_to_client(self.client_id, state_message(self.model))
+
+    async def _run(self) -> None:
+        while not self._stopped:
+            broker = self.model.broker
+            self._switch.clear()
+            consumer = _make_consumer(broker, self.client_id)
+            try:
+                await asyncio.wait_for(consumer.start(), timeout=START_TIMEOUT)
+                self.model.error = None
+                await self._push()
+                await self._consume(consumer)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # broker down or a mid-run drop
+                logger.warning("client %s: %s pipe error (%s)", self.client_id, broker, exc)
+                self.model.error = f"{broker} pipe unavailable"
+                with contextlib.suppress(Exception):
+                    await self._push()
+                # Wait, but wake immediately if the client switches brokers.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._switch.wait(), timeout=RETRY_SECONDS)
+            finally:
+                with contextlib.suppress(Exception):
+                    await consumer.stop()
+
+    async def _consume(self, consumer) -> None:
+        """Read the broker until the client switches away or the task is stopped.
+
+        Always drains the broker (so a paused Kafka consumer does not fall behind),
+        but only ingests into the window/metrics while playing. Pushes at ~10 Hz
+        regardless, so the page reflects the paused state and a decaying throughput.
+        """
+        last_push = 0.0
+        while not self._stopped and not self._switch.is_set():
+            envelopes = await consumer.poll(POLL_TIMEOUT)
+            now_mono = time.monotonic()
+            if self.model.playing:
+                stamp = now_ms()
+                broker_tag = self.model.broker.upper()
+                for envelope in envelopes:
+                    self.model.ingest(envelope, stamp, now_mono)
+                    if config.should_trace(envelope.seq):
+                        logger.info(
+                            "[%s] message %d received (client %s)",
+                            broker_tag,
+                            envelope.seq,
+                            self.client_id,
+                        )
+            if now_mono - last_push >= PUSH_INTERVAL:
+                await self._push()
+                last_push = now_mono
+
+
+consumers: dict[str, ConsumerRunner] = {}
+
+
+def _ensure_consumer(client_id: str, model: StreamModel) -> ConsumerRunner:
+    """Start a consumer for this client if none is running yet."""
+    runner = consumers.get(client_id)
+    if runner is None:
+        runner = consumers[client_id] = ConsumerRunner(client_id, model)
+        runner.start()
+        logger.info("client %s: consumer started (%s)", client_id, model.broker)
+    return runner
+
+
+async def _release_consumer(client_id: str) -> None:
+    """Stop this client's consumer once its last socket has closed."""
+    if sockets.of(client_id):
+        return  # still has a live socket
+    runner = consumers.pop(client_id, None)
+    if runner is not None:
+        await runner.stop()
+        logger.info("client %s: consumer stopped (idle)", client_id)
+
+
+@contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    """This app's slice of the process lifespan: run the streaming ticker for as
-    long as the server is up. server.py composes it with the other app packages'
-    lifespans (see APPS there)."""
-    task = asyncio.create_task(ticker())
+    """This app's slice of the process lifespan: nothing to start (consumers are
+    per-client, born on connect), but on shutdown stop any that are still running
+    so their broker connections drain cleanly. server.py composes this with the
+    other packages' lifespans."""
     try:
         yield
     finally:
-        task.cancel()
+        for runner in list(consumers.values()):
+            with contextlib.suppress(Exception):
+                await runner.stop()
+        consumers.clear()
 
 
 # --- REST commands ----------------------------------------------------------
-#
-# One POST per operation; see doc/the-client-server-api.md for why the upstream
-# half is HTTP and the downstream half is not.
-#
-# Paths are relative to wherever server.py mounts this router
-# (/api/pmu-test-streamer), so "/playback/play" is served as
-# /api/pmu-test-streamer/playback/play.
 
 router = APIRouter()
 
 
-async def applied(client_id: str, state: ClientState, action: str) -> CommandAck:
+async def applied(client_id: str, action: str) -> CommandAck:
     """Log the command, push this client its new state, acknowledge the request."""
-    log_event(action, client_id)
-    await sockets.send_to_client(client_id, state_message(state))
+    logger.info("client %s: %s", client_id, action)
+    await sockets.send_to_client(client_id, state_message(get_state(client_id)))
     return CommandAck(applied=action)
+
+
+class BrokerSelection(BaseModel):
+    """Body of POST /broker/select."""
+
+    broker: Broker = Field(description="Which pipe to retransmit from.")
+
+
+@router.post("/broker/select", operation_id="pmu_test_streamer_select_broker")
+async def select_broker(client_id: ClientId, body: BrokerSelection) -> CommandAck:
+    """Switch which of the two live pipes this client retransmits from.
+
+    Changes the selection and, if a consumer is running, asks it to drop the
+    current pipe and pick up the new one. Metrics reset so the readout reflects the
+    newly selected broker, not a blend.
+    """
+    model = get_state(client_id)
+    if body.broker != model.broker:
+        model.switch(body.broker)
+        runner = consumers.get(client_id)
+        if runner is not None:
+            runner.request_switch()
+    return await applied(client_id, f"select-broker:{body.broker}")
 
 
 @router.post("/playback/play", operation_id="pmu_test_streamer_play")
 async def play(client_id: ClientId) -> CommandAck:
-    """Start advancing this client through the recorded stream."""
-    state = get_state(client_id)
-    state.playing = True
-    return await applied(client_id, state, "play")
+    """Resume forwarding records to this client."""
+    get_state(client_id).playing = True
+    return await applied(client_id, "play")
 
 
 @router.post("/playback/stop", operation_id="pmu_test_streamer_stop")
 async def stop(client_id: ClientId) -> CommandAck:
-    """Pause this client where it is in the stream."""
-    state = get_state(client_id)
-    state.playing = False
-    return await applied(client_id, state, "stop")
-
-
-@router.post("/playback/forward", operation_id="pmu_test_streamer_forward")
-async def forward(client_id: ClientId) -> CommandAck:
-    """Step one record forward, independently of the play/pause flag."""
-    state = get_state(client_id)
-    state.model.step_forward()
-    return await applied(client_id, state, "forward")
-
-
-@router.post("/playback/back", operation_id="pmu_test_streamer_back")
-async def back(client_id: ClientId) -> CommandAck:
-    """Step one record back, independently of the play/pause flag."""
-    state = get_state(client_id)
-    state.model.step_back()
-    return await applied(client_id, state, "back")
+    """Pause forwarding. The stream keeps flowing in the broker; we stop
+    retransmitting it, so resuming is instant."""
+    get_state(client_id).playing = False
+    return await applied(client_id, "stop")
 
 
 # --- websocket endpoint (downstream only) -----------------------------------
@@ -247,28 +337,31 @@ async def back(client_id: ClientId) -> CommandAck:
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     # The client identifies itself with a numeric seed in the URL
-    # (ws://.../api/pmu-test-streamer/ws?client_id=<seed>); reject a connection
-    # without a valid one. `read_client_id` applies the very rule the `ClientId`
-    # query parameter enforces, so a page's socket and its commands can never
-    # address different state.
+    # (?client_id=<seed>); reject a connection without a valid one. read_client_id
+    # applies the very rule the ClientId query parameter enforces, so a page's
+    # socket and its commands can never address different state.
     client_id = read_client_id(ws)
     if client_id is None:
         await ws.close(code=1008)  # policy violation
         return
 
-    # Resuming an existing seed vs. a brand-new one changes the connect message.
     known = client_id in states
     async with sockets.connected(ws, client_id):
-        state = get_state(client_id)  # born here so it shows in the roster below
-        log_event("reconnected" if known else "connected", client_id)
-        # Straight down this socket, not through the registry: the opening
-        # message is for the connection that just arrived (and resumes its prior
-        # position if known), while a command's result goes to every socket the
-        # client has open.
-        await send_state(ws, state_message(state))
-        # Nothing is sent up this socket; this is what notices the client going
-        # away. See pswamp_web/pump.py -- the page packages share it.
+        model = get_state(client_id)
+        _ensure_consumer(client_id, model)  # start on first socket, shared after
+        logger.info(
+            "client %s: %s (%s)",
+            client_id,
+            "reconnected" if known else "connected",
+            model.broker,
+        )
+        # Opening snapshot straight down this socket (not via the registry): it is
+        # for the connection that just arrived. The consume task pushes subsequent
+        # updates to every socket this client holds.
+        await send_state(ws, state_message(model))
+        # Nothing is sent up this socket; this notices the client going away.
         await wait_for_disconnect(ws)
-    # Outside the block, so the socket is already out of the registry and the
-    # roster this logs shows who is left rather than who is leaving.
-    log_event("disconnected", client_id)
+    # Outside the block, so the socket is already out of the registry: stop the
+    # consumer only if this was the client's last socket.
+    await _release_consumer(client_id)
+    logger.info("client %s: disconnected", client_id)

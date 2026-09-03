@@ -72,10 +72,19 @@ echo "Applying manifests..."
 kubectl apply -f k8s/p-swamp-local.yaml
 
 # `kubectl apply` won't restart pods if the manifest text is unchanged, even
-# though we just rebuilt :latest. Force a new pod so the fresh image is used.
+# though we just rebuilt :latest. Force a new pod so the fresh image is used. Both
+# the server AND the producer run that freshly-built p-swamp:latest, so both need
+# the restart; kafka/nats run public images and only need to exist.
 echo "Rolling out..."
-kubectl rollout restart deployment/p-swamp
+kubectl rollout restart deployment/p-swamp deployment/producer
 kubectl rollout status deployment/p-swamp --timeout=120s
+# Report the rest of the experiment stack coming up too (brokers pull public
+# images on first run, which can be slow); don't hard-fail on it — the server is
+# what we open, and its consumers retry until the brokers are ready.
+echo "Waiting for brokers + producer (Kafka-vs-NATS experiment)..."
+kubectl rollout status deployment/nats --timeout=180s || true
+kubectl rollout status deployment/kafka --timeout=180s || true
+kubectl rollout status deployment/producer --timeout=180s || true
 
 # --- Reach the Service ------------------------------------------------------
 # The nodePort is fixed at 30080 and must stay in sync with k8s/p-swamp-local.yaml.
