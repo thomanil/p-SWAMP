@@ -11,7 +11,7 @@ The p-SWAMP repository. It holds **two implementations side by side**:
 - the original **Python + Qt single-process application** — the research/desktop
   code at the repo root (`src/pswamp/`, `examples/`, `tests/`, and the root
   `pyproject.toml` + `uv.lock`), and
-- the **client-server stack** — a FastAPI server plus a React web client under
+- the **client-server stack** — a FastAPI server plus a Svelte web client under
   `app/`, with its dev tooling and deploy path (`Dockerfile`,
   `docker-compose.yml`, `k8s/`, `scripts/`, `.github/`, `doc/`).
 
@@ -171,22 +171,28 @@ Two deployables, one wire protocol:
   same thing on a laptop and in the image (uv refuses to normalise a relative path
   above its base directory). Everything under `src/` shares the one
   `pyproject.toml` + `uv.lock` one level up.
-- **`app/client-web/`** — a thin React/TS/Vite renderer (shadcn/ui + Tailwind v4).
+- **`app/client-web/`** — a thin Svelte 5/TS/Vite renderer (shadcn-svelte + bits-ui
+  + Tailwind v4). Plain Svelte on Vite, **not SvelteKit** — no SSR, no file-based
+  routing; the routing is client-side `svelte-routing`.
   Holds no state; sends commands, renders whatever the server pushes. In the
   shipped image it is **baked into the server image** and served from the same
   origin as `/api` (no second service, and no cross-origin requests). It is a
   **multi-page SPA**
-  (react-router, declarative `<Routes>`): **one folder per app** at
-  `src/pages/<app>/`, holding that app's components, its socket hooks and its
+  (svelte-routing, declarative `<Router>`/`<Route>`): **one folder per app** at
+  `src/pages/<app>/`, holding that app's components, its socket modules and its
   views together — the client-side mirror of the server's `src/<app>/` packages,
   imported relatively within the folder. Most apps own a single route;
   **`grid-monitor/` owns six** (the dashboard plus five focused views). The
-  route table is `src/App.tsx` and the nav + centering shell is
-  `src/components/AppLayout.tsx`. Only genuinely cross-app code sits outside
+  route table is `src/App.svelte` and the nav + centering shell is
+  `src/components/AppLayout.svelte`. Only genuinely cross-app code sits outside
   an app folder: shared UI in `src/components/`
-  (`ui/` is vendored shadcn), shared logic in `src/hooks/` (`useServerSocket`) and
+  (`ui/` is vendored shadcn-svelte), shared logic in `src/hooks/`
+  (`useServerSocket.svelte.ts`, a runes-based reactive socket) and
   `src/lib/` — `servers.ts` (each app's ws path + the serving-origin url),
   `basePath.ts` (the runtime-discovered mount prefix) and `utils.ts` (shadcn's `cn`).
+  The `lib/` and `api/` modules are framework-agnostic plain TypeScript and were
+  carried over from the React client unchanged; only the components, the socket
+  layer and the router are Svelte.
   Note `src/lib/` was invisible to git until recently; see the `.gitignore` note
   under "Conventions".
   **`src/pages/grid-monitor/` is the p-SWAMP application**: `/` renders
@@ -199,8 +205,8 @@ Two deployables, one wire protocol:
   `pswamp_web/time_window/`. `/reference-subapp` (`ReferenceSubappPage`) is the
   standalone scaffold demo to copy — a counter over a WebSocket plus two POST
   commands, where the connection half lives once in
-  `src/hooks/useServerSocket.ts` and the app's own hook
-  (`useReferenceSubappSocket`) adds only its wire type and its commands.
+  `src/hooks/useServerSocket.svelte.ts` and the app's own socket module
+  (`useReferenceSubappSocket.svelte.ts`) adds only its wire type and its commands.
   `/pmu-test-streamer` (`PmuTestStreamerPage`) is the older demo beside it, on
   its way out. See
   "Adding a p-SWAMP view" and "Adding a page" below.
@@ -252,7 +258,7 @@ Key invariants to preserve:
   pipeline**, so a listener only ever hears its own client's results.
 - **All of a browser's sockets must resolve to one pipeline.** The client id is
   generated once per browser profile and persisted in `localStorage`
-  (`src/lib/clientId.ts`), *not* rolled per hook — the grid monitor opens five
+  (`src/lib/clientId.ts`), *not* rolled per socket — the grid monitor opens five
   sockets at once, and five ids would mean five replays and twenty threads for one
   viewer. `HubRegistry.acquire` holds a per-client lock so those five simultaneous
   first-connects build one pipeline rather than racing to build five.
@@ -364,8 +370,8 @@ Key invariants to preserve:
   forwarding — so the server sees plain `/api/...` and knows nothing about it, but
   the browser must put it back on the front of every url.
   `app/client-web/src/lib/basePath.ts` recovers it by reading its own
-  `import.meta.url` and cutting at the `/assets/` marker; `App.tsx` feeds the
-  result to react-router as `basename`, and `resolveServerUrl` prepends it to
+  `import.meta.url` and cutting at the `/assets/` marker; `App.svelte` feeds the
+  result to svelte-routing as the `<Router basepath>`, and `resolveServerUrl` prepends it to
   WebSocket urls. This is what lets **one** published image run at the origin root
   and under a prefix, which matters because CI publishes exactly one. Two
   invariants it rests on, both spelled out in that file: built chunks stay under
@@ -381,7 +387,7 @@ Key invariants to preserve:
   behind the remote reverse proxy Swagger UI would fetch the spec at the origin
   root and come up empty. Rather than teach the server the mount prefix, the SPA
   simply omits the "API doc" nav link off localhost — `isLocalhost()` in
-  `AppLayout.tsx`, true only for `localhost`/`127.0.0.1`/`[::1]`. Developers reach
+  `AppLayout.svelte`, true only for `localhost`/`127.0.0.1`/`[::1]`. Developers reach
   the docs locally where they work (origin root, no proxy); the committed contract
   at `doc/api/openapi.json` is how everyone else consumes the api. If reachable
   docs behind the proxy are ever wanted, the fix is server-side — set FastAPI's
@@ -485,14 +491,14 @@ Three things worth knowing before touching it:
   (`mode: "full"`) and then only new samples (`mode: "append"`). Measured: ~5.9
   KB/s, against ~1.4 MB/s for re-sending the window at the same rate. That is the
   difference between a page that works and one that does not.
-- **Keep the sample path out of React.** The chart's data lives in a `useRef` and
-  redraws come through the hook's own `subscribe`, never a `setState` — see
-  `useServerSocket`'s `onMessage` option, which exists for exactly this. Putting a
-  50 Hz stream through React state runs a render pass 10×/s that produces no DOM
-  change. Panels whose payload is small and drawn as SVG (`phasors`, `islanding`)
-  use plain state, which is correct for them — but on one screen those costs add
-  up, which is why each panel owns its own hook rather than the dashboard owning
-  all five.
+- **Keep the sample path out of the reactive graph.** The chart's data lives in a
+  plain (non-`$state`) object and redraws come through the socket module's own
+  `subscribe`, never a reactive assignment — see `useServerSocket`'s `onMessage`
+  option, which exists for exactly this. Putting a 50 Hz stream through `$state`
+  runs a re-render 10×/s that produces no DOM change. Panels whose payload is small
+  and drawn as SVG (`phasors`, `islanding`) use plain reactive `$state`, which is
+  correct for them — but on one screen those costs add up, which is why each panel
+  owns its own socket module rather than the dashboard owning all five.
 
 Sanity values, for checking a change did not quietly break the pipeline: median
 frequency **50.0009 Hz**, median voltage **418.6 kV**, islanded stations **6500,
@@ -518,38 +524,39 @@ client.)
 
 Client side, four edits:
 
-1. Add `src/pages/grid-monitor/<slug>/` with the socket hook, the drawing
-   component, and a `<Name>Panel.tsx` that renders them inside `<Panel>`. Copy
+1. Add `src/pages/grid-monitor/<slug>/` with the socket module, the drawing
+   component, and a `<Name>Panel.svelte` that renders them inside `<Panel>`. Copy
    `app-status/` for a simple one. Give it a `variant?: PanelVariant` prop and
-   pass it straight to `<Panel variant={variant}>`, along with the facts it
+   pass it straight to `<Panel {variant}>`, along with the facts it
    needs — `subtitle`, `focusHref`, `focusedClassName`. **Don't branch on the
    variant for those**: `<Panel>` owns the convention (subtitle when focused,
    expand link when not, width when it owns the page), and it owns it precisely
    because six panels each writing the ternaries out is six chances to differ.
    Branch on `variant` only for what is genuinely this panel's business, such as
    how tall to draw a canvas.
-2. Place it in the grid in `GridMonitorPage.tsx`. Use `minmax(0,1fr)` columns,
+2. Place it in the grid in `GridMonitorPage.svelte`. Use `minmax(0,1fr)` columns,
    never `1fr` — a grid item's default `min-width:auto` lets a canvas or a table
    force its column wider than the viewport.
-3. Add the focused `<Route>` in `App.tsx` rendering the same component with
+3. Add the focused `<Route>` in `App.svelte` rendering the same component with
    `variant="focused"`.
 4. Add a `*_WS_PATH` const in `src/lib/servers.ts` — and, if the panel has
    controls, an `*_API_PATH` const beside it in the second block. Commands go up
    as POSTs through `postCommand` (`src/lib/commands.ts`); the socket is
    downstream only, and `useServerSocket` has no `send`.
 
-Take the hook's wire type from the contract — `Wire['<Model>']` via
+Take the socket module's wire type from the contract — `Wire['<Model>']` via
 `src/api/wire.ts` — rather than hand-writing a mirror of the pydantic model, and
 run `./scripts/generate-api-contract.sh` after adding the backend package so that
 type exists.
 
 The backend needs no wiring — every socket resolves against the serving origin, so
 all panels on a screen are views of the same server by construction.
-**Each panel owns its own hook** — a panel must never re-render because a
+**Each panel owns its own socket module** — a panel must never re-render because a
 neighbour's socket ticked. If one socket feeds two panels, hoist it into a
-folder-local context (`islanding/IslandingData.tsx`) rather than opening it twice;
-note the context object and its hook must live in a separate `.ts` file, because
-`react-refresh/only-export-components` is an error here.
+folder-local Svelte context (`islanding/IslandingData.svelte`, whose value is set
+via `islandingContext.ts`) rather than opening it twice. Reading a context value's
+reactive getter only re-renders the panel that reads it, so the map and the alarm
+table update independently off the one connection.
 
 Server side, the backend package under `src/pswamp_web/<app>/` exporting `router`
 (and registered in `APPS`) is unchanged — see "Adding a backend api". Copy
@@ -610,37 +617,42 @@ taken. The steps it performs, which stay the reference for doing it by hand:
 Three edits, no build config:
 
 1. Add `app/client-web/src/pages/<slug>/` — the folder is the page. Put its
-   component `<Name>Page.tsx` there plus anything only it uses (its socket hook,
-   its views), importing them **relatively** (`./useMyThingSocket`). Copy
-   `src/pages/reference-subapp/` as a starting point.
-2. Register it in `src/App.tsx`: `<Route path="<slug>" element={<NamePage />} />`,
-   inside the `AppLayout` layout route. Keep the slug **one segment deep** — a
-   nested route breaks relative asset resolution behind the remote path prefix
-   (see the `basePath.ts` invariant above).
-3. Add `{ to: '/<slug>', label: '…' }` to `NAV_ITEMS` in
-   `src/components/AppLayout.tsx`.
+   component `<Name>Page.svelte` there plus anything only it uses (its socket
+   module, its views), importing them **relatively** (`./useMyThingSocket.svelte`).
+   Copy `src/pages/reference-subapp/` as a starting point.
+2. Register it in `src/App.svelte`: `<Route path="<slug>"><NamePage /></Route>`,
+   inside the `<AppLayout>` that wraps the routes. Keep the slug **one segment
+   deep** — a nested route breaks relative asset resolution behind the remote path
+   prefix (see the `basePath.ts` invariant above).
+3. Add `{ to: '/<slug>', label: '…', end: false }` to `NAV_ITEMS` in
+   `src/components/AppLayout.svelte`.
 
 Name the folder after the route (`reference-subapp`), so a URL maps to a directory
 on both sides of the wire — the server package is the same name with underscores.
 
-A page that talks to a backend adds a fourth edit: a hook wrapping
-`useServerSocket(<APP>_WS_PATH)` (copy `useReferenceSubappSocket.ts`) with a
-`*_WS_PATH` const in `src/lib/servers.ts`. Nothing to configure beyond that path —
-the socket always points at the serving origin. Its message type comes from the
-contract (`Wire['<Model>']`), not from a hand-written mirror.
+A page that talks to a backend adds a fourth edit: a socket module (a
+`use…Socket.svelte.ts` file) wrapping `useServerSocket(<APP>_WS_PATH)` (copy
+`useReferenceSubappSocket.svelte.ts`) with a `*_WS_PATH` const in
+`src/lib/servers.ts`. Nothing to configure beyond that path — the socket always
+points at the serving origin. Its message type comes from the contract
+(`Wire['<Model>']`), not from a hand-written mirror. The module returns reactive
+getters (`get state()`, `get status()`, `get connected()`); a `.svelte` page reads
+them, deriving locals with `$derived` where it needs union narrowing (`$state` is
+a reserved rune name, so **don't name a local `state`** in a component that also
+uses the `$state` rune — call it `snapshot`, as the phasors and alarms panels do).
 
-**A page with controls adds its commands to that same hook.** Each is a POST: an
-`*_API_PATH` const in `src/lib/servers.ts` (second block), and one `useCallback`
-per operation wrapping `postCommand` from `src/lib/commands.ts`, which attaches
-the client id and raises on a non-2xx. The hook exports one named function per
-operation (`play`, `setSequence`) and swallows a failure with a log — a command
-that did not land produces no state change, which is what the user already sees. Keep controls `disabled={!connected}`: the POST
-would reach the server without a socket, but its result would have nowhere to
-arrive.
+**A page with controls adds its commands to that same socket module.** Each is a
+POST: an `*_API_PATH` const in `src/lib/servers.ts` (second block), and one plain
+function per operation wrapping `postCommand` from `src/lib/commands.ts`, which
+attaches the client id and raises on a non-2xx. The module returns one named
+function per operation (`play`, `setSequence`) and swallows a failure with a log —
+a command that did not land produces no state change, which is what the user
+already sees. Keep controls `disabled={!connected}`: the POST would reach the
+server without a socket, but its result would have nowhere to arrive.
 
-**Promote to a shared folder only on the second user.** A component or hook lives in
-its page folder until another page needs it, at which point it moves to
-`src/components/` or `src/hooks/` — that is how `useServerSocket` got there.
+**Promote to a shared folder only on the second user.** A component or socket
+module lives in its page folder until another page needs it, at which point it
+moves to `src/components/` or `src/hooks/` — that is how `useServerSocket` got there.
 
 Notes that matter when touching routing:
 
@@ -657,22 +669,21 @@ Notes that matter when touching routing:
   sends `no-cache` itself, so dev never shows it. A consequence: any *new* HTTP route
   must be registered **above** the greedy `/` mount at the bottom of that file,
   which the `APPS` loop already is.
-- Because that fallback answers every unknown path, `App.tsx` keeps a catch-all
-  `*` route redirecting to `/`; without it a typo'd URL renders the nav over an
-  empty outlet. Keep it pointed at whichever page `<Route index>` renders.
-- **The `/` entry in `NAV_ITEMS` passes `end`.** `NavLink` matches descendant
-  paths by default and `/` is a prefix of every route, so without it the grid
-  monitor renders as the active link on every page. (This replaced an earlier
-  `isIndex` flag, which solved the opposite problem back when the index page's
-  path was not actually `/`.)
-- WebSockets are torn down on navigation (the hook lives inside the page), so
+- Because that fallback answers every unknown path, `App.svelte` keeps a catch-all
+  `<Route path="*">` rendering `RedirectToHome` (which navigates to `/`); without
+  it a typo'd URL renders the nav over an empty outlet.
+- **The `/` entry in `NAV_ITEMS` passes `end`.** The `NavLink` wrapper (over
+  svelte-routing's `<Link>`, styled from its `getProps` active state) matches
+  descendant paths by default and `/` is a prefix of every route, so without it
+  the grid monitor renders as the active link on every page.
+- WebSockets are torn down on navigation (the socket module runs inside the page), so
   leaving and returning reopens the view sessions with the browser's persistent
   client id. The pipeline survives for its idle grace period, but connection-local
   view state such as the monitor's channel selection starts fresh. The grid
   monitor holds **five** sockets across its six panels, each at its own rate so a
   slow one degrades alone. The islanding socket is the exception: it feeds two
   panels, so it is hoisted into a provider
-  (`grid-monitor/islanding/IslandingData.tsx`) rather than opened twice.
+  (`grid-monitor/islanding/IslandingData.svelte`) rather than opened twice.
 
 ## Adding a backend api
 
@@ -727,7 +738,7 @@ underlying tech). Start the server first, then the client:
 ```
 ./scripts/start-local-hotloaded-pswamp-server.sh      # state server on 127.0.0.1:8000 (docker compose up --watch --build; streams logs, Ctrl-C stops it)
                                                      # also live-syncs root src/, so desktop-package edits hot-reload too
-./scripts/start-local-hotloaded-pswamp-web-client.sh  # Vite/React web client w/ HMR on http://localhost:5173
+./scripts/start-local-hotloaded-pswamp-web-client.sh  # Vite/Svelte web client w/ HMR on http://localhost:5173
 ```
 
 **The api contract is not hot-reloaded.** An api change reloads the server, but
@@ -771,16 +782,16 @@ before touching the api:
   consumes — come through as ordinary models. Revisit that choice if a channel
   ever grows a second message shape or an upstream direction; today every channel
   runs downstream only and carries one model.
-- **The web client's wire types are GENERATED, and nothing renames them.** A page
-  hook says `type XState = Wire['XState']` (`src/api/wire.ts`), never a hand-copy
-  of the Python model, and the components read the server's own field names —
-  `app_name`, `mag_ref`, `t_start`. Every hook used to map those into a camelCase
-  mirror, ~150 lines of pure renaming whose real cost was that it failed
+- **The web client's wire types are GENERATED, and nothing renames them.** A page's
+  socket module says `type XState = Wire['XState']` (`src/api/wire.ts`), never a
+  hand-copy of the Python model, and the components read the server's own field
+  names — `app_name`, `mag_ref`, `t_start`. Such a module used to map those into a
+  camelCase mirror, ~150 lines of pure renaming whose real cost was that it failed
   *silently*: a field added server-side and regenerated into `schema.ts` simply
-  never reached the screen, because a `useMemo` that omits a key is valid
+  never reached the screen, because a `$derived` that omits a key is valid
   TypeScript. That is the exact failure the generated contract exists to abolish.
-  A hook may still **derive** — `useLineOutageSocket` parses branch names out of
-  channel labels, `useTimeWindowSocket` accumulates a ring buffer — and those
+  A socket module may still **derive** — `useLineOutageSocket` parses branch names
+  out of channel labels, `useTimeWindowSocket` accumulates a ring buffer — and those
   keep their own vocabulary, because they are not the message.
 - **`postCommand` is typed against the document**, so a typo'd path, a missing
   path parameter or a wrong body is a `tsc` error. Path-parameterised commands
@@ -826,7 +837,7 @@ change, or a change to where the path points, is silently ignored until
 Quality checks (cover both halves of the codebase):
 
 ```
-./scripts/error_check.sh             # READ-ONLY static gate, NO test suites: uv lock --check + py_compile + ruff check F (python), tsc -b + eslint (web), api contract vs code. Runs all checks even if one fails, exits non-zero on any failure.
+./scripts/error_check.sh             # READ-ONLY static gate, NO test suites: uv lock --check + py_compile + ruff check F (python), svelte-check + eslint (web), api contract vs code. Runs all checks even if one fails, exits non-zero on any failure.
 ./scripts/run-python-server-tests.sh # the server unit tests (app/server-python/tests/), fast + hermetic; args pass through to pytest (-k, -v, a node id).
 ./scripts/run-core-python-tests.sh   # the desktop "core" tests (repo-root tests/) in the [full] env; needs Kafka/NQKafka/MQTT/Qt infra — run deliberately, not in CI.
 ```
@@ -941,11 +952,12 @@ web client once `/healthz` answers (`NO_BROWSER=1` skips that), then tails the
 pod's logs until Ctrl-C (`NO_LOGS=1` skips that). NodePort is 30080.
 
 **Why that contract preflight is here and not left to `error_check.sh`:** it is
-the one staleness this path cannot otherwise catch. The image build runs `tsc -b`,
-so a client disagreeing with the committed `schema.ts` fails the build — but a
-*stale* `schema.ts` agrees with the client perfectly, both being equally behind
-the Python. `tsc` only compares TypeScript to TypeScript, so the image builds
-clean and the pod serves a client expecting fields the server no longer sends.
+the one staleness this path cannot otherwise catch. The image build runs
+`svelte-check`, so a client disagreeing with the committed `schema.ts` fails the
+build — but a *stale* `schema.ts` agrees with the client perfectly, both being
+equally behind the Python. `svelte-check` only compares TypeScript to TypeScript,
+so the image builds clean and the pod serves a client expecting fields the server
+no longer sends.
 The check runs before the cluster start, so a failure costs seconds rather than a
 minute of image build. It needs `uv` and `npx` on top of minikube/kubectl.
 
@@ -1025,9 +1037,9 @@ mind when editing that script:
   the file as config when that section exists, so omitting it keeps the explicit
   `--select F` below authoritative (verified — lint output is unchanged
   by the file's presence).
-- **`tsc -b` then `vite build`** is the web build (see `package.json` scripts);
-  the Dockerfile's `web-build` stage runs `npm ci && vite build` and copies
-  `dist/` to `static/` beside the server source —
+- **`svelte-check` then `vite build`** is the web build (`npm run build`, see
+  `package.json` scripts); the Dockerfile's `web-build` stage runs `npm ci && npm
+  run build` and copies `dist/` to `static/` beside the server source —
   `/workspace/p-SWAMP/app/server-python/src/static` in the image,
   `app/server-python/src/static/` locally, both being what the server resolves as
   `Path(__file__).parent / "static"` and mounts at `/`. `static/` is generated,
@@ -1036,7 +1048,7 @@ mind when editing that script:
   unanchored** — `lib/`, `public/`, `build/`, `dist/` match at *any* depth, so they
   reach into `app/client-web/` too. That silently kept `app/client-web/src/lib/`
   (`basePath.ts`, `servers.ts`, `utils.ts`) out of the repo entirely, even though
-  every shadcn `ui/` component imports `@/lib/utils` — a clean checkout could not
+  every shadcn-svelte `ui/` component imports `@/lib/utils` — a clean checkout could not
   type-check or build. A `!app/client-web/src/lib/` + `!app/client-web/public/`
   block at the bottom of the file rescues them, and must stay **below** the Python
   rules since gitignore is last-match-wins. When adding a folder under `app/`, run

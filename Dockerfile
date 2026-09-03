@@ -4,8 +4,9 @@
 #
 # --- web client build stage -------------------------------------------------
 #
-# Build the Vite/React/TS web client to plain static files. A pinned Node image
-# runs `npm ci` + `vite build`, emitting /web/dist (index.html + favicon/icons +
+# Build the Vite/Svelte/TS web client to plain static files. A pinned Node image
+# runs `npm ci` + `npm run build` (svelte-check + vite build), emitting /web/dist
+# (index.html + favicon/icons +
 # hashed files under assets/). Only that dist/ is copied into the final image —
 # Node and node_modules never ship. Pinned to a digest for reproducible builds
 # (the tag is kept as documentation); this is the multi-arch index digest, so

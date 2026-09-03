@@ -1,73 +1,32 @@
-# React + TypeScript + Vite
+# p-SWAMP web client
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Svelte 5 + TypeScript + Vite. Plain Svelte on Vite — **not SvelteKit**: no SSR and
+no file-based routing; routing is client-side (`svelte-routing`). UI components are
+shadcn-svelte (bits-ui) styled with Tailwind v4; charts are uPlot; icons are
+`@lucide/svelte`.
 
-Currently, two official plugins are available:
+This is a thin renderer: it holds no durable state, sends commands as POSTs, and
+draws whatever the server pushes down a WebSocket. In the shipped image it is baked
+into the FastAPI server and served from the same origin as `/api`.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+**The authoritative guide for working in this repo is the root `AGENTS.md`** —
+read it before changing anything here. It covers the client/server seam, the "one
+folder per app under `src/pages/`" layout, the socket modules (`use…Socket.svelte.ts`
+over `src/hooks/useServerSocket.svelte.ts`), the runtime-discovered mount prefix
+(`src/lib/basePath.ts`), and how to add a page or a grid-monitor panel. The
+generated api contract (`src/api/schema.ts`) is produced by
+`scripts/generate-api-contract.sh` — don't hand-edit it.
 
-## React Compiler
+## Commands
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```
+npm run dev      # Vite dev server + HMR on http://localhost:5173 (proxies /api → :8000)
+npm run build    # svelte-check (type-check) then vite build → dist/
+npm run check    # svelte-check only
+npm run lint     # eslint (flat config, eslint-plugin-svelte)
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+Prefer the repo scripts for the usual flows:
+`scripts/start-local-hotloaded-pswamp-web-client.sh` (dev) and
+`scripts/error_check.sh` (the static gate CI and the pre-push hook run:
+`svelte-check` + `eslint` here, plus the Python and api-contract checks).

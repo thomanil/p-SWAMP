@@ -10,8 +10,8 @@
 # needs the full server env — a cold run may sync it. Three parts:
 #
 #   Web client (app/client-web)
-#     - tsc -b ....... type-check (also catches unused locals, bad imports)
-#     - eslint . ..... lint (flat eslint.config.js, react-hooks etc)
+#     - svelte-check . type-check (.svelte + .ts; unused locals, bad imports, a11y)
+#     - eslint . ..... lint (flat eslint.config.js, eslint-plugin-svelte etc)
 #
 #   Python (app/server-python)
 #     - uv lock --check  pyproject.toml vs uv.lock in sync (read-only)
@@ -75,8 +75,8 @@ section "Web client (app/client-web)"
     npm ci
   fi
 )
-run "tsc (web type-check)" bash -c 'cd app/client-web && npx --no-install tsc -b'
-run "eslint (web lint)"    bash -c 'cd app/client-web && npx --no-install eslint .'
+run "svelte-check (web type-check)" bash -c 'cd app/client-web && npx --no-install svelte-check --tsconfig ./tsconfig.app.json'
+run "eslint (web lint)"             bash -c 'cd app/client-web && npx --no-install eslint .'
 
 # --- Python: lockfile + AST/compile + ruff lint -----------------------------
 section "Python (app/server-python)"

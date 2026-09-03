@@ -26,18 +26,18 @@ layer on top of it.
 ## Rendering
 
 Every template is named `<filename>.template`, and the suffix is stripped when
-it is rendered — `use__NAME__Socket.ts.template` becomes
-`useGridOverviewSocket.ts`. That suffix is not decoration: it disables IDE error checking etc.
+it is rendered — `use__NAME__Socket.svelte.ts.template` becomes
+`useGridOverviewSocket.svelte.ts`. That suffix is not decoration: it disables IDE error checking etc.
 
 Both the file contents and the file *names* are rendered, so a template can be
-called `use__NAME__Socket.ts.template`. The tokens, for the example name
+called `use__NAME__Socket.svelte.ts.template`. The tokens, for the example name
 `grid-overview` with nav label `Grid Overview`:
 
 | Token | Becomes | Used for |
 |---|---|---|
 | `__SLUG__` | `grid-overview` | the URL, the page folder, the `/api/<app>` prefix |
 | `__PKG__` | `grid_overview` | the Python package |
-| `__NAME__` | `GridOverview` | the React component, the hook, the model class |
+| `__NAME__` | `GridOverview` | the Svelte component, the socket module, the model class |
 | `__WS_PATH_CONST__` | `GRID_OVERVIEW_WS_PATH` | the ws path const in `lib/servers.ts` |
 | `__API_PATH_CONST__` | `GRID_OVERVIEW_API_PATH` | the REST prefix const, same file |
 | `__LABEL__` | `Grid Overview` | the nav entry and page title |
@@ -125,10 +125,10 @@ Four things follow when editing these templates:
   knows who it is — one id per browser, resolved once in `src/lib/clientId.ts`
   and shown in the layout footer — so sending it would only be a second copy to
   keep in step. The id still keys `states` server-side; it is just not page data.
-- **The hook does not map the message to anything.** It types it with the
+- **The socket module does not map the message to anything.** It types it with the
   generated `Wire['<Name>State']` and hands it to the page, field names and all.
-  Hooks used to rename every field into camelCase; that is ~150 lines the repo no
-  longer has, and — more to the point — it failed silently, since a `useMemo`
-  that omits a newly added field type-checks fine and the field just never
-  appears. Derive things in a hook by all means (the grid monitor's line-outage
-  hook does); don't rename.
+  These modules used to rename every field into camelCase; that is ~150 lines the
+  repo no longer has, and — more to the point — it failed silently, since a
+  `$derived` that omits a newly added field type-checks fine and the field just
+  never appears. Derive things in a socket module by all means (the grid monitor's
+  line-outage module does); don't rename.

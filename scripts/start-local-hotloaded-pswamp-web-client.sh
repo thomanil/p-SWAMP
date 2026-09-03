@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the Vite/React web client for local dev with HMR — the stable "run the web
+# Start the Vite/Svelte web client for local dev with HMR — the stable "run the web
 # client" entrypoint. A save to any source under app/client-web patches the page
 # instantly. Open the printed http://localhost:5173 URL.
 #

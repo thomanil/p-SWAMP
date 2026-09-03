@@ -172,7 +172,7 @@ status_is() {
 }
 
 # `id="root"` is the mount point in index.html; an /assets/ reference proves this
-# is the BUILT client, not the dev shell (which points at /src/main.tsx).
+# is the BUILT client, not the dev shell (which points at /src/main.ts).
 serves_built_client() {
   local body
   body="$(curl -fsS -m 5 "$BASE_URL$1")" || return 1

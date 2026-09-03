@@ -159,7 +159,7 @@ jobs:
       # also syncs the server's full dependency set — not just the pinned linter.
       # setup-uv's cache above is keyed on uv.lock, which is what keeps that from
       # being slow on every run.
-      - name: Static checks (tsc, eslint, uv lock --check, py_compile, ruff, api contract)
+      - name: Static checks (svelte-check, eslint, uv lock --check, py_compile, ruff, api contract)
         run: ./scripts/error_check.sh
 
   # --- Unit tests: the Python test suites, via their runner scripts -----------
@@ -323,7 +323,7 @@ jobs:
       # amd64 only, deliberately: that is what the clusters run. Local dev boxes
       # here are often arm64, but they build their own image (compose /
       # minikube), never pull this one. Adding arm64 would mean emulating `npm
-      # ci` + `vite build` + pip install through QEMU on every push, for an
+      # ci` + `npm run build` + pip install through QEMU on every push, for an
       # artifact nothing consumes.
       - name: Build and push
         uses: docker/build-push-action@v7

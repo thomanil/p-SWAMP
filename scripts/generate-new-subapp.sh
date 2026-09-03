@@ -49,7 +49,7 @@ def die(msg):
 #
 #   slug            grid-overview          URL, page folder, /api prefix
 #   pkg             grid_overview          Python package (must be an identifier)
-#   name            GridOverview           React component, hook, model class
+#   name            GridOverview           Svelte component, socket module, model class
 #   ws_path_const   GRID_OVERVIEW_WS_PATH  ws path const in lib/servers.ts
 #   api_path_const  GRID_OVERVIEW_API_PATH REST prefix const, same file
 #
@@ -75,11 +75,12 @@ if (
 
 # The label is free text a person types, and it lands in six places: a single-quoted
 # TS string (the nav entry), a double-quoted Python string (the AppEntry
-# description), two Python docstrings, a JSX text node and two JS comments. The two
-# code-string sites are escaped when written (py_str / ts_squote below). The four
-# prose sites a blind token substitution cannot escape, so reject the handful of
-# characters that would break *them* — angle brackets and braces (JSX), a backtick
-# or backslash, and the comment (`*/`) / docstring (`\"\"\"`) terminators — rather
+# description), two Python docstrings, a Svelte template text node and two JS
+# comments. The two code-string sites are escaped when written (py_str / ts_squote
+# below). The four prose sites a blind token substitution cannot escape, so reject
+# the handful of characters that would break *them* — angle brackets and braces
+# (Svelte markup), a backtick or backslash, and the comment (`*/`) / docstring
+# (`\"\"\"`) terminators — rather
 # than emit a subapp that will not compile. Everyday punctuation stays allowed:
 # "Operator's View" is a perfectly good label, and used to produce broken TypeScript.
 if (
@@ -105,7 +106,7 @@ def py_str(value):
 
 def ts_squote(value):
     """`value` as a single-quoted TS/JS string literal, matching the style already
-    in servers.ts and AppLayout.tsx. Validation rules a backslash out, but escape
+    in servers.ts and AppLayout.svelte. Validation rules a backslash out, but escape
     it too so this stays correct if that ever loosens."""
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
@@ -222,26 +223,31 @@ plan_edit(
     f"export const {api_path_const} = '/api/{slug}'\n",
 )
 
-app_tsx = WEB / "App.tsx"
+# App.svelte's imports and routes live inside `<script>` / <Router>, so they are
+# indented — the anchors allow leading whitespace, and the insertions match the
+# surrounding indent (two spaces for the script import, four for the route).
+app_svelte = WEB / "App.svelte"
 plan_edit(
-    app_tsx,
-    r"^import .*@/pages/.*\n",
-    f"import {{ {name}Page }} from '@/pages/{slug}/{name}Page'\n",
+    app_svelte,
+    r"^ *import .*@/pages/.*\n",
+    f"  import {name}Page from '@/pages/{slug}/{name}Page.svelte'\n",
 )
 # Above the catch-all route: below it, the new route would never match.
 plan_edit(
-    app_tsx,
+    app_svelte,
     r'^ *<Route path="\*".*\n',
-    f'          <Route path="{slug}" element={{<{name}Page />}} />\n',
+    f'    <Route path="{slug}"><{name}Page /></Route>\n',
     before=True,
 )
 
 # Written as a single-quoted TS string literal: an apostrophe in the label (the
 # classic "Operator's View") used to terminate this string and emit broken TS.
+# The NAV_ITEMS array sits inside AppLayout.svelte's `<script>`, so its closing
+# bracket is indented — the anchor allows leading whitespace.
 plan_edit(
-    WEB / "components" / "AppLayout.tsx",
-    r"^\]\n",
-    f"  {{ to: '/{slug}', label: {ts_squote(label)}, end: false }},\n",
+    WEB / "components" / "AppLayout.svelte",
+    r"^ *\]\n",
+    f"    {{ to: '/{slug}', label: {ts_squote(label)}, end: false }},\n",
     before=True,
 )
 

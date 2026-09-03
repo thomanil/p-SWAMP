@@ -1,0 +1,44 @@
+import type { Wire } from '@/api/wire'
+import { __API_PATH_CONST__, __WS_PATH_CONST__ } from '@/lib/servers'
+import { fireCommand, postCommand } from '@/lib/commands'
+import { useServerSocket } from '@/hooks/useServerSocket.svelte'
+
+/** What the server pushes, generated from the api contract — the model declared
+ *  in app/server-python/src/__PKG__/api.py, not a hand-copy of it.
+ *
+ *  Note the page reads these fields as the server names them, snake_case and
+ *  all. A socket module is welcome to *derive* something (see the grid monitor's
+ *  line-outage module, which parses branch names out of a channel label), but it
+ *  does not rename: a mapping layer has to be extended by hand for every new
+ *  field, and a `$derived` that forgets one is perfectly valid TypeScript — so
+ *  the field silently never reaches the screen, which is the very failure the
+ *  generated contract exists to prevent. */
+export type __NAME__State = Wire['__NAME__State']
+
+/**
+ * The __LABEL__ app: state arrives on the socket, commands go up as POSTs to
+ * /api/__SLUG__.
+ *
+ * Call it from a component's `<script>`; the returned getters are reactive, so a
+ * template reading `state`/`status`/`connected` updates as the socket ticks.
+ */
+export function use__NAME__Socket() {
+  const sock = useServerSocket<__NAME__State>(__WS_PATH_CONST__)
+
+  const bump = () => fireCommand('__SLUG__', postCommand(`${__API_PATH_CONST__}/count/bump`))
+  const reset = () => fireCommand('__SLUG__', postCommand(`${__API_PATH_CONST__}/count/reset`))
+
+  return {
+    get state() {
+      return sock.message
+    },
+    get status() {
+      return sock.status
+    },
+    get connected() {
+      return sock.connected
+    },
+    bump,
+    reset,
+  }
+}

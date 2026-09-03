@@ -1,0 +1,75 @@
+<script lang="ts">
+  import { WifiOffIcon } from '@lucide/svelte'
+
+  // This page's own pieces, imported relatively so the folder stays self-contained.
+  import { use__NAME__Socket } from './use__NAME__Socket.svelte'
+  import { Alert, AlertTitle } from '@/components/ui/alert'
+  import { Badge } from '@/components/ui/badge'
+  import { Button } from '@/components/ui/button'
+  import {
+    Card,
+    CardAction,
+    CardContent,
+    CardFooter,
+    CardHeader,
+    CardTitle,
+  } from '@/components/ui/card'
+
+  /**
+   * The __LABEL__ page (route `/__SLUG__`) — a thin renderer over
+   * use__NAME__Socket: the buttons POST commands, the server owns the count and
+   * pushes it back down the socket, and this component only renders what it is
+   * handed.
+   */
+  const sock = use__NAME__Socket()
+  const state = $derived(sock.state)
+  const status = $derived(sock.status)
+  const connected = $derived(sock.connected)
+</script>
+
+<Card class="w-full max-w-xl gap-0">
+  <CardHeader class="border-b">
+    <CardTitle class="text-lg">__LABEL__</CardTitle>
+    <span class="text-gray-500">
+      A new subapp. The count below lives on the server, one per connected client.
+    </span>
+    <CardAction class="self-center">
+      {#if connected}
+        <Badge variant="default">Online</Badge>
+      {:else}
+        <Badge variant="outline" class="text-muted-foreground">
+          <WifiOffIcon class="size-3" />
+          Offline
+        </Badge>
+      {/if}
+    </CardAction>
+  </CardHeader>
+
+  <CardContent class="px-6 py-0">
+    <!-- The server-owned state, or the status banner in its place. -->
+    <div class="flex min-h-[152px] items-center justify-center">
+      {#if connected && state}
+        <span class="text-6xl font-bold tabular-nums">{state.count}</span>
+      {:else}
+        <Alert
+          variant={status.kind === 'offline' && status.isError ? 'destructive' : 'default'}
+          class="w-auto"
+        >
+          <AlertTitle>
+            {status.kind === 'online' ? 'Waiting for state…' : status.label}
+          </AlertTitle>
+        </Alert>
+      {/if}
+    </div>
+  </CardContent>
+
+  <CardFooter class="flex-col gap-4 border-t pt-6">
+    <!-- Disabled until connected. The commands are POSTs and would in fact
+         reach the server without a socket — but the result comes back *on*
+         the socket, so a click with none open would appear to do nothing. -->
+    <div class="flex items-center justify-center gap-2">
+      <Button disabled={!connected} onclick={sock.bump}>Bump</Button>
+      <Button variant="outline" disabled={!connected} onclick={sock.reset}>Reset</Button>
+    </div>
+  </CardFooter>
+</Card>

@@ -1,11 +1,11 @@
 import path from 'node:path'
 import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import { svelte } from '@sveltejs/vite-plugin-svelte'
 import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [svelte(), tailwindcss()],
   // Emit *relative* asset urls ("./assets/index-a1b2c3.js") in index.html rather
   // than absolute ones rooted at "/". That is what lets one build run both at the
   // origin root (dev, docker, minikube) and under the remote reverse proxy's
@@ -15,7 +15,7 @@ export default defineConfig({
   // that file for the invariants (notably: routes stay one segment deep).
   base: './',
   resolve: {
-    // `@/…` → src/…, the import alias shadcn/ui components expect.
+    // `@/…` → src/…, the import alias the ui components and pages expect.
     alias: { '@': path.resolve(__dirname, './src') },
   },
   // Dev server only. In the shipped build the server serves these assets and the
