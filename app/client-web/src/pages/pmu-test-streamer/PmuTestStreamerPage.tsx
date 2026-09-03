@@ -15,6 +15,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
+import type { Wire } from '@/api/wire'
 
 const BROKERS: { id: Broker; label: string }[] = [
   { id: 'kafka', label: 'Kafka' },
@@ -107,17 +108,22 @@ export function PmuTestStreamerPage() {
           </div>
         )}
 
-        {/* Live comparison numbers for the active pipe. */}
+        {/* Live comparison numbers for the active pipe. Latency and throughput
+            each show the current reading plus min/avg/max since the last switch,
+            so jitter and drift are visible rather than just the instantaneous
+            value. */}
         <div className="grid grid-cols-3 gap-2">
-          <Metric
+          <StatTile
             label="Latency"
-            value={state ? state.metrics.latency_ms.toFixed(1) : '—'}
+            stats={state?.metrics.latency_ms}
             unit="ms"
+            digits={1}
           />
-          <Metric
+          <StatTile
             label="Throughput"
-            value={state ? state.metrics.throughput_hz.toFixed(0) : '—'}
+            stats={state?.metrics.throughput_hz}
             unit="rec/s"
+            digits={0}
           />
           <Metric
             label="Received"
@@ -162,6 +168,43 @@ function Metric({ label, value, unit }: { label: string; value: string; unit: st
       <div className="text-lg tabular-nums">
         {value}
         {unit && <span className="ml-1 text-xs text-muted-foreground">{unit}</span>}
+      </div>
+    </div>
+  )
+}
+
+/** A stat tile that shows the current reading big, plus a min/avg/max sub-line —
+ *  for latency and throughput, where the spread over time is the interesting part
+ *  of the Kafka-vs-NATS comparison, not just the instant value. */
+function StatTile({
+  label,
+  stats,
+  unit,
+  digits,
+}: {
+  label: string
+  stats: Wire['MetricStats'] | undefined
+  unit: string
+  digits: number
+}) {
+  const fmt = (n: number) => n.toFixed(digits)
+  return (
+    <div className={cn('rounded-md border px-3 py-2 text-center')}>
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="text-lg tabular-nums">
+        {stats ? fmt(stats.current) : '—'}
+        {unit && <span className="ml-1 text-xs text-muted-foreground">{unit}</span>}
+      </div>
+      <div className="mt-1 flex justify-center gap-2 text-[10px] tabular-nums text-muted-foreground">
+        {stats ? (
+          <>
+            <span>min {fmt(stats.min)}</span>
+            <span>avg {fmt(stats.mean)}</span>
+            <span>max {fmt(stats.max)}</span>
+          </>
+        ) : (
+          <span>&nbsp;</span>
+        )}
       </div>
     </div>
   )

@@ -208,9 +208,8 @@
         "description": "Live comparison numbers for the active pipe.",
         "properties": {
           "latency_ms": {
-            "description": "Smoothed end-to-end latency, ms.",
-            "title": "Latency Ms",
-            "type": "number"
+            "$ref": "#/components/schemas/MetricStats",
+            "description": "End-to-end latency, ms."
           },
           "received": {
             "description": "Records seen since the last broker switch.",
@@ -218,9 +217,8 @@
             "type": "integer"
           },
           "throughput_hz": {
-            "description": "Records/s over the trailing second.",
-            "title": "Throughput Hz",
-            "type": "number"
+            "$ref": "#/components/schemas/MetricStats",
+            "description": "Throughput, records/s."
           }
         },
         "required": [
@@ -752,6 +750,39 @@
         "title": "LineOutageLog",
         "type": "object"
       },
+      "MetricStats": {
+        "description": "One metric summarised four ways over the current pipe: the live reading plus\nthe min, max and mean since the last broker switch.",
+        "properties": {
+          "current": {
+            "description": "Live reading (latest smoothed / trailing-second value).",
+            "title": "Current",
+            "type": "number"
+          },
+          "max": {
+            "description": "Largest value seen since the last broker switch.",
+            "title": "Max",
+            "type": "number"
+          },
+          "mean": {
+            "description": "Mean value since the last broker switch.",
+            "title": "Mean",
+            "type": "number"
+          },
+          "min": {
+            "description": "Smallest value seen since the last broker switch.",
+            "title": "Min",
+            "type": "number"
+          }
+        },
+        "required": [
+          "current",
+          "min",
+          "max",
+          "mean"
+        ],
+        "title": "MetricStats",
+        "type": "object"
+      },
       "Phasor": {
         "properties": {
           "ang": {
@@ -1175,7 +1206,7 @@
   "info": {
     "description": "The api between the p-SWAMP web client and its state server.\n\n**Two directions, two transports.** Anything a user triggers goes up as an HTTP\n`POST` under `/api/<app>/`; everything the server has to say comes down a\nWebSocket at `/api/<app>/ws`, which is downstream only. A command's reply is a\nsmall `CommandAck`, never state, so state has exactly one path and there is no\nordering to reconcile between two of them.\n\n**The operations below are therefore only half the api.** The socket half is\ndescribed by the `x-websocket-channels` extension at the root of this document,\nwhose message schemas are ordinary `components.schemas` entries \u2014 so a code\ngenerator picks them up like any other model even though OpenAPI itself has no\nnotion of a socket.\n\n**The first path segment after `/api/` is the routing key.** The server itself\nholds no domain logic: it mounts one self-contained backend package under each\n`/api/<app>` prefix, so `/api/pmu-test-streamer/...` is served by\n`src/pmu_test_streamer/`, `/api/time-window/...` by\n`src/pswamp_web/time_window/`, and so on for every tag listed below \u2014 the paths\na package declares are relative to its own prefix.\n`/healthz` sits outside `/api` because it is the process's health rather than any\none app's, and everything else is the built web client, served from the same\norigin with unknown paths falling back to its `index.html` so deep links work.\n\n**Every request carries `?client_id=`**, a numeric string the browser resolves\nonce per profile and persists. It is the sharding key for all server state and\nall of a browser's sockets must send the same one. It is *not* authentication and\ndoes not pretend to be: supply someone else's id and you drive their session.\n\n**The web client's types are generated from the API contract.**\n`openapi-typescript` compiles it into `app/client-web/src/api/schema.ts`, which is\ncommitted in git, and a page hook takes its downstream type from there rather\nthan hand-copying the Python model's fields \u2014 `Wire['ReferenceSubappState']` for\n`/api/reference-subapp/ws`. Field names stay as the server sends them, snake_case\nand all, all the way to the frontend components.\n\nThis document is generated from the server and committed at `doc/api/openapi.json`;\n`scripts/error_check.sh` fails if the two disagree. See\n`doc/the-client-server-api.md` for more detail.\n",
     "title": "p-SWAMP api",
-    "version": "2.0.0"
+    "version": "3.0.0"
   },
   "openapi": "3.1.0",
   "paths": {

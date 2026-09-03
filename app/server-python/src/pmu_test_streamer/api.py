@@ -103,11 +103,21 @@ class PmuRecord(BaseModel):
     text: str = Field(description="The raw PMU record, verbatim from the sample.")
 
 
+class MetricStats(BaseModel):
+    """One metric summarised four ways over the current pipe: the live reading plus
+    the min, max and mean since the last broker switch."""
+
+    current: float = Field(description="Live reading (latest smoothed / trailing-second value).")
+    min: float = Field(description="Smallest value seen since the last broker switch.")
+    max: float = Field(description="Largest value seen since the last broker switch.")
+    mean: float = Field(description="Mean value since the last broker switch.")
+
+
 class BrokerMetrics(BaseModel):
     """Live comparison numbers for the active pipe."""
 
-    latency_ms: float = Field(description="Smoothed end-to-end latency, ms.")
-    throughput_hz: float = Field(description="Records/s over the trailing second.")
+    latency_ms: MetricStats = Field(description="End-to-end latency, ms.")
+    throughput_hz: MetricStats = Field(description="Throughput, records/s.")
     received: int = Field(description="Records seen since the last broker switch.")
 
 
@@ -131,6 +141,16 @@ class PmuStreamState(BaseModel):
     )
 
 
+def _stats_wire(stats, digits: int) -> MetricStats:
+    """A domain `Stats` rounded onto the wire model at a fixed precision."""
+    return MetricStats(
+        current=round(stats.current, digits),
+        min=round(stats.min, digits),
+        max=round(stats.max, digits),
+        mean=round(stats.mean, digits),
+    )
+
+
 def state_message(model: StreamModel) -> PmuStreamState:
     """Build the downstream message from a client's model."""
     return PmuStreamState(
@@ -138,8 +158,8 @@ def state_message(model: StreamModel) -> PmuStreamState:
         playing=model.playing,
         window=[PmuRecord(seq=r.seq, text=r.text) for r in model.window],
         metrics=BrokerMetrics(
-            latency_ms=round(model.metrics.latency_ms, 1),
-            throughput_hz=round(model.metrics.throughput_hz(time.monotonic()), 1),
+            latency_ms=_stats_wire(model.metrics.latency_stats(), 1),
+            throughput_hz=_stats_wire(model.metrics.throughput_stats(time.monotonic()), 1),
             received=model.metrics.received,
         ),
         error=model.error,

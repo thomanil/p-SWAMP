@@ -380,21 +380,15 @@ export interface components {
          * @description Live comparison numbers for the active pipe.
          */
         BrokerMetrics: {
-            /**
-             * Latency Ms
-             * @description Smoothed end-to-end latency, ms.
-             */
-            latency_ms: number;
+            /** @description End-to-end latency, ms. */
+            latency_ms: components["schemas"]["MetricStats"];
             /**
              * Received
              * @description Records seen since the last broker switch.
              */
             received: number;
-            /**
-             * Throughput Hz
-             * @description Records/s over the trailing second.
-             */
-            throughput_hz: number;
+            /** @description Throughput, records/s. */
+            throughput_hz: components["schemas"]["MetricStats"];
         };
         /**
          * BrokerSelection
@@ -657,6 +651,33 @@ export interface components {
              * @default null
              */
             window_length: number | null;
+        };
+        /**
+         * MetricStats
+         * @description One metric summarised four ways over the current pipe: the live reading plus
+         *     the min, max and mean since the last broker switch.
+         */
+        MetricStats: {
+            /**
+             * Current
+             * @description Live reading (latest smoothed / trailing-second value).
+             */
+            current: number;
+            /**
+             * Max
+             * @description Largest value seen since the last broker switch.
+             */
+            max: number;
+            /**
+             * Mean
+             * @description Mean value since the last broker switch.
+             */
+            mean: number;
+            /**
+             * Min
+             * @description Smallest value seen since the last broker switch.
+             */
+            min: number;
         };
         /** Phasor */
         Phasor: {

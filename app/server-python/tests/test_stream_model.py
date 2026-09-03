@@ -57,6 +57,64 @@ def test_throughput_counts_trailing_second_and_decays():
     assert m.throughput_hz(now_mono=5.0) == 0.0
 
 
+def test_latency_stats_track_min_max_mean():
+    m = StreamMetrics()
+    for lat in (10.0, 30.0, 20.0):
+        m.record(latency_ms=lat, now_mono=0.0)
+    stats = m.latency_stats()
+    assert stats.min == 10.0
+    assert stats.max == 30.0
+    assert stats.mean == 20.0  # (10 + 30 + 20) / 3
+    # `current` is the smoothed EMA, not the last raw sample.
+    assert stats.current == m.latency_ms
+
+
+def test_latency_stats_are_zero_before_any_record():
+    stats = StreamMetrics().latency_stats()
+    assert (stats.current, stats.min, stats.max, stats.mean) == (0.0, 0.0, 0.0, 0.0)
+
+
+def test_throughput_stats_aggregate_over_whole_seconds():
+    m = StreamMetrics()
+    # First second: 3 records (t = 0.0, 0.1, 0.2). Second second: 5 records
+    # (t = 1.0 .. 1.4). The bucket for the first second closes when the record at
+    # t = 1.0 arrives, contributing a 3 rec/s sample.
+    for t in (0.0, 0.1, 0.2):
+        m.record(latency_ms=1.0, now_mono=t)
+    for i in range(5):
+        m.record(latency_ms=1.0, now_mono=1.0 + i * 0.1)
+    # One whole second has completed so far, at 3 rec/s.
+    stats = m.throughput_stats(now_mono=1.4)
+    assert stats.min == 3.0
+    assert stats.max == 3.0
+    assert stats.mean == 3.0
+    assert stats.current == 5.0  # trailing second holds the 5 recent records
+
+
+def test_throughput_stats_fall_back_to_current_before_first_full_second():
+    m = StreamMetrics()
+    for i in range(4):
+        m.record(latency_ms=1.0, now_mono=i * 0.1)  # all within the first second
+    stats = m.throughput_stats(now_mono=0.3)
+    # No whole second has elapsed yet, so every aggregate mirrors the current rate.
+    assert stats.current == stats.min == stats.max == stats.mean == 4.0
+
+
+def test_throughput_stats_ignore_pause_gaps():
+    m = StreamMetrics()
+    # A full second at 3 rec/s, then a long pause, then activity resumes. The gap
+    # is a discontinuity, so it must not inject near-zero-second samples that would
+    # drag min and mean below the real rate.
+    for t in (0.0, 0.1, 0.2):
+        m.record(latency_ms=1.0, now_mono=t)
+    m.record(latency_ms=1.0, now_mono=1.0)  # closes the first second (3 rec/s)
+    for i in range(3):
+        m.record(latency_ms=1.0, now_mono=60.0 + i * 0.1)  # resume after a 60s pause
+    stats = m.throughput_stats(now_mono=60.2)
+    assert stats.min == 3.0
+    assert stats.max == 3.0
+
+
 def test_switch_resets_metrics_and_window():
     model = StreamModel(broker="kafka")
     model.ingest(Envelope(seq=1, produced_at_ms=0, text="a"), now_ms=5, now_mono=0.0)

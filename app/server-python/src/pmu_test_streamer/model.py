@@ -15,6 +15,7 @@ make the two brokers comparable.
 but nothing here loads it any more.
 """
 
+import math
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -50,8 +51,27 @@ class Record:
     text: str
 
 
+@dataclass(frozen=True)
+class Stats:
+    """A metric summarised four ways: its current value plus the min, max and mean
+    seen since the last broker switch. `current` is the live reading the readout
+    always had; the other three are what make jitter and drift visible over time."""
+
+    current: float
+    min: float
+    max: float
+    mean: float
+
+
 class StreamMetrics:
     """Rolling end-to-end latency and throughput for the active broker.
+
+    Both are exposed as a `Stats` (current / min / max / mean). Latency samples are
+    natural — one per record — so its aggregates come straight off each arrival.
+    Throughput has no per-record sample (it is a rate), so its aggregates are taken
+    over *completed one-second buckets*: each finished second contributes one
+    records/s reading to the min/max/mean, while `current` stays the trailing-second
+    count the page always showed.
 
     Reset on a broker switch so the readout reflects the pipe now selected rather
     than a blend of both.
@@ -59,24 +79,68 @@ class StreamMetrics:
 
     def __init__(self) -> None:
         self.received = 0
-        self.latency_ms = 0.0  # EMA of now - produced_at
-        self._stamps: deque[float] = deque()  # monotonic receive times, trailing 1s
+        # --- latency, sampled once per arriving record --------------------
+        self.latency_ms = 0.0  # EMA of now - produced_at; the "current" reading
+        self._lat_min = math.inf
+        self._lat_max = 0.0
+        self._lat_sum = 0.0  # running sum for the mean
+        # --- throughput, current: receive times over the trailing second --
+        self._stamps: deque[float] = deque()
+        # --- throughput, aggregates: one records/s sample per whole second -
+        self._last_mono: float | None = None
+        self._bucket_start: float | None = None
+        self._bucket_count = 0
+        self._tput_min = math.inf
+        self._tput_max = 0.0
+        self._tput_sum = 0.0  # running sum of completed-second rates
+        self._tput_n = 0  # number of completed-second samples
 
     def record(self, latency_ms: float, now_mono: float) -> None:
         self.received += 1
+        # Latency: current (EMA) plus min/max/mean over every sample.
         self.latency_ms = (
             latency_ms
             if self.received == 1
             else _LATENCY_EMA_ALPHA * latency_ms
             + (1 - _LATENCY_EMA_ALPHA) * self.latency_ms
         )
+        self._lat_min = min(self._lat_min, latency_ms)
+        self._lat_max = max(self._lat_max, latency_ms)
+        self._lat_sum += latency_ms
+        # Throughput current: trailing-second count.
         self._stamps.append(now_mono)
         self._prune(now_mono)
+        # Throughput aggregates: fold completed one-second buckets.
+        self._advance_buckets(now_mono)
+        self._bucket_count += 1
+        self._last_mono = now_mono
 
     def _prune(self, now_mono: float) -> None:
         cutoff = now_mono - _THROUGHPUT_WINDOW_S
         while self._stamps and self._stamps[0] < cutoff:
             self._stamps.popleft()
+
+    def _advance_buckets(self, now_mono: float) -> None:
+        """Close out any whole seconds that have elapsed, each as one records/s
+        sample. A gap longer than the window (a pause, or a stalled pipe) is a
+        discontinuity, not a run of empty seconds, so the partial bucket is dropped
+        rather than folded — otherwise resuming would inject spurious near-zero
+        samples that drag min and mean down."""
+        if self._bucket_start is None:
+            self._bucket_start = now_mono
+            return
+        if self._last_mono is not None and now_mono - self._last_mono > _THROUGHPUT_WINDOW_S:
+            self._bucket_start = now_mono
+            self._bucket_count = 0
+            return
+        while now_mono - self._bucket_start >= _THROUGHPUT_WINDOW_S:
+            rate = self._bucket_count / _THROUGHPUT_WINDOW_S
+            self._tput_min = min(self._tput_min, rate)
+            self._tput_max = max(self._tput_max, rate)
+            self._tput_sum += rate
+            self._tput_n += 1
+            self._bucket_start += _THROUGHPUT_WINDOW_S
+            self._bucket_count = 0
 
     def throughput_hz(self, now_mono: float | None = None) -> float:
         """Records/s over the trailing second. Pass the current time so an idle or
@@ -85,10 +149,46 @@ class StreamMetrics:
             self._prune(now_mono)
         return len(self._stamps) / _THROUGHPUT_WINDOW_S
 
+    def latency_stats(self) -> Stats:
+        """Current / min / max / mean end-to-end latency, ms."""
+        if self.received == 0:
+            return Stats(0.0, 0.0, 0.0, 0.0)
+        return Stats(
+            current=self.latency_ms,
+            min=self._lat_min,
+            max=self._lat_max,
+            mean=self._lat_sum / self.received,
+        )
+
+    def throughput_stats(self, now_mono: float | None = None) -> Stats:
+        """Current / min / max / mean throughput, records/s. `current` is the
+        trailing-second count; the aggregates are over completed one-second
+        buckets, and fall back to `current` until the first whole second has
+        elapsed."""
+        current = self.throughput_hz(now_mono)
+        if self._tput_n == 0:
+            return Stats(current, current, current, current)
+        return Stats(
+            current=current,
+            min=self._tput_min,
+            max=self._tput_max,
+            mean=self._tput_sum / self._tput_n,
+        )
+
     def reset(self) -> None:
         self.received = 0
         self.latency_ms = 0.0
+        self._lat_min = math.inf
+        self._lat_max = 0.0
+        self._lat_sum = 0.0
         self._stamps.clear()
+        self._last_mono = None
+        self._bucket_start = None
+        self._bucket_count = 0
+        self._tput_min = math.inf
+        self._tput_max = 0.0
+        self._tput_sum = 0.0
+        self._tput_n = 0
 
 
 class StreamModel:

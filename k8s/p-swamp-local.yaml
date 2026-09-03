@@ -281,6 +281,16 @@ spec:
   # Headless so the advertised name "kafka:9092" resolves to the pod directly —
   # a single-broker KRaft node advertises its own hostname to clients.
   clusterIP: None
+  # A single-node KRaft broker must resolve its OWN advertised/quorum hostname
+  # ("kafka") at startup to bootstrap the controller quorum — but it can't pass
+  # its readiness probe until 9092 is listening, which doesn't happen until the
+  # quorum forms. By default a headless Service publishes DNS only for READY
+  # endpoints, so "kafka" is NXDOMAIN during boot → the node dies with
+  # UnknownHostException: kafka and crash-loops forever. Publishing not-ready
+  # addresses breaks that deadlock: the pod's DNS record exists from the start.
+  # (Docker Compose has no equivalent gate — its embedded DNS resolves a service
+  # name to the container immediately — which is why this only bites in minikube.)
+  publishNotReadyAddresses: true
   selector:
     app: kafka
   ports:
