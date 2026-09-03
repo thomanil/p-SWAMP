@@ -1,0 +1,24 @@
+{
+  "name": "p-SWAMP",
+  "image": "mcr.microsoft.com/devcontainers/base:bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" },
+    "ghcr.io/devcontainers/features/python:1": { "version": "3.11" }
+  },
+  // installs the 4th tool that error_check.sh preflights (node/npx/python3 come from features)
+  "postCreateCommand": "curl -LsSf https://astral.sh/uv/install.sh | sh",
+  "forwardPorts": [5173, 8000],
+  "portsAttributes": {
+    "5173": { "label": "Web client (Vite)", "onAutoForward": "notify" },
+    "8000": { "label": "API server", "onAutoForward": "notify" }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "dbaeumer.vscode-eslint"
+      ]
+    }
+  }
+}

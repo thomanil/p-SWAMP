@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Run the static error checks before every push, so broken code doesn't reach
+# main. CI runs the same script after the push, but this hook is the fast gate:
+# it fails in seconds on your machine instead of minutes into a pipeline.
+#
+# Activate once per clone:  git config core.hooksPath .githooks
+# Bypass for a single push: git push --no-verify
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+exec ./scripts/error_check.sh
