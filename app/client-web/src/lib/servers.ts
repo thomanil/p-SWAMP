@@ -25,6 +25,7 @@ import { BASE_PATH } from '@/lib/basePath'
 // paths are the client-side half of that contract — one const per app, rather
 // than a literal repeated across the hooks that connect.
 export const PMU_STREAM_WS_PATH = '/api/pmu-test-streamer/ws'
+export const PMU_REPORT_WS_PATH = '/api/pmu-report/ws'
 export const APP_STATUS_WS_PATH = '/api/app-status/ws'
 export const TIME_WINDOW_WS_PATH = '/api/time-window/ws'
 export const ISLANDING_WS_PATH = '/api/islanding/ws'
@@ -36,6 +37,7 @@ export const REFERENCE_SUBAPP_WS_PATH = '/api/reference-subapp/ws'
 // mount prefix in APPS (app/server-python/src/server.py); an endpoint path is
 // appended by the caller, e.g. `${PMU_STREAM_API_PATH}/playback/play`.
 export const PMU_STREAM_API_PATH = '/api/pmu-test-streamer'
+export const PMU_REPORT_API_PATH = '/api/pmu-report'
 export const TIME_WINDOW_API_PATH = '/api/time-window'
 export const ISLANDING_API_PATH = '/api/islanding'
 export const REFERENCE_SUBAPP_API_PATH = '/api/reference-subapp'

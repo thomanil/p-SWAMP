@@ -608,6 +608,57 @@
         "title": "IslandingState",
         "type": "object"
       },
+      "JobAck": {
+        "description": "Acknowledgement of a batch command. Never carries the result.",
+        "properties": {
+          "applied": {
+            "description": "Which operation was started.",
+            "title": "Applied",
+            "type": "string"
+          },
+          "job_id": {
+            "description": "Server-side id of the running job.",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Correlation id the resulting Report will carry: the caller's own if it supplied one, otherwise the job_id.",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "applied",
+          "job_id",
+          "request_id"
+        ],
+        "title": "JobAck",
+        "type": "object"
+      },
+      "JobError": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "message"
+        ],
+        "title": "JobError",
+        "type": "object"
+      },
       "LineOutageEvent": {
         "description": "One branch changing connection state, as the detector reports it.\n\n``stations`` and ``measurements`` come straight from the time window's\nheader for the channels that flipped, so a single physical line trip\nnormally appears with the station at each end -- the current on that branch\ngoes to zero as seen from both.",
         "properties": {
@@ -704,6 +755,25 @@
           "events"
         ],
         "title": "LineOutageLog",
+        "type": "object"
+      },
+      "ModuleRef": {
+        "description": "Which module produced a result.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "uuid": {
+            "title": "Uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "uuid"
+        ],
+        "title": "ModuleRef",
         "type": "object"
       },
       "Phasor": {
@@ -812,25 +882,46 @@
         "title": "PhasorSnapshot",
         "type": "object"
       },
-      "PmuRecord": {
-        "description": "One record in the visible window: a 1-based line number and its text.",
+      "PmuReportState": {
+        "description": "Everything the report page shows: results, what is still running, failures.",
         "properties": {
-          "line_number": {
-            "description": "1-based, matching how `wc -l` counts.",
-            "title": "Line Number",
-            "type": "integer"
+          "errors": {
+            "description": "Jobs that failed, newest last.",
+            "items": {
+              "$ref": "#/components/schemas/JobError"
+            },
+            "title": "Errors",
+            "type": "array"
           },
-          "text": {
-            "description": "The raw record, verbatim from sample_data.txt.",
-            "title": "Text",
+          "pending": {
+            "description": "Request ids of jobs still running.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Pending",
+            "type": "array"
+          },
+          "reports": {
+            "description": "Newest first, at most MAX_REPORTS.",
+            "items": {
+              "$ref": "#/components/schemas/VoltageReport"
+            },
+            "title": "Reports",
+            "type": "array"
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
             "type": "string"
           }
         },
         "required": [
-          "line_number",
-          "text"
+          "reports",
+          "pending",
+          "errors"
         ],
-        "title": "PmuRecord",
+        "title": "PmuReportState",
         "type": "object"
       },
       "PmuSite": {
@@ -857,21 +948,80 @@
         "type": "object"
       },
       "PmuStreamState": {
-        "description": "The single message shape pushed to a client on connect and every change.\n\nA declared model rather than a loose dict, because this IS the downstream half\nof the published contract: api_contract.py collects it via this package's\nWS_MESSAGE export, and a bare dict would silently drop the app out of it.\n\n`total_lines` lets the client show \"record N of M\" \u2014 which is also how the\nwrap-around at the end of the file becomes visible in the UI.",
+        "description": "The single message shape pushed to a client on connect and every change.\n\nA sample message carries the row that just played; a control message (after\nplay/stop/speed) carries none, and the page keeps showing the last one. The\nheader rides on the opening message only.",
         "properties": {
+          "duration_s": {
+            "description": "Length of one pass of the source, in seconds.",
+            "title": "Duration S",
+            "type": "number"
+          },
+          "header": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StreamHeader"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Channel table; sent on the opening message only."
+          },
           "index": {
-            "description": "0-based cursor into the sample file.",
+            "description": "0-based sample ordinal within the current pass.",
             "title": "Index",
             "type": "integer"
           },
+          "mode": {
+            "description": "What the source can do; transport controls only make sense for replay.",
+            "enum": [
+              "live",
+              "replay"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "passes": {
+            "description": "How many times this client's replay has looped.",
+            "title": "Passes",
+            "type": "integer"
+          },
           "playing": {
-            "description": "Whether the server is advancing this client.",
             "title": "Playing",
             "type": "boolean"
           },
-          "total_lines": {
-            "description": "How many records the sample file holds.",
-            "title": "Total Lines",
+          "position_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Seconds into the source; null before the first sample.",
+            "title": "Position S"
+          },
+          "sample": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Sample"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The row that just played; null on a control-only update."
+          },
+          "speed": {
+            "description": "Replay speed factor; 1.0 is as recorded.",
+            "title": "Speed",
+            "type": "number"
+          },
+          "total": {
+            "description": "How many samples one pass of the source holds.",
+            "title": "Total",
             "type": "integer"
           },
           "type": {
@@ -879,28 +1029,17 @@
             "default": "state",
             "title": "Type",
             "type": "string"
-          },
-          "window": {
-            "description": "Records around the cursor; null where it runs off an end.",
-            "items": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/PmuRecord"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "title": "Window",
-            "type": "array"
           }
         },
         "required": [
-          "window",
+          "mode",
           "index",
-          "total_lines",
-          "playing"
+          "total",
+          "position_s",
+          "duration_s",
+          "playing",
+          "speed",
+          "passes"
         ],
         "title": "PmuStreamState",
         "type": "object"
@@ -973,6 +1112,301 @@
           "duration"
         ],
         "title": "ReplayStatus",
+        "type": "object"
+      },
+      "RunMeanVoltage": {
+        "description": "Which part of the source to report over. Both bounds unset = all of it.",
+        "properties": {
+          "end_s": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Seconds into the source, exclusive.",
+            "title": "End S"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Caller's correlation id; the report carries it back. Defaults to the job id.",
+            "title": "Request Id"
+          },
+          "start_s": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Seconds into the source, inclusive.",
+            "title": "Start S"
+          }
+        },
+        "title": "RunMeanVoltage",
+        "type": "object"
+      },
+      "Sample": {
+        "description": "One instant across every channel of a stream, in header order.",
+        "properties": {
+          "mRID": {
+            "description": "The StreamHeader.stream_id this row belongs to.",
+            "title": "Mrid",
+            "type": "string"
+          },
+          "namespace": {
+            "default": "live",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "quality": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "C37.118 STAT word, if any.",
+            "title": "Quality"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Timestamp"
+          },
+          "values": {
+            "description": "One per header channel; null = missing.",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Values",
+            "type": "array"
+          },
+          "version": {
+            "const": "v1",
+            "default": "v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mRID",
+          "values"
+        ],
+        "title": "Sample",
+        "type": "object"
+      },
+      "Seek": {
+        "properties": {
+          "position_s": {
+            "description": "Seconds into the source to continue from.",
+            "minimum": 0.0,
+            "title": "Position S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "position_s"
+        ],
+        "title": "Seek",
+        "type": "object"
+      },
+      "SetSpeed": {
+        "properties": {
+          "speed": {
+            "description": "Replay speed factor.",
+            "maximum": 100.0,
+            "minimum": 0.1,
+            "title": "Speed",
+            "type": "number"
+          }
+        },
+        "required": [
+          "speed"
+        ],
+        "title": "SetSpeed",
+        "type": "object"
+      },
+      "StationVoltage": {
+        "properties": {
+          "mean_voltage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Volts; null when the station had no values.",
+            "title": "Mean Voltage"
+          },
+          "station": {
+            "title": "Station",
+            "type": "string"
+          }
+        },
+        "required": [
+          "station",
+          "mean_voltage"
+        ],
+        "title": "StationVoltage",
+        "type": "object"
+      },
+      "StreamChannel": {
+        "description": "One column of a stream \u2014 p-SWAMP's three header rows plus a unit.\n\n``mRID`` is the CIM equipment id when a deployment has one; it is the hook\nthe grid-model track (STEP2 \u00a76.9) attaches to, and ``None`` everywhere else.",
+        "properties": {
+          "channel": {
+            "description": "Display channel, e.g. \"V_Magnitude\".",
+            "title": "Channel",
+            "type": "string"
+          },
+          "mRID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mrid"
+          },
+          "measurement": {
+            "description": "Quantity key, e.g. \"v_Magnitude\" or \"f\".",
+            "title": "Measurement",
+            "type": "string"
+          },
+          "station": {
+            "description": "PMU / bus name, e.g. \"3000\".",
+            "title": "Station",
+            "type": "string"
+          },
+          "unit": {
+            "enum": [
+              "V",
+              "A",
+              "Hz",
+              "Hz/s",
+              "rad",
+              ""
+            ],
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "station",
+          "channel",
+          "measurement",
+          "unit"
+        ],
+        "title": "StreamChannel",
+        "type": "object"
+      },
+      "StreamHeader": {
+        "description": "What a stream carries: sent once, referenced by every sample's ``mRID``.",
+        "properties": {
+          "channels": {
+            "description": "Column order of Sample.values.",
+            "items": {
+              "$ref": "#/components/schemas/StreamChannel"
+            },
+            "title": "Channels",
+            "type": "array"
+          },
+          "data_rate": {
+            "description": "Samples per second.",
+            "title": "Data Rate",
+            "type": "number"
+          },
+          "mRID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mrid"
+          },
+          "namespace": {
+            "default": "live",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "source": {
+            "default": "",
+            "description": "Provenance: a file, a PDC id.",
+            "title": "Source",
+            "type": "string"
+          },
+          "stream_id": {
+            "description": "What Sample.mRID refers to.",
+            "title": "Stream Id",
+            "type": "string"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Timestamp"
+          },
+          "version": {
+            "const": "v1",
+            "default": "v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream_id",
+          "data_rate",
+          "channels"
+        ],
+        "title": "StreamHeader",
         "type": "object"
       },
       "TimeWindowSlice": {
@@ -1114,6 +1548,149 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "VoltageReport": {
+        "description": "Mean voltage magnitude over ``n_samples`` rows of one stream, in volts.",
+        "properties": {
+          "mRID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mrid"
+          },
+          "mean_voltage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Volts, across every voltage channel; null if none.",
+            "title": "Mean Voltage"
+          },
+          "module": {
+            "$ref": "#/components/schemas/ModuleRef"
+          },
+          "n_samples": {
+            "description": "How many source rows the report is over.",
+            "title": "N Samples",
+            "type": "integer"
+          },
+          "namespace": {
+            "default": "live",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "parameters": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Parameters",
+            "type": "object"
+          },
+          "range_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Range End"
+          },
+          "range_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Range Start"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Set when this result answers a specific command (a job).",
+            "title": "Request Id"
+          },
+          "stations": {
+            "items": {
+              "$ref": "#/components/schemas/StationVoltage"
+            },
+            "title": "Stations",
+            "type": "array"
+          },
+          "stream_id": {
+            "title": "Stream Id",
+            "type": "string"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Timestamp"
+          },
+          "version": {
+            "const": "v1",
+            "default": "v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "module",
+          "n_samples",
+          "stream_id",
+          "mean_voltage",
+          "stations"
+        ],
+        "title": "VoltageReport",
         "type": "object"
       }
     }
@@ -1322,9 +1899,65 @@
         ]
       }
     },
+    "/api/pmu-report/mean-voltage/run": {
+      "post": {
+        "description": "Start a mean-voltage report over a range of the source. The result arrives on the socket.",
+        "operationId": "pmu_report_run_mean_voltage",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunMeanVoltage"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Mean Voltage",
+        "tags": [
+          "pmu-report"
+        ]
+      }
+    },
     "/api/pmu-test-streamer/playback/back": {
       "post": {
-        "description": "Step one record back, independently of the play/pause flag.",
+        "description": "Jump one sample back: a seek to the previous instant.",
         "operationId": "pmu_test_streamer_back",
         "parameters": [
           {
@@ -1370,7 +2003,7 @@
     },
     "/api/pmu-test-streamer/playback/forward": {
       "post": {
-        "description": "Step one record forward, independently of the play/pause flag.",
+        "description": "Release the next sample now, playing or paused.",
         "operationId": "pmu_test_streamer_forward",
         "parameters": [
           {
@@ -1455,6 +2088,118 @@
           }
         },
         "summary": "Play",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
+    "/api/pmu-test-streamer/playback/seek": {
+      "post": {
+        "description": "Continue from an absolute position in the source.",
+        "operationId": "pmu_test_streamer_seek",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Seek"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Seek",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
+    "/api/pmu-test-streamer/playback/speed": {
+      "post": {
+        "description": "Change how fast this client's replay runs relative to real time.",
+        "operationId": "pmu_test_streamer_speed",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetSpeed"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Speed",
         "tags": [
           "pmu-test-streamer"
         ]
@@ -1744,8 +2489,12 @@
   },
   "tags": [
     {
-      "description": "Scaffold demo: replays sample PMU records line by line.",
+      "description": "Data-integration slice: replays one PMU stream per client through the data gateway, with play/stop/step/speed/seek as commands.",
       "name": "pmu-test-streamer"
+    },
+    {
+      "description": "Data-integration slice: batch reports over the PMU stream, requested by POST and delivered on the socket with a request id.",
+      "name": "pmu-report"
     },
     {
       "description": "Health and status of the running p-SWAMP monitoring applications. Only downstream status overview, no upstream commands to it yet.",
@@ -1776,6 +2525,26 @@
       "name": "reference-subapp"
     }
   ],
+  "x-topics": [
+    {
+      "model": {
+        "$ref": "#/components/schemas/Sample"
+      },
+      "topic": "sample.live"
+    },
+    {
+      "model": {
+        "$ref": "#/components/schemas/StreamHeader"
+      },
+      "topic": "stream.live.header"
+    },
+    {
+      "model": {
+        "$ref": "#/components/schemas/VoltageReport"
+      },
+      "topic": "voltage.live.report"
+    }
+  ],
   "x-websocket-channels": [
     {
       "app": "pmu-test-streamer",
@@ -1784,6 +2553,14 @@
         "$ref": "#/components/schemas/PmuStreamState"
       },
       "path": "/api/pmu-test-streamer/ws"
+    },
+    {
+      "app": "pmu-report",
+      "direction": "server-to-client",
+      "message": {
+        "$ref": "#/components/schemas/PmuReportState"
+      },
+      "path": "/api/pmu-report/ws"
     },
     {
       "app": "app-status",

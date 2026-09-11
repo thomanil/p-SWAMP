@@ -32,6 +32,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
 import api_contract
+import pmu_data
+import pmu_report
 import pmu_test_streamer
 import pswamp_web
 import reference_subapp
@@ -49,12 +51,18 @@ from api_contract import AppEntry
 # before any app package handles a request. Entered before everything in APPS and
 # exited after it, so a websocket handler can assume its dependencies are up.
 #
-# pswamp_web is the one: it owns the registry of per-client PMU pipelines that
-# its page packages all draw theirs from. Its lifespan starts no pipeline — those
-# are built on a client's first connect and evicted when idle — it only binds the
+# pswamp_web owns the registry of per-client PMU pipelines that its page
+# packages all draw theirs from. Its lifespan starts no pipeline — those are
+# built on a client's first connect and evicted when idle — it only binds the
 # registry to this event loop and drains it on shutdown.
+#
+# pmu_data owns the process's DataGateway (the data-integration slice, see
+# STEP-4-WIP-data-integration-sample-slice-implementation.md): the providers
+# this deployment plugs in and the in-process bus. pmu_test_streamer and
+# pmu_report read through it and nothing else. First, so it is up before the
+# apps that need it and down after them.
 
-SERVICES = [pswamp_web]
+SERVICES = [pmu_data, pswamp_web]
 
 # --- the app registry -------------------------------------------------------
 #
@@ -76,7 +84,14 @@ APPS = [
     AppEntry(
         "pmu-test-streamer",
         pmu_test_streamer,
-        "Scaffold demo: replays sample PMU records line by line.",
+        "Data-integration slice: replays one PMU stream per client through the "
+        "data gateway, with play/stop/step/speed/seek as commands.",
+    ),
+    AppEntry(
+        "pmu-report",
+        pmu_report,
+        "Data-integration slice: batch reports over the PMU stream, requested "
+        "by POST and delivered on the socket with a request id.",
     ),
     AppEntry(
         "app-status",
