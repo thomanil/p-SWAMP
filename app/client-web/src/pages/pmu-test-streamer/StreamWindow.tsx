@@ -1,47 +1,122 @@
 import { cn } from '@/lib/utils'
 
-import type { StreamRecord } from './usePmuStreamSocket'
+import type { PlayedSample, StreamHeader } from './usePmuStreamSocket'
+
+/** Column indices of one station's three channels, or -1 where absent. */
+type StationColumns = { station: string; v: number; ang: number; f: number }
+
+/** Group the header's flat channel table by station, in header order. The
+ *  selection is by the `measurement` key, the same way a server-side module
+ *  picks its channels. */
+function stationColumns(header: StreamHeader): StationColumns[] {
+  const byStation = new Map<string, StationColumns>()
+  header.channels.forEach((channel, index) => {
+    let entry = byStation.get(channel.station)
+    if (!entry) {
+      entry = { station: channel.station, v: -1, ang: -1, f: -1 }
+      byStation.set(channel.station, entry)
+    }
+    if (channel.measurement === 'v_Magnitude') entry.v = index
+    else if (channel.measurement === 'v_Angle') entry.ang = index
+    else if (channel.measurement === 'f') entry.f = index
+  })
+  return [...byStation.values()]
+}
+
+const at = (values: (number | null)[], index: number): number | null =>
+  index < 0 ? null : (values[index] ?? null)
+
+const kV = (v: number | null) => (v === null ? '—' : (v / 1000).toFixed(2))
+const deg = (rad: number | null) => (rad === null ? '—' : ((rad * 180) / Math.PI).toFixed(2))
+const hz = (f: number | null) => (f === null ? '—' : f.toFixed(4))
 
 /**
- * Renders the server-provided window of stream records, vertically and as text.
- * The current record sits in the middle, bold and
- * accented, with a line-number gutter; neighbours fade with distance (nearer =
- * more opaque), which stays correct in dark mode where a literal grey ramp would
- * brighten instead of fade.
+ * The window of recently played samples, then the current one in detail.
  *
- * Rows are a fixed height and text is truncated rather than wrapped, so neither a
- * long record nor a null entry (the window running off either end of the file)
- * changes the block's size as the stream scrolls.
+ * The window is one row per sample — its position in the source and the
+ * voltage magnitude at every station — newest at the bottom and highlighted,
+ * older rows fading with age. It is padded to a fixed height so the block does
+ * not grow while the first rows arrive. The wire carries volts and radians;
+ * this is the one place they become kV and degrees.
  */
-export function StreamWindow({ window }: { window: (StreamRecord | null)[] }) {
-  const radius = (window.length - 1) / 2
+export function StreamWindow({
+  header,
+  recent,
+  rows,
+}: {
+  header: StreamHeader
+  recent: PlayedSample[]
+  rows: number
+}) {
+  const stations = stationColumns(header)
+  const padded: (PlayedSample | null)[] = [
+    ...Array<null>(Math.max(0, rows - recent.length)).fill(null),
+    ...recent.slice(-rows),
+  ]
+  const current = recent[recent.length - 1] ?? null
+
   return (
     <div className="py-4 font-mono text-xs select-none">
-      {window.map((record, i) => {
-        const offset = i - radius
-        const isCurrent = offset === 0
-        // dist: 0 at the current record, →1 at the window edge.
-        const dist = Math.abs(offset) / radius
-        return (
-          <div
-            key={i}
-            className={cn(
-              'flex h-6 items-center gap-3',
-              isCurrent ? 'font-bold text-blue-600 dark:text-blue-400' : 'text-muted-foreground',
-            )}
-            style={isCurrent ? undefined : { opacity: 1 - 0.75 * dist }}
-          >
-            {/* Gutter: the caret marks the current record, and the line number is
-                right-aligned with tabular figures so the column can't jitter as
-                the digit count changes. */}
-            <span className="w-3 shrink-0">{isCurrent ? '▸' : ''}</span>
-            <span className="w-10 shrink-0 text-right tabular-nums">
-              {record === null ? '' : record.line_number}
-            </span>
-            <span className="truncate">{record === null ? '' : record.text}</span>
-          </div>
-        )
-      })}
+      <table className="w-full tabular-nums">
+        <thead className="text-muted-foreground">
+          <tr>
+            <th className="w-16 text-left font-normal">t (s)</th>
+            {stations.map(({ station }) => (
+              <th key={station} className="text-right font-normal">
+                {station} kV
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {padded.map((played, i) => {
+            const isCurrent = i === padded.length - 1 && played !== null
+            const age = (padded.length - 1 - i) / Math.max(1, padded.length - 1)
+            return (
+              <tr
+                key={i}
+                className={cn(
+                  'h-6',
+                  isCurrent ? 'font-bold text-blue-600 dark:text-blue-400' : 'text-muted-foreground',
+                )}
+                style={isCurrent ? undefined : { opacity: 1 - 0.75 * age }}
+              >
+                <td className="text-left">
+                  {isCurrent ? '▸ ' : ''}
+                  {played === null ? '' : played.position_s.toFixed(2)}
+                </td>
+                {stations.map(({ station, v }) => (
+                  <td key={station} className="text-right">
+                    {played === null ? '' : kV(at(played.sample.values, v))}
+                  </td>
+                ))}
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+
+      {/* The current sample, every channel. */}
+      <table className="mt-4 w-full border-t pt-2 tabular-nums">
+        <thead className="text-muted-foreground">
+          <tr>
+            <th className="pt-2 text-left font-normal">station</th>
+            <th className="pt-2 text-right font-normal">V (kV)</th>
+            <th className="pt-2 text-right font-normal">angle (°)</th>
+            <th className="pt-2 text-right font-normal">f (Hz)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {stations.map(({ station, v, ang, f }) => (
+            <tr key={station} className="h-5">
+              <td>{station}</td>
+              <td className="text-right">{current ? kV(at(current.sample.values, v)) : '—'}</td>
+              <td className="text-right">{current ? deg(at(current.sample.values, ang)) : '—'}</td>
+              <td className="text-right">{current ? hz(at(current.sample.values, f)) : '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

@@ -65,6 +65,7 @@ from typing import Literal, NamedTuple
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIWebSocketRoute
+from pswamp.data import catalogue
 from pydantic import BaseModel
 from pydantic.json_schema import models_json_schema
 
@@ -287,6 +288,41 @@ def inject_ws_channels(schema: dict, apps) -> dict:
     return schema
 
 
+# --- the topic catalogue -----------------------------------------------------
+
+
+def inject_topics(schema: dict) -> dict:
+    """List every message type the process can put on a topic, with its schema.
+
+    STEP3 §4.5: the topic catalogue is the set of ``DataModel`` subclasses the
+    process imports, so it is published the way the socket channels are -- a
+    vendor extension pointing at ordinary ``components.schemas`` entries::
+
+        {"topic": "voltage.live.report",
+         "model": {"$ref": "#/components/schemas/VoltageReport"}}
+
+    Direction is not recorded: a topic has producers and consumers, and which is
+    which is a deployment fact rather than a schema fact. Mutates and returns
+    the document.
+    """
+    models = catalogue()
+    if not models:
+        return schema
+
+    _keys, defs = models_json_schema(
+        [(model, "serialization") for model in models],
+        ref_template="#/components/schemas/{model}",
+    )
+    components = schema.setdefault("components", {}).setdefault("schemas", {})
+    _merge_schemas(components, defs.get("$defs", {}))
+
+    schema["x-topics"] = [
+        {"topic": model.topic, "model": {"$ref": f"#/components/schemas/{model.__name__}"}}
+        for model in models
+    ]
+    return schema
+
+
 # --- assembly ----------------------------------------------------------------
 
 
@@ -302,6 +338,7 @@ def build_document(app: FastAPI, apps: list[AppEntry]) -> dict:
         separate_input_output_schemas=app.separate_input_output_schemas,
     )
     inject_ws_channels(schema, apps)
+    inject_topics(schema)
     return schema
 
 

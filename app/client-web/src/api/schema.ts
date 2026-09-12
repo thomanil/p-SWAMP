@@ -89,6 +89,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/pmu-report/mean-voltage/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run Mean Voltage
+         * @description Start a mean-voltage report over a range of the source. The result arrives on the socket.
+         */
+        post: operations["pmu_report_run_mean_voltage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/pmu-test-streamer/playback/back": {
         parameters: {
             query?: never;
@@ -100,7 +120,7 @@ export interface paths {
         put?: never;
         /**
          * Back
-         * @description Step one record back, independently of the play/pause flag.
+         * @description Jump one sample back: a seek to the previous instant.
          */
         post: operations["pmu_test_streamer_back"];
         delete?: never;
@@ -120,7 +140,7 @@ export interface paths {
         put?: never;
         /**
          * Forward
-         * @description Step one record forward, independently of the play/pause flag.
+         * @description Release the next sample now, playing or paused.
          */
         post: operations["pmu_test_streamer_forward"];
         delete?: never;
@@ -143,6 +163,46 @@ export interface paths {
          * @description Start advancing this client through the recorded stream.
          */
         post: operations["pmu_test_streamer_play"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/pmu-test-streamer/playback/seek": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Seek
+         * @description Continue from an absolute position in the source.
+         */
+        post: operations["pmu_test_streamer_seek"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/pmu-test-streamer/playback/speed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Speed
+         * @description Change how fast this client's replay runs relative to real time.
+         */
+        post: operations["pmu_test_streamer_speed"];
         delete?: never;
         options?: never;
         head?: never;
@@ -589,6 +649,40 @@ export interface components {
             type: "state";
         };
         /**
+         * JobAck
+         * @description Acknowledgement of a batch command. Never carries the result.
+         */
+        JobAck: {
+            /**
+             * Applied
+             * @description Which operation was started.
+             */
+            applied: string;
+            /**
+             * Job Id
+             * @description Server-side id of the running job.
+             */
+            job_id: string;
+            /**
+             * Request Id
+             * @description Correlation id the resulting Report will carry: the caller's own if it supplied one, otherwise the job_id.
+             */
+            request_id: string;
+            /**
+             * Status
+             * @default ok
+             * @constant
+             */
+            status: "ok";
+        };
+        /** JobError */
+        JobError: {
+            /** Message */
+            message: string;
+            /** Request Id */
+            request_id: string;
+        };
+        /**
          * LineOutageEvent
          * @description One branch changing connection state, as the detector reports it.
          *
@@ -640,6 +734,16 @@ export interface components {
              */
             window_length: number | null;
         };
+        /**
+         * ModuleRef
+         * @description Which module produced a result.
+         */
+        ModuleRef: {
+            /** Name */
+            name: string;
+            /** Uuid */
+            uuid: string;
+        };
         /** Phasor */
         Phasor: {
             /** Ang */
@@ -687,20 +791,31 @@ export interface components {
             type: "state";
         };
         /**
-         * PmuRecord
-         * @description One record in the visible window: a 1-based line number and its text.
+         * PmuReportState
+         * @description Everything the report page shows: results, what is still running, failures.
          */
-        PmuRecord: {
+        PmuReportState: {
             /**
-             * Line Number
-             * @description 1-based, matching how `wc -l` counts.
+             * Errors
+             * @description Jobs that failed, newest last.
              */
-            line_number: number;
+            errors: components["schemas"]["JobError"][];
             /**
-             * Text
-             * @description The raw record, verbatim from sample_data.txt.
+             * Pending
+             * @description Request ids of jobs still running.
              */
-            text: string;
+            pending: string[];
+            /**
+             * Reports
+             * @description Newest first, at most MAX_REPORTS.
+             */
+            reports: components["schemas"]["VoltageReport"][];
+            /**
+             * Type
+             * @default state
+             * @constant
+             */
+            type: "state";
         };
         /** PmuSite */
         PmuSite: {
@@ -715,40 +830,65 @@ export interface components {
          * PmuStreamState
          * @description The single message shape pushed to a client on connect and every change.
          *
-         *     A declared model rather than a loose dict, because this IS the downstream half
-         *     of the published contract: api_contract.py collects it via this package's
-         *     WS_MESSAGE export, and a bare dict would silently drop the app out of it.
-         *
-         *     `total_lines` lets the client show "record N of M" — which is also how the
-         *     wrap-around at the end of the file becomes visible in the UI.
+         *     A sample message carries the row that just played; a control message (after
+         *     play/stop/speed) carries none, and the page keeps showing the last one. The
+         *     header rides on the opening message only.
          */
         PmuStreamState: {
             /**
+             * Duration S
+             * @description Length of one pass of the source, in seconds.
+             */
+            duration_s: number;
+            /**
+             * @description Channel table; sent on the opening message only.
+             * @default null
+             */
+            header: components["schemas"]["StreamHeader"] | null;
+            /**
              * Index
-             * @description 0-based cursor into the sample file.
+             * @description 0-based sample ordinal within the current pass.
              */
             index: number;
             /**
-             * Playing
-             * @description Whether the server is advancing this client.
+             * Mode
+             * @description What the source can do; transport controls only make sense for replay.
+             * @enum {string}
              */
+            mode: "live" | "replay";
+            /**
+             * Passes
+             * @description How many times this client's replay has looped.
+             */
+            passes: number;
+            /** Playing */
             playing: boolean;
             /**
-             * Total Lines
-             * @description How many records the sample file holds.
+             * Position S
+             * @description Seconds into the source; null before the first sample.
              */
-            total_lines: number;
+            position_s: number | null;
+            /**
+             * @description The row that just played; null on a control-only update.
+             * @default null
+             */
+            sample: components["schemas"]["Sample"] | null;
+            /**
+             * Speed
+             * @description Replay speed factor; 1.0 is as recorded.
+             */
+            speed: number;
+            /**
+             * Total
+             * @description How many samples one pass of the source holds.
+             */
+            total: number;
             /**
              * Type
              * @default state
              * @constant
              */
             type: "state";
-            /**
-             * Window
-             * @description Records around the cursor; null where it runs off an end.
-             */
-            window: (components["schemas"]["PmuRecord"] | null)[];
         };
         /**
          * ReferenceSubappState
@@ -791,6 +931,173 @@ export interface components {
             position: number;
             /** Source */
             source: string;
+        };
+        /**
+         * RunMeanVoltage
+         * @description Which part of the source to report over. Both bounds unset = all of it.
+         */
+        RunMeanVoltage: {
+            /**
+             * End S
+             * @description Seconds into the source, exclusive.
+             */
+            end_s?: number | null;
+            /**
+             * Request Id
+             * @description Caller's correlation id; the report carries it back. Defaults to the job id.
+             */
+            request_id?: string | null;
+            /**
+             * Start S
+             * @description Seconds into the source, inclusive.
+             */
+            start_s?: number | null;
+        };
+        /**
+         * Sample
+         * @description One instant across every channel of a stream, in header order.
+         */
+        Sample: {
+            /**
+             * Mrid
+             * @description The StreamHeader.stream_id this row belongs to.
+             */
+            mRID: string;
+            /**
+             * Namespace
+             * @default live
+             */
+            namespace: string;
+            /**
+             * Quality
+             * @description C37.118 STAT word, if any.
+             * @default null
+             */
+            quality: number | null;
+            /**
+             * Timestamp
+             * @default null
+             */
+            timestamp: string | null;
+            /**
+             * Values
+             * @description One per header channel; null = missing.
+             */
+            values: (number | null)[];
+            /**
+             * Version
+             * @default v1
+             * @constant
+             */
+            version: "v1";
+        };
+        /** Seek */
+        Seek: {
+            /**
+             * Position S
+             * @description Seconds into the source to continue from.
+             */
+            position_s: number;
+        };
+        /** SetSpeed */
+        SetSpeed: {
+            /**
+             * Speed
+             * @description Replay speed factor.
+             */
+            speed: number;
+        };
+        /** StationVoltage */
+        StationVoltage: {
+            /**
+             * Mean Voltage
+             * @description Volts; null when the station had no values.
+             */
+            mean_voltage: number | null;
+            /** Station */
+            station: string;
+        };
+        /**
+         * StreamChannel
+         * @description One column of a stream — p-SWAMP's three header rows plus a unit.
+         *
+         *     ``mRID`` is the CIM equipment id when a deployment has one; it is the hook
+         *     the grid-model track (STEP2 §6.9) attaches to, and ``None`` everywhere else.
+         */
+        StreamChannel: {
+            /**
+             * Channel
+             * @description Display channel, e.g. "V_Magnitude".
+             */
+            channel: string;
+            /**
+             * Mrid
+             * @default null
+             */
+            mRID: string | null;
+            /**
+             * Measurement
+             * @description Quantity key, e.g. "v_Magnitude" or "f".
+             */
+            measurement: string;
+            /**
+             * Station
+             * @description PMU / bus name, e.g. "3000".
+             */
+            station: string;
+            /**
+             * Unit
+             * @enum {string}
+             */
+            unit: "V" | "A" | "Hz" | "Hz/s" | "rad" | "";
+        };
+        /**
+         * StreamHeader
+         * @description What a stream carries: sent once, referenced by every sample's ``mRID``.
+         */
+        StreamHeader: {
+            /**
+             * Channels
+             * @description Column order of Sample.values.
+             */
+            channels: components["schemas"]["StreamChannel"][];
+            /**
+             * Data Rate
+             * @description Samples per second.
+             */
+            data_rate: number;
+            /**
+             * Mrid
+             * @default null
+             */
+            mRID: string | null;
+            /**
+             * Namespace
+             * @default live
+             */
+            namespace: string;
+            /**
+             * Source
+             * @description Provenance: a file, a PDC id.
+             * @default
+             */
+            source: string;
+            /**
+             * Stream Id
+             * @description What Sample.mRID refers to.
+             */
+            stream_id: string;
+            /**
+             * Timestamp
+             * @default null
+             */
+            timestamp: string | null;
+            /**
+             * Version
+             * @default v1
+             * @constant
+             */
+            version: "v1";
         };
         /**
          * TimeWindowSlice
@@ -853,6 +1160,68 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /**
+         * VoltageReport
+         * @description Mean voltage magnitude over ``n_samples`` rows of one stream, in volts.
+         */
+        VoltageReport: {
+            /**
+             * Mrid
+             * @default null
+             */
+            mRID: string | null;
+            /**
+             * Mean Voltage
+             * @description Volts, across every voltage channel; null if none.
+             */
+            mean_voltage: number | null;
+            module: components["schemas"]["ModuleRef"];
+            /**
+             * N Samples
+             * @description How many source rows the report is over.
+             */
+            n_samples: number;
+            /**
+             * Namespace
+             * @default live
+             */
+            namespace: string;
+            /** Parameters */
+            parameters?: {
+                [key: string]: number | string | boolean | null;
+            };
+            /**
+             * Range End
+             * @default null
+             */
+            range_end: string | null;
+            /**
+             * Range Start
+             * @default null
+             */
+            range_start: string | null;
+            /**
+             * Request Id
+             * @description Set when this result answers a specific command (a job).
+             * @default null
+             */
+            request_id: string | null;
+            /** Stations */
+            stations: components["schemas"]["StationVoltage"][];
+            /** Stream Id */
+            stream_id: string;
+            /**
+             * Timestamp
+             * @default null
+             */
+            timestamp: string | null;
+            /**
+             * Version
+             * @default v1
+             * @constant
+             */
+            version: "v1";
         };
     };
     responses: never;
@@ -989,6 +1358,42 @@ export interface operations {
             };
         };
     };
+    pmu_report_run_mean_voltage: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RunMeanVoltage"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     pmu_test_streamer_back: {
         parameters: {
             query: {
@@ -1064,6 +1469,78 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pmu_test_streamer_seek: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Seek"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pmu_test_streamer_speed: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetSpeed"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
