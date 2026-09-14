@@ -128,6 +128,27 @@
         "title": "AlarmNote",
         "type": "object"
       },
+      "AppIdentity": {
+        "description": "Which module instance produced a message.",
+        "properties": {
+          "name": {
+            "description": "The module's name, as registered.",
+            "title": "Name",
+            "type": "string"
+          },
+          "uuid": {
+            "description": "This instance's id, unique per process.",
+            "title": "Uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "uuid"
+        ],
+        "title": "AppIdentity",
+        "type": "object"
+      },
       "AppStatus": {
         "properties": {
           "app_name": {
@@ -298,6 +319,144 @@
           "applied"
         ],
         "title": "CommandAck",
+        "type": "object"
+      },
+      "FrameStats": {
+        "description": "What the module computes for one instant.",
+        "properties": {
+          "angle_spread_deg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Largest minus smallest voltage angle across stations.",
+            "title": "Angle Spread Deg"
+          },
+          "max_frequency_hz": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Frequency Hz"
+          },
+          "mean_frequency_hz": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Mean of the per-station frequencies.",
+            "title": "Mean Frequency Hz"
+          },
+          "mean_voltage_kv": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mean Voltage Kv"
+          },
+          "min_frequency_hz": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Frequency Hz"
+          },
+          "n_stations": {
+            "description": "Stations with a frequency value in this frame.",
+            "title": "N Stations",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "n_stations",
+          "mean_frequency_hz",
+          "min_frequency_hz",
+          "max_frequency_hz",
+          "angle_spread_deg",
+          "mean_voltage_kv"
+        ],
+        "title": "FrameStats",
+        "type": "object"
+      },
+      "FrameStatsResult": {
+        "description": "The module's envelope; its class name is its topic: ``frame.stats.result``.",
+        "properties": {
+          "app": {
+            "$ref": "#/components/schemas/AppIdentity"
+          },
+          "mRID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mrid"
+          },
+          "parameters": {
+            "additionalProperties": true,
+            "description": "The module's settings, for the record.",
+            "title": "Parameters",
+            "type": "object"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Set when this result answers a Command.",
+            "title": "Request Id"
+          },
+          "result": {
+            "$ref": "#/components/schemas/FrameStats"
+          },
+          "timestamp": {
+            "description": "The instant the result is about.",
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "version": {
+            "const": "v1",
+            "default": "v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "app",
+          "result"
+        ],
+        "title": "FrameStatsResult",
         "type": "object"
       },
       "GridBranch": {
@@ -812,25 +971,286 @@
         "title": "PhasorSnapshot",
         "type": "object"
       },
-      "PmuRecord": {
-        "description": "One record in the visible window: a 1-based line number and its text.",
+      "PlayerStatus": {
+        "description": "Where a stream's player is and what it can do -- what a client renders its\ncontrols from, so that no dead button ever appears (port doc \u00a710.2).",
         "properties": {
-          "line_number": {
-            "description": "1-based, matching how `wc -l` counts.",
-            "title": "Line Number",
-            "type": "integer"
+          "can_go_live": {
+            "default": false,
+            "description": "A live source exists; the 'live' command switches to it.",
+            "title": "Can Go Live",
+            "type": "boolean"
           },
-          "text": {
-            "description": "The raw record, verbatim from sample_data.txt.",
-            "title": "Text",
+          "can_seek": {
+            "description": "Seek, step and speed apply: replay mode over a source with history.",
+            "title": "Can Seek",
+            "type": "boolean"
+          },
+          "coverage_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Exclusive end of the seekable history; null without a history source.",
+            "title": "Coverage End"
+          },
+          "coverage_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Earliest instant of the seekable history; null without a history source.",
+            "title": "Coverage Start"
+          },
+          "cursor": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The instant of the last frame played.",
+            "title": "Cursor"
+          },
+          "ended": {
+            "description": "The replay ran off the end and is not looping.",
+            "title": "Ended",
+            "type": "boolean"
+          },
+          "frame_interval_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Seconds between frames, once two have been seen.",
+            "title": "Frame Interval S"
+          },
+          "loop": {
+            "title": "Loop",
+            "type": "boolean"
+          },
+          "mRID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mrid"
+          },
+          "mode": {
+            "description": "Which stream is open: 'replay' paces a bounded stream over the history coverage and loops at its end; 'live' follows the source from now, with no transport controls.",
+            "enum": [
+              "live",
+              "replay"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "paused": {
+            "title": "Paused",
+            "type": "boolean"
+          },
+          "speed": {
+            "description": "Replay speed multiplier; 1.0 is real time.",
+            "title": "Speed",
+            "type": "number"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "version": {
+            "const": "v1",
+            "default": "v1",
+            "title": "Version",
             "type": "string"
           }
         },
         "required": [
-          "line_number",
-          "text"
+          "timestamp",
+          "mode",
+          "cursor",
+          "speed",
+          "paused",
+          "loop",
+          "ended",
+          "can_seek",
+          "coverage_start",
+          "coverage_end",
+          "frame_interval_s"
         ],
-        "title": "PmuRecord",
+        "title": "PlayerStatus",
+        "type": "object"
+      },
+      "PmuFrame": {
+        "description": "One instant of every channel in a stream, in header column order.",
+        "properties": {
+          "header_id": {
+            "description": "The header this frame's columns follow.",
+            "title": "Header Id",
+            "type": "string"
+          },
+          "mRID": {
+            "description": "Identity of the stream; matches its header.",
+            "title": "Mrid",
+            "type": "string"
+          },
+          "quality": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Per column, a place for the C37.118 STAT word. Absent today.",
+            "title": "Quality"
+          },
+          "timestamp": {
+            "description": "The PMU time of this instant. Never stamped later.",
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "values": {
+            "description": "One value per header column; null where NaN.",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Values",
+            "type": "array"
+          },
+          "version": {
+            "const": "v1",
+            "default": "v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mRID",
+          "timestamp",
+          "header_id",
+          "values"
+        ],
+        "title": "PmuFrame",
+        "type": "object"
+      },
+      "PmuHeader": {
+        "description": "The channel layout of a PMU stream: one entry per column of a frame.\n\nThe three label rows are exactly the ones p-SWAMP's ``Indexer`` queries\n(``get_col_idx(measurement=\"f\")``), so an application selects its inputs the\nsame way over a wire header as over a decoded config frame.",
+        "properties": {
+          "channel": {
+            "description": "Per column: the phasor or signal name.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Channel",
+            "type": "array"
+          },
+          "data_rate": {
+            "description": "Frames per second.",
+            "exclusiveMinimum": 0,
+            "title": "Data Rate",
+            "type": "number"
+          },
+          "freq_encoding": {
+            "const": "absolute_hz",
+            "default": "absolute_hz",
+            "description": "How frequency columns are encoded. Only absolute Hz today.",
+            "title": "Freq Encoding",
+            "type": "string"
+          },
+          "header_id": {
+            "description": "Content hash of the label rows; frames carry it.",
+            "title": "Header Id",
+            "type": "string"
+          },
+          "mRID": {
+            "description": "Identity of the stream (a PDC, a recording).",
+            "title": "Mrid",
+            "type": "string"
+          },
+          "measurement": {
+            "description": "Per column: \"f\", \"df\", \"<name>_Magnitude\" or \"<name>_Angle\".",
+            "items": {
+              "type": "string"
+            },
+            "title": "Measurement",
+            "type": "array"
+          },
+          "station": {
+            "description": "Per column: the station (PMU) the value is from.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Station",
+            "type": "array"
+          },
+          "timestamp": {
+            "description": "When this layout became valid.",
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "units": {
+            "description": "Per column: the unit the value is in.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Units",
+            "type": "array"
+          },
+          "version": {
+            "const": "v1",
+            "default": "v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mRID",
+          "timestamp",
+          "header_id",
+          "station",
+          "channel",
+          "measurement",
+          "units",
+          "data_rate"
+        ],
+        "title": "PmuHeader",
         "type": "object"
       },
       "PmuSite": {
@@ -857,50 +1277,83 @@
         "type": "object"
       },
       "PmuStreamState": {
-        "description": "The single message shape pushed to a client on connect and every change.\n\nA declared model rather than a loose dict, because this IS the downstream half\nof the published contract: api_contract.py collects it via this package's\nWS_MESSAGE export, and a bare dict would silently drop the app out of it.\n\n`total_lines` lets the client show \"record N of M\" \u2014 which is also how the\nwrap-around at the end of the file becomes visible in the UI.",
+        "description": "The one message pushed on connect and on every change.\n\nA declared model, because this IS the downstream half of the published\ncontract: api_contract.py collects it via this package's WS_MESSAGE export.\nIts parts are core messages carried as they are -- the browser's types for\n``PmuHeader``, ``PmuFrame``, ``PlayerStatus`` and ``FrameStatsResult`` are\ngenerated from these very classes, and nothing renames a field on the way.",
         "properties": {
-          "index": {
-            "description": "0-based cursor into the sample file.",
-            "title": "Index",
-            "type": "integer"
+          "frame": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PmuFrame"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The frame at the cursor, once one has played."
           },
-          "playing": {
-            "description": "Whether the server is advancing this client.",
-            "title": "Playing",
-            "type": "boolean"
+          "frame_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How many frames the recording holds.",
+            "title": "Frame Count"
           },
-          "total_lines": {
-            "description": "How many records the sample file holds.",
-            "title": "Total Lines",
-            "type": "integer"
+          "frame_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "0-based position of the cursor in the recording.",
+            "title": "Frame Index"
+          },
+          "header": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PmuHeader"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The channel layout. Sent on the first message only; null afterwards."
+          },
+          "player": {
+            "$ref": "#/components/schemas/PlayerStatus",
+            "description": "Where the replay is and which controls apply."
+          },
+          "stats": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FrameStatsResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The stats module's latest result."
           },
           "type": {
             "const": "state",
             "default": "state",
             "title": "Type",
             "type": "string"
-          },
-          "window": {
-            "description": "Records around the cursor; null where it runs off an end.",
-            "items": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/PmuRecord"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "title": "Window",
-            "type": "array"
           }
         },
         "required": [
-          "window",
-          "index",
-          "total_lines",
-          "playing"
+          "header",
+          "frame",
+          "player",
+          "stats",
+          "frame_index",
+          "frame_count"
         ],
         "title": "PmuStreamState",
         "type": "object"
@@ -973,6 +1426,37 @@
           "duration"
         ],
         "title": "ReplayStatus",
+        "type": "object"
+      },
+      "SeekBody": {
+        "properties": {
+          "offset_s": {
+            "description": "Seconds from the start of the recording.",
+            "minimum": 0.0,
+            "title": "Offset S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "offset_s"
+        ],
+        "title": "SeekBody",
+        "type": "object"
+      },
+      "SpeedBody": {
+        "properties": {
+          "speed": {
+            "description": "Replay speed multiplier; 1 is real time.",
+            "exclusiveMinimum": 0.0,
+            "maximum": 10.0,
+            "title": "Speed",
+            "type": "number"
+          }
+        },
+        "required": [
+          "speed"
+        ],
+        "title": "SpeedBody",
         "type": "object"
       },
       "TimeWindowSlice": {
@@ -1121,7 +1605,7 @@
   "info": {
     "description": "The api between the p-SWAMP web client and its state server.\n\n**Two directions, two transports.** Anything a user triggers goes up as an HTTP\n`POST` under `/api/<app>/`; everything the server has to say comes down a\nWebSocket at `/api/<app>/ws`, which is downstream only. A command's reply is a\nsmall `CommandAck`, never state, so state has exactly one path and there is no\nordering to reconcile between two of them.\n\n**The operations below are therefore only half the api.** The socket half is\ndescribed by the `x-websocket-channels` extension at the root of this document,\nwhose message schemas are ordinary `components.schemas` entries \u2014 so a code\ngenerator picks them up like any other model even though OpenAPI itself has no\nnotion of a socket.\n\n**The first path segment after `/api/` is the routing key.** The server itself\nholds no domain logic: it mounts one self-contained backend package under each\n`/api/<app>` prefix, so `/api/pmu-test-streamer/...` is served by\n`src/pmu_test_streamer/`, `/api/time-window/...` by\n`src/pswamp_web/time_window/`, and so on for every tag listed below \u2014 the paths\na package declares are relative to its own prefix.\n`/healthz` sits outside `/api` because it is the process's health rather than any\none app's, and everything else is the built web client, served from the same\norigin with unknown paths falling back to its `index.html` so deep links work.\n\n**Every request carries `?client_id=`**, a numeric string the browser resolves\nonce per profile and persists. It is the sharding key for all server state and\nall of a browser's sockets must send the same one. It is *not* authentication and\ndoes not pretend to be: supply someone else's id and you drive their session.\n\n**The web client's types are generated from the API contract.**\n`openapi-typescript` compiles it into `app/client-web/src/api/schema.ts`, which is\ncommitted in git, and a page hook takes its downstream type from there rather\nthan hand-copying the Python model's fields \u2014 `Wire['ReferenceSubappState']` for\n`/api/reference-subapp/ws`. Field names stay as the server sends them, snake_case\nand all, all the way to the frontend components.\n\nThis document is generated from the server and committed at `doc/api/openapi.json`;\n`scripts/error_check.sh` fails if the two disagree. See\n`doc/the-client-server-api.md` for more detail.\n",
     "title": "p-SWAMP api",
-    "version": "1.0.0"
+    "version": "2.0.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -1324,7 +1808,7 @@
     },
     "/api/pmu-test-streamer/playback/back": {
       "post": {
-        "description": "Step one record back, independently of the play/pause flag.",
+        "description": "Step one frame back: the player reopens its stream one interval earlier.",
         "operationId": "pmu_test_streamer_back",
         "parameters": [
           {
@@ -1351,6 +1835,9 @@
             },
             "description": "Successful Response"
           },
+          "409": {
+            "description": "The command does not apply in the player's current mode."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1370,7 +1857,7 @@
     },
     "/api/pmu-test-streamer/playback/forward": {
       "post": {
-        "description": "Step one record forward, independently of the play/pause flag.",
+        "description": "Play one frame, independently of the play/pause state.",
         "operationId": "pmu_test_streamer_forward",
         "parameters": [
           {
@@ -1397,6 +1884,9 @@
             },
             "description": "Successful Response"
           },
+          "409": {
+            "description": "The command does not apply in the player's current mode."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1414,9 +1904,58 @@
         ]
       }
     },
+    "/api/pmu-test-streamer/playback/live": {
+      "post": {
+        "description": "Switch this client to the live feed: frames from now, as they arrive, no\ntransport controls. 409 when no live source is configured.",
+        "operationId": "pmu_test_streamer_live",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "The command does not apply in the player's current mode."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Live",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
     "/api/pmu-test-streamer/playback/play": {
       "post": {
-        "description": "Start advancing this client through the recorded stream.",
+        "description": "Start (or resume) this client's replay.",
         "operationId": "pmu_test_streamer_play",
         "parameters": [
           {
@@ -1443,6 +1982,9 @@
             },
             "description": "Successful Response"
           },
+          "409": {
+            "description": "The command does not apply in the player's current mode."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1460,9 +2002,176 @@
         ]
       }
     },
+    "/api/pmu-test-streamer/playback/replay": {
+      "post": {
+        "description": "Switch this client back to the recording, paused at its start. 409 when\nno history source is configured.",
+        "operationId": "pmu_test_streamer_replay",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "The command does not apply in the player's current mode."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Replay",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
+    "/api/pmu-test-streamer/playback/seek": {
+      "post": {
+        "description": "Jump the replay to an offset into the recording. 409 while live.",
+        "operationId": "pmu_test_streamer_seek",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SeekBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "The command does not apply in the player's current mode."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Seek",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
+    "/api/pmu-test-streamer/playback/speed": {
+      "post": {
+        "description": "Change the replay speed. 409 while live.",
+        "operationId": "pmu_test_streamer_speed",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpeedBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "The command does not apply in the player's current mode."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Speed",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
     "/api/pmu-test-streamer/playback/stop": {
       "post": {
-        "description": "Pause this client where it is in the stream.",
+        "description": "Pause this client's replay where it is.",
         "operationId": "pmu_test_streamer_stop",
         "parameters": [
           {
@@ -1488,6 +2197,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "409": {
+            "description": "The command does not apply in the player's current mode."
           },
           "422": {
             "content": {

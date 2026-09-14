@@ -29,6 +29,12 @@ So an app package imports from here and needs to know nothing about the layout:
 What is genuinely defined here is `SocketRegistry` — the scaffold apps' socket
 bookkeeping, which `pswamp_web/` has no use for because its pages push from their
 own per-connection task rather than fanning out to a client's sockets.
+
+`event_queue` and `serve_updates` are the grid monitor's event-driven push loop
+(`pswamp_web/pump.py`), re-exported because they serve a core pipeline
+unchanged: the core bus kept `add_listener(topic, fn)`, with a message class as
+the topic, so a page over `pswamp_core` wakes on its result class the same way
+a monitor page wakes on a store topic.
 """
 
 import contextlib
@@ -38,7 +44,7 @@ from fastapi import WebSocket
 from pydantic import BaseModel
 
 from pswamp_web.log import get_logger
-from pswamp_web.pump import wait_for_disconnect
+from pswamp_web.pump import event_queue, serve_updates, wait_for_disconnect
 from pswamp_web.sessions import SessionRegistry
 from pswamp_web.wire import (
     CLIENT_ID_PATTERN,
@@ -53,9 +59,11 @@ __all__ = [
     "ClientId",
     "CommandAck",
     "SocketRegistry",
+    "event_queue",
     "get_logger",
     "read_client_id",
     "send_state",
+    "serve_updates",
     "wait_for_disconnect",
 ]
 

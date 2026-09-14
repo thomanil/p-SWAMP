@@ -1,15 +1,27 @@
 # Local minikube deployment of the p-swamp client-server stack (the FastAPI
 # state server, with the web client baked in and served from the same origin).
 #
-# Single replica on purpose: the server holds per-client state in memory and
-# runs one ticker for everyone (see src/pmu_test_streamer/api.py), so it must
-# never be scaled past 1 — a second pod would have its own independent state and
+# Single replica on purpose: the server holds per-client state in memory — one
+# pipeline per connected client (src/pmu_test_streamer/api.py, pswamp_web/hub.py)
+# — so it must never be scaled past 1 — a second pod would have its own independent state and
 # the Service would split clients across them. The strategy is Recreate (not the
 # default RollingUpdate) so the old pod is gone before the new one serves, for
 # the same reason.
 #
-# Nothing is persisted: no DB, no volumes. A rollout resets every client's state,
-# which is the expected behavior for this stateless deployment.
+# Nothing is persisted: no DB, no persistent volumes. A rollout resets every
+# client's state, which is the expected behavior for this stateless deployment.
+# The one volume below is a read-only ConfigMap: configuration, not storage.
+#
+# The PMU data sources are configured here rather than baked in. The env block
+# names the two providers (the streamer's own default, spelled out) and points
+# the live feed at k8s/deployment_pmu_data_file_example.txt, which the start
+# script turns into the ConfigMap mounted below — a file that is NOT in the
+# image, which is the point: it shows a deployment feeding the server its own
+# data with nothing but a variable and a mount. In that file every value counts
+# up by one per frame from a round start (100 kV, 0°, 60 Hz), the same in every
+# station, so a page switched to Live shows at a glance both that the
+# k8s-configured source is what is feeding it and that it is moving, while
+# Recorded still replays the recording shipped in the image.
 #
 # Apply with scripts/start-pswamp-in-local-minikube-cluster.sh, which builds the image straight into
 # minikube and forces a rollout. Clients reach this over the NodePort at
@@ -52,6 +64,23 @@ spec:
             # the Dockerfile's ENV, so it's not repeated here.
             - name: HOST
               value: "0.0.0.0"
+            # Which providers make up each client's gateway: name:module:Class,
+            # comma-separated (doc/server-data-architecture.md, "Providers").
+            # This is the streamer's built-in default; a deployment's own
+            # provider is one more package in the image and one more entry here.
+            - name: PSWAMP_DATA_CLIENTS
+              value: "sample:pmu_test_streamer.sample_client:SampleRecordingClient,live:pmu_test_streamer.live_client:LiveSyntheticClient"
+            # Each provider reads its own {NAME}_{SETTING} block. The live feed
+            # cycles the rows of this file instead of the image's sample_data.txt.
+            # It must keep the recording's channel layout (the same five stations
+            # at 20 Hz): the live client serves no header, so the recording's
+            # header is what describes its frames.
+            - name: LIVE_PATH
+              value: /etc/p-swamp/pmu/deployment_pmu_data_file_example.txt
+          volumeMounts:
+            - name: pmu-data
+              mountPath: /etc/p-swamp/pmu
+              readOnly: true
           # Both probes hit /healthz: with no external dependencies there is
           # nothing readiness could check that liveness doesn't. Readiness still
           # earns its keep by holding the pod out of the Service until the app
@@ -96,6 +125,13 @@ spec:
               # This was 128Mi when one pipeline served the whole process, which
               # does not fit even a single client under the new arrangement.
               memory: "768Mi"
+      volumes:
+        # Built by scripts/start-pswamp-in-local-minikube-cluster.sh from
+        # k8s/deployment_pmu_data_file_example.txt (kubectl create configmap
+        # --from-file). Not inlined here, so the data stays a plain text file.
+        - name: pmu-data
+          configMap:
+            name: p-swamp-pmu-data
 ---
 apiVersion: v1
 kind: Service
