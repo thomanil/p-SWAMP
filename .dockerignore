@@ -37,3 +37,6 @@ tests/
 .pytest_cache/
 .ruff_cache/
 .idea/
+# The shared core's tests: core/ is COPYed wholesale (its src/ is installed
+# editable), and the root `tests/` rule above is anchored, so this is separate.
+core/tests/
