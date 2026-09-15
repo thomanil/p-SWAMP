@@ -35,6 +35,7 @@ import api_contract
 import pmu_test_streamer
 import pswamp_web
 import reference_subapp
+import frequency_peek
 import pswamp_web.app_status
 import pswamp_web.grid
 import pswamp_web.islanding
@@ -115,6 +116,11 @@ APPS = [
         "reference-subapp",
         reference_subapp,
         "The reference example: a per-client counter over the whole stack.",
+    ),
+    AppEntry(
+        "frequency-peek",
+        frequency_peek,
+        "Frequency peek.",
     ),
 ]
 

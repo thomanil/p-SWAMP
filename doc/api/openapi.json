@@ -459,6 +459,124 @@
         "title": "FrameStatsResult",
         "type": "object"
       },
+      "Frequencies": {
+        "description": "Only the frequency: one value per station, in the header's station order.",
+        "properties": {
+          "frequency_hz": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": "Measured frequency per station, in Hz; null where the frame has none.",
+            "title": "Frequency Hz",
+            "type": "object"
+          }
+        },
+        "required": [
+          "frequency_hz"
+        ],
+        "title": "Frequencies",
+        "type": "object"
+      },
+      "FrequencyPeekState": {
+        "description": "The one message pushed on connect and on every new frequency result.\n\nKeys are snake_case on the wire, and stay that way: the page reads the\ngenerated type for this model rather than a renamed mirror of it.",
+        "properties": {
+          "frequency": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FrequencyResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The frequency module's latest result; null until the first frame."
+          },
+          "player": {
+            "$ref": "#/components/schemas/PlayerStatus",
+            "description": "Which stream is open: live, or a replay."
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "player",
+          "frequency"
+        ],
+        "title": "FrequencyPeekState",
+        "type": "object"
+      },
+      "FrequencyResult": {
+        "description": "The module's envelope; its class name is its topic: ``frequency.result``.",
+        "properties": {
+          "app": {
+            "$ref": "#/components/schemas/AppIdentity"
+          },
+          "mRID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mrid"
+          },
+          "parameters": {
+            "additionalProperties": true,
+            "description": "The module's settings, for the record.",
+            "title": "Parameters",
+            "type": "object"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Set when this result answers a Command.",
+            "title": "Request Id"
+          },
+          "result": {
+            "$ref": "#/components/schemas/Frequencies"
+          },
+          "timestamp": {
+            "description": "The instant the result is about.",
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "version": {
+            "const": "v1",
+            "default": "v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "app",
+          "result"
+        ],
+        "title": "FrequencyResult",
+        "type": "object"
+      },
       "GridBranch": {
         "properties": {
           "from_bus": {
@@ -2486,6 +2604,10 @@
     {
       "description": "The reference example: a per-client counter over the whole stack.",
       "name": "reference-subapp"
+    },
+    {
+      "description": "Frequency peek.",
+      "name": "frequency-peek"
     }
   ],
   "x-websocket-channels": [
@@ -2544,6 +2666,14 @@
         "$ref": "#/components/schemas/ReferenceSubappState"
       },
       "path": "/api/reference-subapp/ws"
+    },
+    {
+      "app": "frequency-peek",
+      "direction": "server-to-client",
+      "message": {
+        "$ref": "#/components/schemas/FrequencyPeekState"
+      },
+      "path": "/api/frequency-peek/ws"
     }
   ]
 }

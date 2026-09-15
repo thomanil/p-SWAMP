@@ -621,6 +621,76 @@ export interface components {
              */
             version: "v1";
         };
+        /**
+         * Frequencies
+         * @description Only the frequency: one value per station, in the header's station order.
+         */
+        Frequencies: {
+            /**
+             * Frequency Hz
+             * @description Measured frequency per station, in Hz; null where the frame has none.
+             */
+            frequency_hz: {
+                [key: string]: number | null;
+            };
+        };
+        /**
+         * FrequencyPeekState
+         * @description The one message pushed on connect and on every new frequency result.
+         *
+         *     Keys are snake_case on the wire, and stay that way: the page reads the
+         *     generated type for this model rather than a renamed mirror of it.
+         */
+        FrequencyPeekState: {
+            /** @description The frequency module's latest result; null until the first frame. */
+            frequency: components["schemas"]["FrequencyResult"] | null;
+            /** @description Which stream is open: live, or a replay. */
+            player: components["schemas"]["PlayerStatus"];
+            /**
+             * Type
+             * @default state
+             * @constant
+             */
+            type: "state";
+        };
+        /**
+         * FrequencyResult
+         * @description The module's envelope; its class name is its topic: ``frequency.result``.
+         */
+        FrequencyResult: {
+            app: components["schemas"]["AppIdentity"];
+            /**
+             * Mrid
+             * @default null
+             */
+            mRID: string | null;
+            /**
+             * Parameters
+             * @description The module's settings, for the record.
+             */
+            parameters?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Request Id
+             * @description Set when this result answers a Command.
+             * @default null
+             */
+            request_id: string | null;
+            result: components["schemas"]["Frequencies"];
+            /**
+             * Timestamp
+             * Format: date-time
+             * @description The instant the result is about.
+             */
+            timestamp: string;
+            /**
+             * Version
+             * @default v1
+             * @constant
+             */
+            version: "v1";
+        };
         /** GridBranch */
         GridBranch: {
             /** From Bus */
