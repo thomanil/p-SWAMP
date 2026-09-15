@@ -16,6 +16,7 @@ dependencies = [
     "fastapi>=0.141.1,<0.142",
     "uvicorn[standard]>=0.52.4,<0.53",
     "p-swamp",
+    "pswamp-core",
 ]
 
 # p-swamp is the desktop package at the repo root (root pyproject.toml, root
@@ -42,6 +43,15 @@ dependencies = [
 # Dockerfile.
 [tool.uv.sources]
 p-swamp = { path = "../../", editable = true }
+
+# pswamp-core is the shared data architecture at the repo root (core/): the
+# messages, the provider contract and gateway, the player, the bus, the module
+# base and the pipeline registry. pydantic is its only dependency. The same
+# one-way rule as above: this backend imports pswamp_core; nothing under core/
+# imports anything from app/ or from the desktop package. After editing
+# core/pyproject.toml, re-lock here with `uv lock --upgrade-package pswamp-core`
+# -- a plain `uv lock` does not re-read a path dependency's manifest.
+pswamp-core = { path = "../../core", editable = true }
 
 # Tooling that must never ship in the image — the Dockerfile installs with
 # --no-dev. Declared here so the versions are locked and hash-verified like
@@ -79,7 +89,10 @@ package = false
 # registry tests run without a per-test marker. This section does not make ruff
 # treat the file as config; only a [tool.ruff] section would, and there
 # deliberately isn't one (see the note above).
+# core/tests/ is the shared core's own suite; it runs in this environment (the
+# core is installed editable here and depends only on pydantic) so that one
+# runner and one CI job cover both. Paths are relative to this directory.
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-testpaths = ["tests"]
+testpaths = ["tests", "../../core/tests"]
 asyncio_mode = "auto"
