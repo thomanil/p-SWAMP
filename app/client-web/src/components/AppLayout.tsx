@@ -22,6 +22,7 @@ const NAV_ITEMS = [
   { to: '/', label: 'Monitor', end: true },
   { to: '/pmu-test-streamer', label: 'PMU Test Streamer', end: false },
   { to: '/reference-subapp', label: 'Reference example', end: false },
+  { to: '/frequency-peek', label: 'Frequency peek', end: false },
 ]
 
 function isLocalhost(): boolean {
