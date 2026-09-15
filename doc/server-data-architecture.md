@@ -747,6 +747,13 @@ rather than dressed up as measured. The numbers it should now produce:
 host→worker→host latency per frame at 20 Hz, and the produce cost on the
 host's loop, both against the in-process path.
 
+**Built:** the frequency-peek app (`app/server-python/src/frequency_peek/`,
+route `/frequency-peek`) is this shape end to end -- `FREQUENCY_PEEK_BUS_CLIENTS`
+switches its module list, `worker.py` is the worker, one shared pipeline under
+`REGISTRY["live"]`, `redpanda` and `frequency-worker` in `docker-compose.yml`
+and the matching Deployments in `k8s/p-swamp-local.yaml`. Its tests run the
+two sides over `InMemoryBroker` with no port.
+
 ## What is deliberately not here yet
 
 The full design, and the order things land in, is STEP 3 at the repo root.

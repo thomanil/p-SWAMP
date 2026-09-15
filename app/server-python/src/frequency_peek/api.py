@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""The Frequency peek app's backend: the web edge over one core pipeline per client.
+"""The Frequency peek app's backend: the web edge over one shared live pipeline.
 
 A module and the page that shows it, built by the recipe in
 ``doc/server-data-architecture.md`` ("Adding things"): the configured PMU
@@ -16,8 +16,23 @@ as soon as it starts, so the frequencies on screen are stamped now and there
 are no transport controls -- and so no commands. State goes down the socket;
 nothing comes up.
 
-Per client: one pipeline, built by ``REGISTRY`` on first connect and keyed by
-the browser's client id, capped and idle-evicted like the streamer's.
+**One pipeline per process, not per client.** This app knowingly steps off the
+"everything is per client" invariant: a live stream is keyed by the *stream*
+(the right-hand column of the table in the architecture doc), so every viewer
+sees the same instant and the analysis runs once. The registry still manages
+it -- built on the first socket, kept alive across reconnects, stopped when
+the last viewer has been gone for ``IDLE_EVICT_SECONDS`` -- under the one key
+``PIPELINE_KEY``. Don't "fix" this back to the client id.
+
+**The module runs here or in another process, and nothing else changes.**
+With ``FREQUENCY_PEEK_BUS_CLIENTS`` unset the pipeline's module list holds the
+``FrequencyModule`` itself. Set to a provider spec naming a broker (the
+``KafkaClient`` in ``pswamp_core``, or the portless ``InMemoryBroker``), the
+list holds a ``TopicBridge`` instead: it produces this pipeline's frames (and
+its header) onto the broker's topics and publishes the results it tails back
+onto this bus, where the socket subscribes to them exactly as before. The
+worker on the other side (``worker.py``) runs the same module code. See
+"Running a module in another process" in the architecture doc.
 
 server.py mounts this ``router`` under /api/frequency-peek. Nothing here knows
 about that prefix.
@@ -27,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from collections.abc import AsyncIterator
 from typing import Literal
 
@@ -34,9 +50,11 @@ from fastapi import APIRouter, FastAPI, WebSocket
 from pydantic import BaseModel, Field
 from shared import event_queue, get_logger, read_client_id, serve_updates
 
+from pswamp_core.bridge import TopicBridge
 from pswamp_core.bus import InProcessBus
 from pswamp_core.datagateway import DataGateway, Player, gateway_from_env
-from pswamp_core.messages import PlayerStatus, PmuFrame
+from pswamp_core.messages import PlayerStatus, PmuFrame, PmuHeader
+from pswamp_core.modules import Module
 from pswamp_core.pipeline import CapacityError, Pipeline, PipelineRegistry
 
 from .frequency_module import FrequencyModule, FrequencyResult
@@ -52,11 +70,19 @@ DEFAULT_DATA_CLIENTS = (
 )
 DATA_CLIENTS_VARIABLE = "FREQUENCY_PEEK_DATA_CLIENTS"
 
-MAX_PIPELINES = 8
+#: A provider spec for the broker the module is reached through, e.g.
+#: ``bus:pswamp_core.datagateway.clients.kafka:KafkaClient`` (with
+#: ``BUS_BOOTSTRAP_SERVERS`` beside it). Unset, the module runs in-process.
+#: Either way the module code, the bus message and the page are the same.
+BUS_CLIENTS_VARIABLE = "FREQUENCY_PEEK_BUS_CLIENTS"
+
+#: The one pipeline every viewer shares. A live stream is keyed by the stream.
+PIPELINE_KEY = "live"
+MAX_PIPELINES = 1
 IDLE_EVICT_SECONDS = 300.0
 
 
-# --- the pipeline, per client -------------------------------------------------
+# --- the pipeline, one per process ------------------------------------------------
 
 
 class LivePipeline(Pipeline):
@@ -74,13 +100,39 @@ class LivePipeline(Pipeline):
             await self.player.go_live()
 
 
-async def build_pipeline(client_id: str) -> LivePipeline:
-    """One client's pipeline: the configured providers, a bus, a live player and
-    the frequency module. Called by the registry, never directly."""
+def bus_gateway() -> DataGateway | None:
+    """The broker's gateway, when the environment names one; ``None`` otherwise."""
+    if not os.environ.get(BUS_CLIENTS_VARIABLE, "").strip():
+        return None
+    return gateway_from_env(None, variable=BUS_CLIENTS_VARIABLE)
+
+
+def frequency_modules(bus: DataGateway | None) -> list[Module]:
+    """The pipeline's module list: the module itself, or the bridge that
+    carries this pipeline's frames to it and its results back."""
+    if bus is None:
+        return [FrequencyModule()]
+    return [
+        TopicBridge(
+            bus,
+            outbound=[PmuFrame],
+            prime=[PmuHeader],
+            inbound=[FrequencyResult],
+            name="frequency@bus",
+        )
+    ]
+
+
+async def build_pipeline(key: str) -> LivePipeline:
+    """The shared pipeline: the configured providers, a bus, a live player and
+    the frequency module -- in this process or behind the broker. Called by
+    the registry, never directly."""
     gateway: DataGateway = gateway_from_env(DEFAULT_DATA_CLIENTS, variable=DATA_CLIENTS_VARIABLE)
     bus = InProcessBus()
     player = Player(gateway, bus, model=PmuFrame, autoplay=True, loop=True)
-    return LivePipeline(client_id, gateway, bus, player, [FrequencyModule()])
+    modules = frequency_modules(bus_gateway())
+    logger.info("pipeline %s: frequency module runs as %s", key, modules[0].name)
+    return LivePipeline(key, gateway, bus, player, modules)
 
 
 REGISTRY: PipelineRegistry[LivePipeline] = PipelineRegistry(
@@ -132,12 +184,12 @@ router = APIRouter()
 
 @contextlib.asynccontextmanager
 async def connected_pipeline(ws: WebSocket) -> AsyncIterator[Pipeline | None]:
-    """Accept one socket and hold its client's pipeline for as long as it lives.
+    """Accept one socket and hold the shared pipeline for as long as it lives.
 
     Yields ``None`` when the connection was refused: no usable client id is
-    closed *before* accepting (1008); at capacity the socket is accepted first
-    and then closed with 1013, because a code only reaches the browser on an
-    established connection, and the web client treats 1013 as terminal.
+    closed *before* accepting (1008); a pipeline that fails to build is closed
+    with 1011 (the registry's capacity refusal, 1013, cannot happen with one
+    key, but is mapped for the day the key changes).
 
     (A copy of the streamer's, pointed at this registry -- the handshake is not
     shared yet; see ``doc/server-data-architecture.md``, "Adding things".)
@@ -150,7 +202,7 @@ async def connected_pipeline(ws: WebSocket) -> AsyncIterator[Pipeline | None]:
 
     await ws.accept()
     try:
-        pipeline = await REGISTRY.acquire(client_id)
+        pipeline = await REGISTRY.acquire(PIPELINE_KEY)
     except CapacityError:
         logger.warning("refused client %s: all %s pipelines in use", client_id, REGISTRY.max_pipelines)
         await ws.close(code=1013)  # try again later
@@ -165,7 +217,7 @@ async def connected_pipeline(ws: WebSocket) -> AsyncIterator[Pipeline | None]:
     try:
         yield pipeline
     finally:
-        REGISTRY.release(client_id)
+        REGISTRY.release(PIPELINE_KEY)
 
 
 @router.websocket("/ws")
@@ -173,10 +225,11 @@ async def ws_endpoint(ws: WebSocket) -> None:
     async with connected_pipeline(ws) as pipeline:
         if pipeline is None:
             return
-        logger.info("client %s: connected (%s live)", pipeline.key, len(REGISTRY.keys()))
+        client_id = ws.query_params.get("client_id", "?")
+        logger.info("client %s: joined pipeline %s (%d watching)", client_id, pipeline.key, REGISTRY.watchers(pipeline.key))
         # Open the queue before the opening message, so a result published in
         # between is not lost; the builder reads the bus's newest, so it
         # ignores which event woke it.
         with event_queue(pipeline.bus, FrequencyResult) as updates:
             await serve_updates(ws, updates, lambda _event: state_message(pipeline))
-        logger.info("client %s: disconnected", pipeline.key)
+        logger.info("client %s: left pipeline %s", client_id, pipeline.key)

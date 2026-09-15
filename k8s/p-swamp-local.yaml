@@ -10,7 +10,8 @@
 #
 # Nothing is persisted: no DB, no persistent volumes. A rollout resets every
 # client's state, which is the expected behavior for this stateless deployment.
-# The one volume below is a read-only ConfigMap: configuration, not storage.
+# The volumes below are a read-only ConfigMap (configuration, not storage) and
+# the broker's emptyDir (a scratch disk that dies with its pod, on purpose).
 #
 # The PMU data sources are configured here rather than baked in. The env block
 # names the two providers (the streamer's own default, spelled out) and points
@@ -77,6 +78,15 @@ spec:
             # header is what describes its frames.
             - name: LIVE_PATH
               value: /etc/p-swamp/pmu/deployment_pmu_data_file_example.txt
+            # Reach the frequency-peek module over the broker (the
+            # p-swamp-redpanda Deployment below) instead of running it in this
+            # pod: the pipeline then holds a TopicBridge producing frames onto
+            # the broker's topics and tailing the results the worker pod
+            # produces. Remove these two and the module runs in-process.
+            - name: FREQUENCY_PEEK_BUS_CLIENTS
+              value: bus:pswamp_core.datagateway.clients.kafka:KafkaClient
+            - name: BUS_BOOTSTRAP_SERVERS
+              value: p-swamp-redpanda:9092
           volumeMounts:
             - name: pmu-data
               mountPath: /etc/p-swamp/pmu
@@ -149,3 +159,172 @@ spec:
       port: 8000        # cluster-internal Service port
       targetPort: 8000  # container port
       nodePort: 30080   # fixed external port (valid range 30000-32767)
+---
+# The frequency-peek module as its own pod: the same image with a different
+# command (src/frequency_peek/worker.py). It has no port and no Service: it
+# tails pmu.frame off the broker below and produces frequency.result back,
+# through the core's TopicBridge, so the module code is unchanged and nothing
+# addresses this pod. One replica because one module instance is the design
+# (the analysis runs once for the shared live stream), not a transport limit.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp-frequency-worker
+  labels:
+    app: p-swamp-frequency-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp-frequency-worker
+  template:
+    metadata:
+      labels:
+        app: p-swamp-frequency-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: frequency-worker
+          image: p-swamp:latest
+          imagePullPolicy: Never
+          command: ["python", "-m", "frequency_peek.worker"]
+          env:
+            - name: FREQUENCY_PEEK_BUS_CLIENTS
+              value: bus:pswamp_core.datagateway.clients.kafka:KafkaClient
+            - name: BUS_BOOTSTRAP_SERVERS
+              value: p-swamp-redpanda:9092
+          # Liveness is a heartbeat file the worker touches every 5 s while its
+          # loop runs; "fresh within 30 s" is the whole check. A lost broker is
+          # reconnected by the bridge and would not be fixed by a restart, so
+          # it does not fail this. No readiness probe: nothing routes to it.
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - test $(( $(date +%s) - $(stat -c %Y /tmp/frequency-worker-heartbeat) )) -lt 30
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              # See the server's note on CPU: the same nested-virtualization
+              # throttling applies to a 20 Hz loop here.
+              cpu: "1"
+              # The worker imports the same stack as the server but builds no
+              # replay pipeline: one module, one bridge, two consumers.
+              memory: "512Mi"
+---
+# The broker the frequency-peek module is reached through: Redpanda, a
+# single-binary Kafka-API server, one node in dev-container mode. This is the
+# ONE image here that is pulled rather than built into minikube -- hence
+# IfNotPresent, not the Never the p-swamp image needs -- so the first rollout
+# waits for a download (the start script gives it the longer timeout). Its
+# data dir is an emptyDir: ephemeral by the "no persistent volume" rule, and
+# fine, since everything on the topics is a live stream the web server
+# re-primes. Topics are created by the clients on first use.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp-redpanda
+  labels:
+    app: p-swamp-redpanda
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp-redpanda
+  template:
+    metadata:
+      labels:
+        app: p-swamp-redpanda
+    spec:
+      # The image's own `redpanda` user.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        fsGroup: 101
+      containers:
+        - name: redpanda
+          image: redpandadata/redpanda:v26.2.2
+          imagePullPolicy: IfNotPresent
+          args:
+            - redpanda
+            - start
+            - --mode
+            - dev-container
+            - --smp
+            - "1"
+            - --memory
+            - 512M
+            - --reserve-memory
+            - 0M
+            - --overprovisioned
+            - --kafka-addr
+            - internal://0.0.0.0:9092
+            - --advertise-kafka-addr
+            - internal://p-swamp-redpanda:9092
+          ports:
+            - name: kafka
+              containerPort: 9092
+            - name: admin
+              containerPort: 9644
+          readinessProbe:
+            httpGet:
+              path: /v1/status/ready
+              port: 9644
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /v1/status/ready
+              port: 9644
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/redpanda/data
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: p-swamp-redpanda
+  labels:
+    app: p-swamp-redpanda
+spec:
+  type: ClusterIP
+  selector:
+    app: p-swamp-redpanda
+  ports:
+    - name: kafka
+      protocol: TCP
+      port: 9092
+      targetPort: 9092
+    - name: admin
+      protocol: TCP
+      port: 9644
+      targetPort: 9644

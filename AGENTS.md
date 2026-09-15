@@ -70,7 +70,9 @@ which exist to keep the "adding a page" path honest:
 
 **The client-server stack is stateless on purpose.** There is no database and no
 persistent volume anywhere under `app/` or `k8s/`. Don't reintroduce one without
-an explicit ask. (The Nordic 44 grid model *is* a sqlite file, and the replayed
+an explicit ask. (The Redpanda broker in compose and `k8s/` runs with no volume
+and on an `emptyDir` respectively, deliberately: everything on its topics is a
+live stream the web server re-primes, and a restart empties it.) (The Nordic 44 grid model *is* a sqlite file, and the replayed
 PMU stream *is* a committed `.npz` — but both are read-only sample data the
 server opens, not storage it writes to.)
 
@@ -161,7 +163,11 @@ Consequences worth knowing before touching anything:
 
 ## Architecture
 
-Two deployables, one wire protocol:
+Two deployables, one wire protocol — plus, for the frequency-peek module only,
+a worker process from the same image and the broker it is reached through
+(`docker-compose.yml`'s `frequency-worker` and `redpanda`; see the
+`src/frequency_peek/` note below). Neither is a dependency of the server:
+unset one variable and the module runs in-process, which is what CI runs.
 
 - **`app/server-python/`** — the authoritative state server. The code lives in
   `src/` (mirroring the web client's layout), with the manifests beside it.
@@ -195,6 +201,23 @@ Two deployables, one wire protocol:
   apply the verb, so the ack never claims a command the player would only log).
   Both providers are the default (`DEFAULT_DATA_CLIENTS`); `PSWAMP_DATA_CLIENTS`
   names others. `doc/server-data-architecture.md` walks through it.
+  **`src/frequency_peek/`** is that document's "Adding things" recipe followed
+  once, as a check that it holds: `frequency_module.py` (a `Module` keeping
+  only the per-station frequency out of each `PmuFrame`, published as
+  `FrequencyResult`), `api.py` (the pipeline, always live, and a socket with
+  no commands) and the page at `/frequency-peek`. It is also **the worked
+  example of a module in another process, connected over topics**: with
+  `FREQUENCY_PEEK_BUS_CLIENTS` naming a broker provider (the core's
+  `KafkaClient`; `BUS_BOOTSTRAP_SERVERS` beside it), the pipeline's module
+  list holds a `TopicBridge` (`core/src/pswamp_core/bridge.py`) instead of the
+  module, and `worker.py` — a plain process from the same image, no port —
+  runs the identical module on a bus of its own, tailing `pmu.frame` and
+  producing `frequency.result`. Unset (the tests, CI) the module runs
+  in-process. **It is also the one app keyed per stream, not per client**:
+  every viewer shares `REGISTRY["live"]` and sees the same instant — the
+  right-hand column of that document's table, and a deliberate exception to
+  the per-client invariant below. See "Running a module in another process"
+  there.
   `sample_data.txt` beside it is a **one-off sample committed for testing** — 300
   *simulated* PMU records extracted by hand from the Nordic 44 simulation that now
   lives in this same repo under `examples/nordic44_rtsim/` (voltage phasor +
@@ -939,7 +962,8 @@ then runs the counter flow: connect a socket, POST bumps, assert the pushed
 counts, POST reset, assert zero, and assert a second client id starts at zero. Two
 things worth knowing before extending it:
 
-- **The WebSocket half is Python, and needs no new dependency.**
+- **The WebSocket half is Python, and needs no new dependency** (`websockets`
+  comes with `uvicorn[standard]`; nothing in the backend declares it).
   `app/server-python/tools/smoketest_reference_subapp.py` runs in the server's own
   locked environment via `uv run --project app/server-python`, where `websockets`
   is already present through `uvicorn[standard]`. Bash cannot speak a socket, and

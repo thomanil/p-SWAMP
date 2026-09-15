@@ -13,6 +13,19 @@ services:
       # Compose sync writes may not always emit inotify events in-container;
       # polling keeps reload reliable across host/container boundaries.
       WATCHFILES_FORCE_POLLING: "true"
+      # Reach the frequency-peek module over the broker below rather than
+      # running it in this process: the pipeline's module list then holds a
+      # TopicBridge that produces frames onto redpanda's topics and tails the
+      # results the frequency-worker service produces. Unset it and the
+      # module runs in-process, unchanged (which is what CI's e2e job does).
+      FREQUENCY_PEEK_BUS_CLIENTS: "bus:pswamp_core.datagateway.clients.kafka:KafkaClient"
+      BUS_BOOTSTRAP_SERVERS: "redpanda:9092"
+    # The broker is reached lazily -- on the first frequency-peek socket, not
+    # at startup -- but a bridge that finds no broker logs and drops until
+    # one appears, so wait for redpanda to be healthy rather than racing it.
+    depends_on:
+      redpanda:
+        condition: service_healthy
     # Dev-only override: run uvicorn with --reload so the files synced in by
     # `watch` (below) trigger an in-process hot reload. The Dockerfile's prod
     # CMD (plain `python server.py`) is left untouched — this reloader never
@@ -33,9 +46,10 @@ services:
         "--reload-dir",
         "/workspace/p-SWAMP/core",
       ]
-    # The server has no external dependencies, so "is the process serving?" is
-    # the whole health story — /healthz covers it. curl returns non-zero if the
-    # endpoint doesn't answer.
+    # /healthz is the process's own health -- "is it serving?" -- and stays so:
+    # the broker is an optional, lazily reached dependency of one page, not a
+    # precondition for the server. curl returns non-zero if the endpoint
+    # doesn't answer.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
       interval: 10s
@@ -89,3 +103,70 @@ services:
           action: rebuild
         - path: core/pyproject.toml
           action: rebuild
+
+  # The frequency-peek module as its own process (src/frequency_peek/worker.py):
+  # the SAME image, a different command. It has no port: it tails pmu.frame off
+  # the broker below and produces frequency.result back, through the core's
+  # TopicBridge, so the module code runs here unchanged and nothing addresses
+  # this container directly. A plain python process has no --reload, so the
+  # watch entries restart it on a sync instead.
+  frequency-worker:
+    build: .
+    image: p-swamp:latest
+    command: ["python", "-m", "frequency_peek.worker"]
+    environment:
+      FREQUENCY_PEEK_BUS_CLIENTS: "bus:pswamp_core.datagateway.clients.kafka:KafkaClient"
+      BUS_BOOTSTRAP_SERVERS: "redpanda:9092"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    # Liveness is a heartbeat file the worker touches every 5 s while its loop
+    # runs (see worker.py); "fresh within 30 s" is the whole check. A lost
+    # broker is logged and reconnected by the bridge, and would not be fixed
+    # by a restart, so it deliberately does not fail this.
+    healthcheck:
+      test: ["CMD-SHELL", "test $(( $(date +%s) - $(stat -c %Y /tmp/frequency-worker-heartbeat) )) -lt 30"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    develop:
+      watch:
+        - path: app/server-python/src
+          action: sync+restart
+          target: /workspace/p-SWAMP/app/server-python/src
+        - path: core
+          action: sync+restart
+          target: /workspace/p-SWAMP/core
+
+  # The broker the frequency-peek module is reached through: Redpanda, a
+  # single-binary Kafka-API server, one node in dev-container mode. Ephemeral
+  # on purpose -- no volume, by the "no persistent volume" rule in AGENTS.md --
+  # so a restart empties the topics, which is fine: everything on them is a
+  # live stream the web server re-primes. The external listener on 19092 is
+  # for the host: `rpk` from a laptop, and the broker-gated Kafka tests
+  # (KAFKA_TEST_BOOTSTRAP_SERVERS=127.0.0.1:19092). Topics are created by the
+  # clients on first use; Redpanda does not auto-create them.
+  redpanda:
+    image: redpandadata/redpanda:v26.2.2
+    command:
+      [
+        "redpanda", "start",
+        "--mode", "dev-container",
+        "--smp", "1",
+        "--memory", "512M",
+        "--reserve-memory", "0M",
+        "--overprovisioned",
+        "--kafka-addr", "internal://0.0.0.0:9092,external://0.0.0.0:19092",
+        "--advertise-kafka-addr", "internal://redpanda:9092,external://localhost:19092",
+      ]
+    ports:
+      - "19092:19092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
