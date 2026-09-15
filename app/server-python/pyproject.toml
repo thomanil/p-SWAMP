@@ -16,7 +16,9 @@ dependencies = [
     "fastapi>=0.141.1,<0.142",
     "uvicorn[standard]>=0.52.4,<0.53",
     "p-swamp",
-    "pswamp-core",
+    # The [kafka] extra is aiokafka: the frequency-peek module's topic bridge
+    # (core/src/pswamp_core/bridge.py) reaches its worker through a broker.
+    "pswamp-core[kafka]",
 ]
 
 # p-swamp is the desktop package at the repo root (root pyproject.toml, root

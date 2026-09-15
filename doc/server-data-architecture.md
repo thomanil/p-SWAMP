@@ -591,6 +591,10 @@ piece of `pmu_test_streamer/` to copy.
    Name the provider in the `gateway_from_env` spec string and give the app its
    own `variable=`; don't import `pmu_test_streamer`. A page with no transport
    wants `Player(..., autoplay=True, loop=True)`, or it shows dashes for ever.
+   To run the module in another process, put a
+   `TopicBridge(broker_gateway, outbound=[PmuFrame], prime=[PmuHeader], inbound=[MyThingResult])`
+   in the list instead of the module, and the module on a bus of its own in
+   a worker -- see "Running a module in another process" below.
 4. **The socket**: a state model exported as `WS_MESSAGE`, carrying the header
    on the first message only and the envelope as it is; `state_message`
    reading `pipeline.latest.get(MyThingResult)`; and the grid monitor's
@@ -647,6 +651,102 @@ Don't add the module to the *streamer's* pipeline and put the page in
 another package: two apps sharing a pipeline is the right-hand column of the
 table above, a decision about the key, not a shortcut.
 
+## Running a module in another process
+
+A module is connected to a pipeline by a bus: it subscribes to one class and
+publishes another. Running it in another process keeps that connection and
+moves the *bus* -- carried across the process boundary by topics on a broker.
+Nothing in the module changes for the move.
+
+```
+   host process (the pipeline)                            worker process
+   ┌────────────────────────────────────────────────┐      ┌────────────────────────────────────────────┐
+   │ gateway(providers) ─ Player ─▶ InProcessBus     │      │ InProcessBus                                │
+   │   TopicBridge(outbound=[PmuFrame],              │      │   ▲ pmu.frame, pmu.header   (inbound tails) │
+   │               prime=[PmuHeader],                │      │ TopicBridge(outbound=[MyResult],            │
+   │               inbound=[MyResult])               │      │             inbound=[PmuFrame, PmuHeader])  │
+   │     └─ its OWN DataGateway([KafkaClient]) ──────┼topics┼──── own DataGateway([KafkaClient])          │
+   │ the socket endpoint subscribes MyResult, as before     │ MyModule.setup ◀ InMemoryClient(header)     │
+   └────────────────────────────────────────────────┘      └────────────────────────────────────────────┘
+                        broker topics: pmu.header · pmu.frame · my.result   (one partition each)
+```
+
+**The bridge.** `pswamp_core.bridge.TopicBridge` is STEP 3 §4.4's "a broker as
+a bus" realised -- publish by `gateway.produce`, subscribe by one
+`gateway.consume(Model, now, None)` tail per class per process, fanned out on
+the local bus -- but as a Module-shaped component in the pipeline's module
+list rather than a `Bus` implementation. STEP 4 §8.1 #3 said the `Bus`
+protocol should not be frozen until one broker adapter had been written
+against it; this is that adapter, and it sits *outside* the protocol on
+purpose: the pipeline's own bus stays the in-process one, `publish` stays
+synchronous (the bridge's subscription on the local bus is the outbox that
+absorbs the async `produce`), and what crosses is exactly the classes the
+bridge is told to carry, one direction per side, so nothing echoes. The broker
+is a `DataClient` behind a `DataGateway` of the bridge's **own** -- never the
+pipeline's data gateway, whose planner would otherwise offer the broker as one
+more live source of the very frames the player publishes. A tail that ends
+(broker restart) is reopened from *now* with backoff, because a `DataStream`
+never re-plans after its live segment ends. On the worker side the same class
+faces the other way: the module's output is `outbound`, its input `inbound`,
+and the module runs on that bus through its own `setup` and `run`.
+
+**The broker as a provider.** `pswamp_core.datagateway.clients.kafka.KafkaClient`
+is Louis's draft client lifted: one topic per model under an optional
+namespace prefix (`BUS_TOPIC_PREFIX`, configuration and never a message
+field), JSON in and `model_validate_json` out, the record key `mRID`, live
+coverage `[now - retention, ∞)`, topics created on first use (Redpanda does
+not auto-create), one partition each so the stream's ordering holds. It is the
+`[kafka]` extra of `pswamp-core` -- aiokafka, imported lazily -- so the core
+stays pydantic-only unless a host asks. Named like any provider, in a spec
+string the app reads from a variable of its own:
+
+```
+MY_THING_BUS_CLIENTS=bus:pswamp_core.datagateway.clients.kafka:KafkaClient
+BUS_BOOTSTRAP_SERVERS=redpanda:9092         # BUS_TOPIC_PREFIX, BUS_RETENTION_SECONDS, … optional
+```
+
+Unset, the app's module list holds the module itself and no broker is
+involved; set, it holds the bridge. Either way the socket endpoint subscribes
+to the result class and notices nothing. The stand-in for tests is
+`InMemoryBroker`, a broker with no port: one instance shared by two gateways
+is the whole broker between the two sides, and
+`bus:pswamp_core.datagateway.clients.in_memory:InMemoryBroker` is a legal,
+portless configuration.
+
+**The header.** A module that reads the stream's layout needs it before its
+first frame, and a broker client addresses by *payload* time -- so the bridge
+produces what it is told to `prime` (the `PmuHeader`, read from the pipeline's
+gateway in `setup`) **re-stamped to now**, and again every half minute; the
+worker reads the newest one with a bounded read (`bridge.newest`), serves it
+to the module's own `setup` from an `InMemoryClient`, and keeps a listener on
+the inbound header tail for a later one. It follows that only live-stamped
+messages cross a bridge; a *replay* over a broker would need a client
+addressing by arrival time, which none does. This is STEP 4 §8.1 #5 ("headers
+as bus events") answered at the app edge, not in the module contract.
+
+**The key.** A broker fits a pipeline keyed by the *stream*, not the client:
+one pipeline per process under a constant registry key, every viewer sees the
+same instant, the analysis runs once, and the worker runs one module instance
+-- the right-hand column of the table above -- and the topics then need no
+routing key. Per-client pipelines over one broker would need a key on every
+message and a module instance per client on the worker; not built.
+
+**Deployment.** A broker service beside the server (Redpanda: single node,
+dev-container mode, no volume -- everything on its topics is a live stream
+the host re-primes, so a restart empties it and that is fine) and a worker
+from the same image with a different command, no port, and liveness by a
+heartbeat file its loop touches. Both in compose and in `k8s/`, per STEP 3's
+rule that a service exists in both. The broker-gated tests run against the
+broker's external listener: `KAFKA_TEST_BOOTSTRAP_SERVERS=127.0.0.1:19092`.
+
+**What this overrides, and what to measure now.** STEP 3 principle 7 says no
+broker enters before a load generator and an end-to-end timestamp say why.
+This landed without either, on the architectural ground that a module should
+be connectable the same way wherever it runs -- a decision, recorded here
+rather than dressed up as measured. The numbers it should now produce:
+host→worker→host latency per frame at 20 Hz, and the produce cost on the
+host's loop, both against the in-process path.
+
 ## What is deliberately not here yet
 
 The full design, and the order things land in, is STEP 3 at the repo root.
@@ -657,6 +757,8 @@ Absent from this slice, on purpose:
 - the grid monitor re-pointed at the core (it still runs the proof-of-concept
   `Hub`/`Bus`/`HubRegistry` in `pswamp_web/`);
 - `request_id` in the browser-facing acknowledgement; batch jobs;
-- the draft's CSV and Kafka clients, a broker as a bus, any out-of-process
-  hosting — all gated on measurements first;
+- the draft's CSV client; a broker as a `Bus` *implementation* (the
+  `TopicBridge` above carries chosen classes across a broker without changing
+  the protocol; STEP 4 §8.1 #1 and #3, the awaitable publish for replay, are
+  still open);
 - a `PmuFrameAssembler` for deployments that ingest per-PMU messages.

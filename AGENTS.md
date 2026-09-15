@@ -86,9 +86,12 @@ either manifest to the other's level.
 The third is **`core/` — the shared data architecture, `pswamp-core`, imported
 as `pswamp_core`** (`core/pyproject.toml`, `core/src/pswamp_core/`,
 `core/tests/`): the wire messages, the provider contract and gateway, the player,
-the in-process bus, the module base and the pipeline registry. pydantic is its
-only dependency, so a provider written outside this repo can import the contract
-and nothing else. It has **no lockfile of its own**: it is a library, consumed by
+the in-process bus, the module base, the pipeline registry and the topic
+bridge. pydantic is its only dependency by default, so a provider written
+outside this repo can import the contract and nothing else; the one extra,
+`pswamp-core[kafka]`, adds aiokafka for the Kafka-API broker client
+(`datagateway/clients/kafka.py`, imported lazily), and the web backend takes
+that extra. It has **no lockfile of its own**: it is a library, consumed by
 the web backend as a second editable path dependency, and its tests run in that
 backend's environment (below). `doc/server-data-architecture.md` describes it;
 the `STEP*` files at the repo root are the working notes behind it, and STEP 4
@@ -906,7 +909,11 @@ separate envs and are hermetic to very different degrees:
   carries its own `[tool.pytest.ini_options]` too, so pointing pytest at
   `core/tests` directly (a node id, `pytest core/tests`) keeps the asyncio mode.
   `test_pmu_test_streamer.py` is the worked example of a provider inheriting
-  `DataClientConformance` with three fixtures.
+  `DataClientConformance` with three fixtures. The core's Kafka client has the
+  same suite in `core/tests/test_kafka_conformance.py`, **skipped unless a
+  broker is named**: `KAFKA_TEST_BOOTSTRAP_SERVERS=127.0.0.1:19092` runs it
+  against the compose stack's Redpanda (its external listener). The bridge's
+  own tests run over `InMemoryBroker`, a broker with no port.
 - **`./scripts/run-core-python-tests.sh`** — the desktop package's tests
   (repo-root `tests/`), in the root project's `[full]` env. A **starting point,
   not a gate**: most need external infrastructure (Kafka / NQKafka / MQTT brokers,

@@ -213,3 +213,104 @@ class InMemoryClient(DataClient):
 def _timestamp_key(record: DataModel) -> datetime:
     """Sort key placing not-yet-stamped records first."""
     return record.timestamp or _UNSET_TIMESTAMP
+
+
+#: How long the broker stand-in pretends to retain what was produced.
+_DEFAULT_BROKER_RETENTION = timedelta(minutes=20)
+
+
+class InMemoryBroker(InMemoryClient):
+    """A broker with no port, for tests and portless configurations.
+
+    What a message broker looks like through the provider contract, on top of
+    the list-backed client: ``produce`` keeps the payload as history *and*
+    hands it to every consumer currently tailing (a broker does not hold
+    messages for "the next consumer", so there is no backlog); an open-ended
+    ``consume`` is a pure tail from now, as a seek-to-end on a topic is; a
+    bounded one replays what is retained; ``coverage`` is a rolling window
+    ending in the open, so the planner treats it as live. Records older than
+    ``retention`` are dropped on the next ``produce``.
+
+    One instance shared by two gateways stands in for a broker between two
+    sides of a :class:`~pswamp_core.bridge.TopicBridge`. ``drop_tails`` ends
+    every open tail, which is what a broker restart looks like to a consumer.
+    Constructible with no settings, so ``from_env("bus")`` needs no variables.
+    """
+
+    def __init__(
+        self,
+        name: str = "broker",
+        supported_models: ModelSelector | None = None,
+        *,
+        retention: timedelta = _DEFAULT_BROKER_RETENTION,
+        priority: int = 0,
+        capabilities: Capability = (
+            Capability.LIVE_CONSUME | Capability.HISTORY_CONSUME | Capability.PRODUCE
+        ),
+    ) -> None:
+        from ...messages.data_model import DataModel  # a bus carries any message
+
+        super().__init__(
+            name,
+            DataModel if supported_models is None else supported_models,
+            priority=priority,
+            capabilities=capabilities,
+        )
+        self.retention = retention
+
+    async def coverage(
+        self,
+        model: type[DataModel],
+        mRID: MRIDFilter = None,
+    ) -> Coverage | None:
+        """A rolling retention window; open-ended when this client tails."""
+        if not self.supports(model):
+            return None
+        now = utcnow()
+        live = Capability.LIVE_CONSUME in self.capabilities
+        return Coverage(range=TimeRange(now - self.retention, None if live else now), live=live)
+
+    async def consume(
+        self,
+        model: type[DataModel],
+        time_range: TimeRange,
+        mRID: MRIDFilter = None,
+    ) -> AsyncIterator[DataModel]:
+        """A bounded range replays what is retained; an open one tails from now."""
+        if time_range.end is not None:
+            async for record in super().consume(model, time_range, mRID):
+                yield record
+            return
+
+        wanted = normalise_mrid_filter(mRID)
+        queue: asyncio.Queue[DataModel | None] = asyncio.Queue()
+        self._tails.append(queue)
+        try:
+            while True:
+                record = await queue.get()
+                if record is None:
+                    return
+                if not isinstance(record, model) or not time_range.contains(record.timestamp):
+                    continue
+                if wanted is not None and record.mRID not in wanted:
+                    continue
+                yield record
+        finally:
+            self._tails.remove(queue)
+
+    async def produce(self, data: DataModel) -> None:
+        """Retain the payload and deliver it to every open tail."""
+        await super().produce(data)
+        cutoff = utcnow() - self.retention
+        self.records = [r for r in self.records if r.timestamp is not None and r.timestamp >= cutoff]
+        self.publish(data)
+
+    def publish(self, data: DataModel) -> None:
+        """Deliver to every open tail; nobody tailing means nobody hears it."""
+        for queue in self._tails:
+            queue.put_nowait(data)
+
+    def drop_tails(self) -> None:
+        """End every open tail, as a broker going away does to its consumers."""
+        for queue in list(self._tails):
+            queue.put_nowait(None)
