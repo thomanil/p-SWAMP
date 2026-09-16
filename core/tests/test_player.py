@@ -18,7 +18,7 @@ from pswamp_core.bus import InProcessBus, Overflow
 from pswamp_core.datagateway import Capability, Coverage, DataGateway, Player, TimeRange
 from pswamp_core.datagateway.clients import InMemoryClient
 from pswamp_core.datagateway.player import PlayerError
-from pswamp_core.messages import Command, PlayerStatus, StreamChanged
+from pswamp_core.messages import Command, ErrorEvent, PlayerStatus, StreamChanged
 from pswamp_core.util.time import utcnow
 
 
@@ -435,6 +435,194 @@ async def test_replay_returns_to_the_history_start_paused(mixed_rig):
         await player.step()
         (frame,) = await take(frames, 1)
         assert frame.mRID == "m5"
+
+
+# --- a bounded replay, and a provider that fails mid-stream ------------------------
+
+
+async def test_replay_over_a_bounded_range_plays_exactly_the_range_then_ends_paused(rig):
+    bus, _, player = rig
+    player.loop = True  # a bounded range ends even on a looping player
+    await player.start()
+    with bus.subscribe(Measurement, overflow=Overflow.GROW) as frames, bus.subscribe(
+        PlayerStatus, overflow=Overflow.GROW
+    ) as statuses:
+        bus.publish(Command(verb="replay", args={"to": at(2), "end": at(5), "play": True}))
+        running = await wait_status(statuses, lambda s: not s.paused and s.range_end == at(5))
+        assert running.error is None
+        got = await take(frames, 3)
+        ended = await wait_status(statuses, lambda s: s.ended)
+    assert [m.mRID for m in got] == ["m2", "m3", "m4"]
+    assert ended.paused is True and ended.range_end == at(5)
+    await asyncio.sleep(0.02)
+    assert player.ended is True  # no loop restart
+    assert player.cursor == at(4)
+
+
+async def test_range_end_past_the_history_is_clamped_and_offsets_work(rig):
+    bus, _, player = rig
+    await player.start()
+    with bus.subscribe(Measurement, overflow=Overflow.GROW) as frames, bus.subscribe(
+        PlayerStatus, overflow=Overflow.GROW
+    ) as statuses:
+        bus.publish(Command(verb="replay", args={"offset_s": 8, "end_offset_s": 50, "play": True}))
+        status = await wait_status(statuses, lambda s: not s.paused)
+        assert status.range_end is None  # clamped to the history end: an ordinary replay
+        got = await take(frames, 2)
+        await wait_status(statuses, lambda s: s.ended)
+    assert [m.mRID for m in got] == ["m8", "m9"]
+    # An empty range is refused and leaves the stream as it was.
+    with pytest.raises(PlayerError):
+        await player.replay(at(5), at(5))
+    with pytest.raises(PlayerError):
+        await player.replay(at(6), at(5))
+
+
+async def test_a_seek_after_a_bounded_replay_clears_the_range(rig):
+    bus, _, player = rig
+    await player.start()
+    await player.replay(at(1), at(3))
+    assert player.status().range_end == at(3)
+    await player.seek(at(2))
+    assert player.status().range_end is None
+
+
+class FailsAfterTwo(InMemoryClient):
+    """A history client whose stream dies after two records, as a remote
+    store that times out would."""
+
+    async def consume(self, model, time_range, mRID=None):
+        sent = 0
+        async for record in super().consume(model, time_range, mRID):
+            if sent == 2:
+                raise TimeoutError("no result within 30s")
+            sent += 1
+            yield record
+
+
+async def test_a_provider_failure_ends_the_stream_with_the_error_and_the_player_survives():
+    bus = InProcessBus()
+    bus.bind(asyncio.get_running_loop())
+    from support import measurements
+
+    client = FailsAfterTwo("flaky", Measurement, measurements(10), capabilities=HISTORY)
+    player = Player(DataGateway([client]), bus, model=Measurement, paced=False)
+    with bus.subscribe(Measurement, overflow=Overflow.GROW) as frames, bus.subscribe(
+        PlayerStatus, overflow=Overflow.GROW
+    ) as statuses, bus.subscribe(ErrorEvent, overflow=Overflow.GROW) as errors:
+        await player.start()
+        try:
+            player.resume()
+            got = await take(frames, 2)
+            failed = await wait_status(statuses, lambda s: s.error is not None)
+            assert [m.mRID for m in got] == ["m0", "m1"]
+            assert failed.paused is True and failed.ended is True
+            assert failed.error == "TimeoutError: no result within 30s"
+            (event,) = await take(errors, 1)
+            assert event.source == "player" and event.detail == failed.error
+            assert player._run_task is not None and not player._run_task.done()
+            # A resume clears the error and reopens from the start.
+            player.resume()
+            assert player.status().error is None
+            again = await take(frames, 2)
+            assert [m.mRID for m in again] == ["m0", "m1"]
+            await wait_status(statuses, lambda s: s.error is not None)
+            # A step on a failed stream reports the same way and does not raise.
+            await player.step()
+            assert player.status().error is not None or player.cursor is not None
+        finally:
+            await player.stop()  # does not re-raise the stored failure
+
+
+async def test_a_history_source_that_stops_answering_coverage_is_an_error_not_a_silent_end(rig):
+    bus, gateway, player = rig
+    await player.start()
+    client = gateway.clients["history"]
+    original = client.coverage
+
+    async def unreachable(model, mRID=None):
+        raise ConnectionError("refused")
+
+    client.coverage = unreachable  # type: ignore[method-assign]
+    with bus.subscribe(ErrorEvent, overflow=Overflow.GROW) as errors, bus.subscribe(
+        Measurement, overflow=Overflow.GROW
+    ) as frames:
+        with pytest.raises(PlayerError):
+            await player.seek(at(3))
+        (event,) = await take(errors, 1)
+        status = player.status()
+        assert status.error == "history: ConnectionError: refused"  # the client's own error, named
+        assert status.paused and status.ended and status.mode == "replay"
+        assert event.detail == status.error and event.source == "history"
+        # A play while it is still down fails the same way, and the run task lives.
+        player.resume()
+        (event,) = await take(errors, 1)
+        await asyncio.sleep(0.02)
+        assert player.paused and player.mode == "replay" and frames.get_nowait() is None
+        assert player._run_task is not None and not player._run_task.done()
+        # Still down: a refresh re-asks, finds nothing, and the error stands.
+        bus.publish(Command(verb="refresh"))
+        await asyncio.sleep(0.02)
+        assert player.status().error is not None and player.status().coverage_start is None
+        # Back: a refresh finds the coverage again and clears the error, playing nothing.
+        client.coverage = original  # type: ignore[method-assign]
+        await player.refresh()
+        assert player.status().error is None and player.status().coverage_start == at(0)
+        assert frames.get_nowait() is None
+        await player.seek(at(3))
+        assert player.status().error is None and player.status().coverage_start == at(0)
+        await player.step()
+        (frame,) = await take(frames, 1)
+    assert frame.mRID == "m3"
+
+
+async def test_a_player_over_an_unreachable_source_starts_stopped_with_its_error_and_recovers():
+    """The store's URL cannot be reached when the page connects: the pipeline
+    still starts, so the page sees *why* (the client's own error, named after
+    the client) and a refresh finds the store once it is back."""
+    bus = InProcessBus()
+    bus.bind(asyncio.get_running_loop())
+    from support import measurements
+
+    client = InMemoryClient("tsdb", Measurement, measurements(10), capabilities=HISTORY)
+    original = client.coverage
+
+    async def unreachable(model, mRID=None):
+        raise ConnectionError("cannot reach http://tsdb:8100: ConnectError: refused")
+
+    client.coverage = unreachable  # type: ignore[method-assign]
+    gateway = DataGateway([client])
+    player = Player(gateway, bus, model=Measurement, paced=False)
+    with bus.subscribe(ErrorEvent, overflow=Overflow.GROW) as errors, bus.subscribe(
+        Measurement, overflow=Overflow.GROW
+    ) as frames:
+        await player.start()  # does not raise
+        try:
+            (event,) = await take(errors, 1)
+            status = player.status()
+            assert event.source == "tsdb" and event.message == "the provider cannot be reached"
+            assert event.detail == "tsdb: ConnectionError: cannot reach http://tsdb:8100: ConnectError: refused"
+            assert status.error == event.detail and status.paused and status.ended
+            assert status.coverage_start is None and status.mode == "replay" and not status.can_seek
+            assert gateway.coverage_failures == {"tsdb": "ConnectionError: cannot reach http://tsdb:8100: ConnectError: refused"}
+            client.coverage = original  # type: ignore[method-assign]
+            await player.refresh()
+            assert player.status().error is None and player.status().coverage_start == at(0)
+            assert gateway.coverage_failures == {}
+            player.resume()
+            got = await take(frames, 2)
+            assert [m.mRID for m in got] == ["m0", "m1"]
+        finally:
+            await player.stop()
+    # A gateway with no client for the model at all is still a refusal to start.
+    with pytest.raises(PlayerError):
+        await Player(DataGateway([InMemoryClient("x", NumberOnly, capabilities=HISTORY)]), bus, model=Measurement).start()
+
+
+class NumberOnly(Measurement):
+    """A *sub*class of Measurement: a client declaring only it does not support
+    the parent (``supports`` checks ``issubclass(model, declared)``), so a
+    player for Measurement over such a gateway has no client at all."""
 
 
 async def test_a_live_stream_that_ends_is_not_looped():

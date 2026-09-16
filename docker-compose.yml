@@ -22,11 +22,25 @@ services:
       # The worker reads the same variable, so the two sides cannot disagree.
       PMU_TEST_STREAMER_MODULE_TRANSPORT: "kafka:pswamp_core.transport.kafka:KafkaTransport"
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      # The Time Series Explorer reads a *remote* store: the time-series client
+      # (core/src/pswamp_core/datagateway/clients/time_series_database.py)
+      # POSTs each range query to TSDB_URL -- the time-series-stub below, a
+      # dummy of the api a deployment would put in front of its database --
+      # and reads the answers off a Kafka topic on TSDB_BOOTSTRAP_SERVERS.
+      # Unset the first variable and the page runs over the sample recording
+      # in this process, unchanged (what CI's bare `docker run` exercises).
+      # The stub reads the matching TIME_SERIES_STUB_* block.
+      TIME_SERIES_EXPLORER_DATA_CLIENTS: "tsdb:pswamp_core.datagateway.clients.time_series_database:TimeSeriesDatabaseClient"
+      TSDB_URL: "http://time-series-stub:8100"
+      TSDB_BOOTSTRAP_SERVERS: "kafka:9092"
     # The broker is reached lazily, on the first streamer socket, not at
     # startup -- but a publish to a broker that is still booting is dropped
-    # (and logged), so wait for kafka to be healthy rather than race it.
+    # (and logged), so wait for kafka to be healthy rather than race it. The
+    # stub likewise: the explorer's first socket asks it for coverage.
     depends_on:
       kafka:
+        condition: service_healthy
+      time-series-stub:
         condition: service_healthy
     # Dev-only override: run uvicorn with --reload so the files synced in by
     # `watch` (below) trigger an in-process hot reload. The Dockerfile's prod
@@ -125,6 +139,49 @@ services:
     # No healthcheck: nothing routes to it, and it exits (and is restarted)
     # when it cannot serve. Its logs are the view: one line per client key
     # started and evicted.
+    restart: unless-stopped
+    develop:
+      watch:
+        - path: app/server-python/src
+          action: sync+restart
+          target: /workspace/p-SWAMP/app/server-python/src
+        - path: core
+          action: sync+restart
+          target: /workspace/p-SWAMP/core
+        - path: app/server-python/pyproject.toml
+          action: rebuild
+        - path: app/server-python/uv.lock
+          action: rebuild
+        - path: core/pyproject.toml
+          action: rebuild
+
+  # A dummy time-series store behind the REST + Kafka provider contract
+  # (src/time_series_stub/): the SAME image, a different command, standing
+  # where a deployment's own api over its time-series database would stand.
+  # The server's time-series client POSTs range queries to it on :8100 and
+  # reads the answers off the results topic on the broker below. Its
+  # "database" is the streamer's sample recording tiled twenty times (a
+  # minute of timeline). It serves HTTP, so unlike the worker it has a
+  # healthcheck, and the server waits for it. Not published to the host:
+  # nothing outside the compose network needs it.
+  time-series-stub:
+    build: .
+    image: p-swamp:latest
+    command: ["python", "-m", "time_series_stub"]
+    environment:
+      TIME_SERIES_STUB_BOOTSTRAP_SERVERS: "kafka:9092"
+      TIME_SERIES_STUB_REPEAT: "20"
+    expose:
+      - "8100"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8100/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     restart: unless-stopped
     develop:
       watch:

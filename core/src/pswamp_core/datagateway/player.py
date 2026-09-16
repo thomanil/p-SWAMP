@@ -35,6 +35,14 @@ Three decisions, made here so they are made once:
    ``can_go_live`` says whether the switch is on offer. Live mode has no
    transport controls at all: pausing a live source would be view state, not
    source state, and this slice does not offer it rather than fake it.
+4. **A replay may be bounded, and a failure ends it loudly.** ``replay(start,
+   end)`` -- the ``replay`` verb with an ``end`` -- opens ``[start, end)`` and
+   ends *paused* at ``end`` even on a looping player, which is what "play me
+   this range" means; ``PlayerStatus.range_end`` says so while it runs. And a
+   provider that raises mid-stream (a remote store that timed out) ends the
+   stream the same way, paused with ``PlayerStatus.error`` set and an
+   ``ErrorEvent`` on the bus, rather than killing the run task in silence and
+   leaving a page that says "playing" for ever. The next play or seek clears it.
 
 Pacing follows the rule the streamer's old ticker had: wait until the frame is
 due on a monotonic clock, and if the loop has fallen more than one frame
@@ -57,6 +65,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from ..log import get_logger
 from ..messages.control import Command, PlayerStatus, StreamChanged
+from ..messages.errors import ErrorEvent
 from ..messages.pmu import PmuFrame
 from ..util.time import ensure_utc, utcnow
 from .data_client_model import Capability
@@ -130,9 +139,14 @@ class Player:
         self.cursor: datetime | None = None
         self.last_frame: DataModel | None = None
         self.frame_interval: timedelta | None = None
+        #: Why the stream stopped, when it stopped on a provider failure.
+        self.error: str | None = None
 
         #: What the HISTORY_CONSUME clients hold: the seekable range.
         self._history: Coverage | None = None
+        #: The explicit end of a bounded replay; ``None`` when it runs to the
+        #: history end (and may loop).
+        self._range_end: datetime | None = None
         #: Whether any client declares LIVE_CONSUME for the model.
         self._live_available = False
         #: Whether the open stream is the live one.
@@ -203,6 +217,8 @@ class Player:
             frame_interval_s=(
                 None if self.frame_interval is None else self.frame_interval.total_seconds()
             ),
+            range_end=self._range_end,
+            error=self.error,
         )
 
     # -- lifecycle -------------------------------------------------------------
@@ -214,13 +230,23 @@ class Player:
         only a live source (there is nothing to replay, and a live stream that
         nobody has resumed would sit paused for ever).
         """
+        unreachable = False
         async with self._lock:
             await self._read_gateway()
             if self._history is None and not self._live_available:
-                raise PlayerError(f"no client can consume {self.model.__name__}")
-            live = self._history is None
-            await self._switch_stream(None if live else self._start_at, live=live)
-        self._paused = False if live else not self._autoplay
+                if not self._gateway.supports(self.model):
+                    raise PlayerError(f"no client can consume {self.model.__name__}")
+                # A client is configured for the model but reports nothing --
+                # typically a remote store that cannot be reached. Start anyway,
+                # stopped with the error set and said on the bus, so the page
+                # connects and shows *why*, and a refresh can find the store
+                # when it is back; refusing would only close the socket.
+                unreachable = True
+                live = False
+            else:
+                live = self._history is None
+                await self._switch_stream(None if live else self._start_at, live=live)
+        self._paused = True if unreachable else (False if live else not self._autoplay)
         # Subscribe *here*, synchronously, rather than inside the task: a command
         # published right after start() returns must not be lost to a task that
         # has not had its first turn on the loop yet.
@@ -231,6 +257,13 @@ class Player:
         self._command_task = asyncio.create_task(
             self._commands(), name=f"{self.name}.commands"
         )
+        if unreachable:
+            # One turn of the loop first: the pipeline's module tasks (the error
+            # forwarder among them) were created just before this and have not
+            # subscribed yet; an event published now would reach nobody.
+            await asyncio.sleep(0)
+            self._fail_on_coverage()
+            return
         self._publish_status()
 
     async def stop(self) -> None:
@@ -241,8 +274,14 @@ class Player:
         for task in tasks:
             task.cancel()
         for task in tasks:
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # A read that died of a provider failure holds its exception;
+                # stopping is not the place to re-raise it.
+                logger.exception("%s: task %s had failed", self.name, task.get_name())
         self._run_task = self._command_task = self._read = None
         if self._command_subscription is not None:
             self._command_subscription.close()
@@ -263,6 +302,7 @@ class Player:
     def resume(self) -> None:
         self._refuse_in_live("play")
         self._paused = False
+        self.error = None
         self._anchor = None
         self._wake.set()
         self._publish_status()
@@ -279,8 +319,7 @@ class Player:
     async def seek(self, to: datetime) -> None:
         """Reposition the replay at ``to``: a new stream, announced on the bus."""
         self._refuse_in_live("seek")
-        if not self.can_seek:
-            raise PlayerError("cannot seek: the source has no history")
+        await self._require_history("seek")
         async with self._lock:
             await self._switch_stream(ensure_utc(to), live=False)
         self._wake.set()
@@ -297,16 +336,34 @@ class Player:
         self._wake.set()
         self._publish_status()
 
-    async def replay(self, start: datetime | None = None) -> None:
+    async def replay(self, start: datetime | None = None, end: datetime | None = None) -> None:
         """Switch to (or restart) the replay at ``start``, or the beginning of
-        the history. Lands paused, the same state ``start()`` produces."""
-        if self._history is None:
-            raise PlayerError("cannot replay: the source has no history")
+        the history. Lands paused, the same state ``start()`` produces.
+
+        With ``end`` the replay is bounded to ``[start, end)`` (clamped to the
+        history end) and ends paused there rather than looping.
+        """
+        await self._require_history("replay")
         async with self._lock:
             target = self._history.range.start if start is None else ensure_utc(start)
-            await self._switch_stream(target, live=False)
+            await self._switch_stream(target, live=False, end=end)
         self._paused = True
         self._wake.set()
+        self._publish_status()
+
+    async def refresh(self) -> None:
+        """Ask the gateway again what it holds, and publish the status.
+
+        The ``refresh`` verb. Coverage is otherwise re-read only when a stream is
+        opened, so a page whose source went away (no coverage, every control
+        disabled) needs one command that asks again without playing anything:
+        if the source is back, the next status carries its coverage and the
+        error is cleared; if not, the status says so still.
+        """
+        async with self._lock:
+            await self._read_gateway()
+            if self._history is not None and not self._live:
+                self.error = None
         self._publish_status()
 
     async def step(self, n: int = 1) -> None:
@@ -353,8 +410,17 @@ class Player:
             self.set_speed(float(args["speed"]))
         elif verb == "live":
             await self.go_live()
+        elif verb == "refresh":
+            await self.refresh()
         elif verb == "replay":
-            await self.replay(self._seek_target(args) if args else None)
+            await self.replay(
+                self._seek_target(args) if _names_an_instant(args) else None,
+                self._range_end_target(args),
+            )
+            if args.get("play"):
+                # One POST, one Command: "play this range" lands paused and is
+                # resumed here, rather than needing a second command.
+                self.resume()
         else:
             logger.warning("unknown player command %r (request %s)", verb, command.request_id)
             return
@@ -364,17 +430,36 @@ class Player:
 
     def _seek_target(self, args: dict[str, Any]) -> datetime:
         if "to" in args:
-            value = args["to"]
-            return ensure_utc(value if isinstance(value, datetime) else datetime.fromisoformat(value))
+            return _instant(args["to"])
         if "offset_s" in args:
-            start = self._coverage_start()
-            if start is None:
-                raise PlayerError("cannot seek by offset: coverage start is unknown")
-            return start + timedelta(seconds=float(args["offset_s"]))
+            return self._from_coverage_start(float(args["offset_s"]), "seek by offset")
         raise PlayerError("seek needs 'to' (an instant) or 'offset_s' (seconds from start)")
+
+    def _range_end_target(self, args: dict[str, Any]) -> datetime | None:
+        """The optional exclusive end of a bounded replay: ``end`` (an instant)
+        or ``end_offset_s`` (seconds from the coverage start); ``None`` if neither."""
+        if args.get("end") is not None:
+            return _instant(args["end"])
+        if args.get("end_offset_s") is not None:
+            return self._from_coverage_start(float(args["end_offset_s"]), "bound by offset")
+        return None
+
+    def _from_coverage_start(self, seconds: float, what: str) -> datetime:
+        start = self._coverage_start()
+        if start is None:
+            raise PlayerError(f"cannot {what}: coverage start is unknown")
+        return start + timedelta(seconds=seconds)
 
     def _coverage_start(self) -> datetime | None:
         return None if self._history is None else self._history.range.start
+
+    async def _require_history(self, control: str) -> None:
+        """Refuse ``control`` unless a history source answers -- asking the
+        gateway again first, so a source that was down and is back is found."""
+        if self._history is None:
+            await self._read_gateway()
+        if self._history is None:
+            raise PlayerError(f"cannot {control}: the source has no history")
 
     def _refuse_in_live(self, control: str) -> None:
         if self._live:
@@ -389,21 +474,51 @@ class Player:
         )
         self._live_available = self._gateway.supports(self.model, Capability.LIVE_CONSUME)
 
-    async def _switch_stream(self, start: datetime | None, *, live: bool) -> None:
+    async def _switch_stream(
+        self, start: datetime | None, *, live: bool, end: datetime | None = None
+    ) -> None:
         """Close the current stream and open one at ``start``. Caller holds the lock.
 
         A replay stream is **bounded** to the history's end, so it ends there
-        (and loops) instead of handing off to a live client; the live stream is
+        (and loops) instead of handing off to a live client; an explicit ``end``
+        bounds it earlier still, and such a range never loops. The live stream is
         open-ended from ``start``.
         """
+        # Coverage first, and the range checked against it, so that a refused
+        # range leaves the current stream exactly as it was.
+        await self._read_gateway()
+        if not live and self._history is None:
+            # The history source stopped answering (the gateway logs the cause
+            # and skips it). Close what was open and say so where the page can
+            # see it, rather than opening a stream over nothing that would end
+            # at once in silence. The next play or seek asks the gateway again.
+            self._generation += 1
+            await self._cancel_read()
+            if self._stream is not None:
+                await self._stream.aclose()
+            self._stream = None
+            self._pending = None
+            self._fail_on_coverage()
+            raise PlayerError(self.error or "no history coverage")
+        history_end = None if self._history is None else self._history.range.end
+        if live:
+            end = None
+        elif end is not None:
+            end = ensure_utc(end)
+            if history_end is not None and end > history_end:
+                end = history_end
+        else:
+            end = history_end
+        if start is not None and end is not None and end <= start:
+            raise PlayerError("replay range is empty")
         # Bump the generation *before* cancelling the read, so the run loop can
         # tell a read cancelled by this switch from its own cancellation.
         self._generation += 1
         await self._cancel_read()
         if self._stream is not None:
             await self._stream.aclose()
-        await self._read_gateway()
-        end = None if live or self._history is None else self._history.range.end
+        self._range_end = None if live or end is None or end == history_end else end
+        self.error = None
         self._stream = self._gateway.consume(self.model, start, end)
         if live != self._live:
             # A measured interval belongs to the stream it was measured on: a
@@ -455,9 +570,10 @@ class Player:
 
     async def _reopen_if_closed(self) -> None:
         """A resume after the end: replay from the start of the history, or,
-        without any history, tail live again. Caller holds the lock."""
+        if live was what was open, tail live again. Caller holds the lock.
+        Raises ``PlayerError`` when a replay's history source no longer answers."""
         if self._stream is None:
-            live = self._history is None
+            live = self._live
             await self._switch_stream(None if live else self._coverage_start(), live=live)
 
     async def _on_stream_end(self) -> bool:
@@ -467,15 +583,62 @@ class Player:
             await self._stream.aclose()
         self._stream = None
         self._read = None
-        if self.loop and self._produced_since_switch and not self._live:
+        # A bounded range ("play me [t0, t1)") ends where it was asked to, even
+        # on a looping player; a live stream that ends means the source went
+        # away, and there is nothing to loop back to.
+        if self.loop and self._produced_since_switch and not self._live and self._range_end is None:
             await self._switch_stream(self._coverage_start(), live=False)
             return True
-        # A live stream that ends means the source went away; there is nothing
-        # to loop back to.
         self._ended = True
         self._paused = True
         self._publish_status()
         return False
+
+    async def _on_stream_error(self, error: BaseException) -> None:
+        """The provider failed mid-stream. End the stream paused, say why, and
+        stay alive for the next command. Caller holds the lock."""
+        if self._stream is not None:
+            with contextlib.suppress(Exception):
+                await self._stream.aclose()
+        self._stream = None
+        self._read = None
+        self._pending = None
+        self._fail(f"{type(error).__name__}: {error}")
+
+    def _fail_on_coverage(self) -> None:
+        """No history source answers. Name the client and its own error when the
+        gateway recorded one (``coverage_failures``: a remote store that could
+        not be reached says so, URL and all); a bare "no coverage" otherwise."""
+        failures: dict[str, str] = getattr(self._gateway, "coverage_failures", {})
+        if failures:
+            source = next(iter(failures)) if len(failures) == 1 else self.name
+            detail = "; ".join(f"{name}: {error}" for name, error in failures.items())
+            self._fail(detail, source=source, message="the provider cannot be reached")
+        else:
+            self._fail("the history source reports no coverage; is it reachable?")
+
+    def _fail(
+        self,
+        detail: str,
+        *,
+        source: str | None = None,
+        message: str = "the stream stopped: its provider failed",
+    ) -> None:
+        """Record a provider failure: end paused, set ``error``, tell the bus.
+        ``source`` names who failed on the event -- the client, when known."""
+        self._ended = True
+        self._paused = True
+        self.error = detail
+        logger.error("%s: stream stopped on a provider failure: %s", self.name, detail)
+        self._bus.publish(
+            ErrorEvent(
+                timestamp=utcnow(),
+                source=source or self.name,
+                message=message,
+                detail=detail,
+            )
+        )
+        self._publish_status()
 
     async def _next_frame(self) -> DataModel | None:
         """The next frame of the current stream, reopening it on loop. Caller
@@ -483,7 +646,12 @@ class Player:
         while True:
             await self._reopen_if_closed()
             task, _ = self._ensure_read()
-            if await task is None:
+            try:
+                frame = await task
+            except Exception as error:
+                await self._on_stream_error(error)
+                return None
+            if frame is None:
                 if await self._on_stream_end():
                     continue
                 return None
@@ -552,7 +720,10 @@ class Player:
                 continue
             if self._pending is None:
                 async with self._lock:
-                    await self._reopen_if_closed()
+                    try:
+                        await self._reopen_if_closed()
+                    except PlayerError:
+                        continue  # the source is gone; _fail paused us and said so
                     task, generation = self._ensure_read()
                 try:
                     await asyncio.shield(task)
@@ -563,6 +734,11 @@ class Player:
                     if generation == self._generation:
                         raise  # the read died of something other than a switch
                     continue  # a switch cancelled the read; start over on the new stream
+                except Exception as error:
+                    async with self._lock:
+                        if generation == self._generation:
+                            await self._on_stream_error(error)
+                    continue
                 async with self._lock:
                     if generation != self._generation:
                         continue
@@ -603,3 +779,12 @@ class Player:
 
     def _publish_status(self) -> None:
         self._bus.publish(self.status())
+
+
+def _instant(value: Any) -> datetime:
+    """A command argument as a UTC instant: a datetime, or an ISO 8601 string."""
+    return ensure_utc(value if isinstance(value, datetime) else datetime.fromisoformat(value))
+
+
+def _names_an_instant(args: dict[str, Any]) -> bool:
+    return "to" in args or "offset_s" in args

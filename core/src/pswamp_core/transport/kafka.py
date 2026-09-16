@@ -45,7 +45,7 @@ from . import Transport
 if TYPE_CHECKING:
     from ..messages.data_model import DataModel
 
-__all__ = ["KafkaTransport"]
+__all__ = ["KafkaTransport", "create_topic"]
 
 logger = get_logger("pswamp_core.transport.kafka")
 
@@ -117,39 +117,20 @@ class KafkaTransport(Transport):
         topic = self.topic_for(model)
         if topic in self._known_topics:
             return topic
-        from aiokafka.admin import AIOKafkaAdminClient, NewTopic
-        from aiokafka.errors import TopicAlreadyExistsError
+        from aiokafka.admin import AIOKafkaAdminClient
 
         if self._admin is None:
             self._admin = AIOKafkaAdminClient(bootstrap_servers=self.bootstrap_servers)
             await self._admin.start()
         configs = {"cleanup.policy": "compact"} if retained else None
-        try:
-            response = await self._admin.create_topics(
-                [
-                    NewTopic(
-                        topic,
-                        num_partitions=1,
-                        replication_factor=self.replication_factor,
-                        topic_configs=configs,
-                    )
-                ]
-            )
-        except TopicAlreadyExistsError:
+        if await create_topic(
+            self._admin,
+            topic,
+            replication_factor=self.replication_factor,
+            configs=configs,
+            who=self.name,
+        ):
             self._known_topics.add(topic)
-            return topic
-        except Exception as exc:
-            logger.warning("%s: could not create topic %s: %s", self.name, topic, exc)
-            return topic
-        # aiokafka answers per topic in the response rather than raising:
-        # (name, error code, message); 0 is created, 36 is "already exists".
-        for name, code, message in getattr(response, "topic_errors", []):
-            if code == 0:
-                logger.info("%s: created topic %s%s", self.name, name, " (compacted)" if retained else "")
-            elif code != _TOPIC_ALREADY_EXISTS:
-                logger.warning("%s: could not create topic %s: %s", self.name, name, message)
-                return topic
-        self._known_topics.add(topic)
         return topic
 
     # --- lifecycle --------------------------------------------------------------------
@@ -224,6 +205,52 @@ class KafkaTransport(Transport):
             if loop.time() >= deadline:
                 raise RuntimeError(f"no partitions assigned for topic {topic} within {_ASSIGNMENT_TIMEOUT_S:.0f}s")
             await consumer.getmany(timeout_ms=_ASSIGNMENT_POLL_MS)
+
+
+async def create_topic(
+    admin: Any,
+    topic: str,
+    *,
+    replication_factor: int = 1,
+    configs: dict[str, str] | None = None,
+    who: str = "kafka",
+) -> bool:
+    """Create ``topic`` with one partition if the broker lacks it.
+
+    ``True`` when the topic exists afterwards (created now, or already there);
+    ``False`` when the broker refused, which is logged and left to the produce
+    or consume that follows to fail loudly. Shared by the transport and by
+    anything else in the core that owns a topic (the time-series provider's
+    results feed), because the compose and k8s brokers have auto-creation off.
+    """
+    from aiokafka.admin import NewTopic
+    from aiokafka.errors import TopicAlreadyExistsError
+
+    try:
+        response = await admin.create_topics(
+            [
+                NewTopic(
+                    topic,
+                    num_partitions=1,
+                    replication_factor=replication_factor,
+                    topic_configs=configs,
+                )
+            ]
+        )
+    except TopicAlreadyExistsError:
+        return True
+    except Exception as exc:
+        logger.warning("%s: could not create topic %s: %s", who, topic, exc)
+        return False
+    # aiokafka answers per topic in the response rather than raising:
+    # (name, error code, message); 0 is created, 36 is "already exists".
+    for name, code, message in getattr(response, "topic_errors", []):
+        if code == 0:
+            logger.info("%s: created topic %s%s", who, name, " (compacted)" if configs else "")
+        elif code != _TOPIC_ALREADY_EXISTS:
+            logger.warning("%s: could not create topic %s: %s", who, name, message)
+            return False
+    return True
 
 
 async def _stop_consumer(consumer: Any) -> None:

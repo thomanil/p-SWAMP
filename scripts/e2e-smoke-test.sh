@@ -29,8 +29,11 @@
 #   7. the streamer flow               — play, and the stats MODULE's result comes down the
 #                                        socket: over the broker from the stats-worker container
 #                                        under compose, in-process under a bare `docker run` (CI)
+#   8. the explorer flow               — count a range, play a bounded range: over REST and the
+#                                        broker from the time-series-stub container under compose,
+#                                        over the sample recording under a bare `docker run` (CI)
 #
-# Steps 1-5 are curl; steps 6-7 are tools/smoketest_*.py, since bash can't speak
+# Steps 1-5 are curl; steps 6-8 are tools/smoketest_*.py, since bash can't speak
 # a WebSocket (websockets is already in the server's env via uvicorn[standard]).
 # Every step runs even if one fails; exits non-zero if any did.
 set -uo pipefail
@@ -209,13 +212,19 @@ uv run --project app/server-python \
   python app/server-python/tools/smoketest_pmu_test_streamer.py "$BASE_URL" \
   || FAILURES+=("streamer flow")
 
+# --- 8: the explorer, over whichever provider the environment names -----------
+section "Time Series Explorer (a range counted, and a range played to its end)"
+uv run --project app/server-python \
+  python app/server-python/tools/smoketest_time_series_explorer.py "$BASE_URL" \
+  || FAILURES+=("explorer flow")
+
 # --- Report ------------------------------------------------------------------
 if [ "${#FAILURES[@]}" -ne 0 ]; then
   printf '\n\033[31mSmoke test FAILED (%d):\033[0m\n' "${#FAILURES[@]}"
   for f in "${FAILURES[@]}"; do printf '  - %s\n' "$f"; done
   if [ "$STARTED_STACK" -eq 1 ]; then
-    printf '\nLast 50 lines of server and worker logs:\n'
-    docker compose logs --tail 50 server stats-worker
+    printf '\nLast 50 lines of server, worker and stub logs:\n'
+    docker compose logs --tail 50 server stats-worker time-series-stub
   fi
   exit 1
 fi

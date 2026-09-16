@@ -5,7 +5,9 @@
 
 ``Command`` is how an operator's action reaches the pipeline. At the web edge a
 ``POST`` becomes one of these and is published on the client's bus; whoever it
-is addressed to (``target``: the player, or a module's uuid) picks it up there.
+is addressed to (``target``: the player, or a module's target name) picks it up
+there. A module that takes commands declares a fixed target name for the
+purpose -- its per-instance uuid is unknown to the edge that POSTs.
 The POST's reply is only an acknowledgement -- the *effect* arrives as the next
 ``PlayerStatus`` or result on the socket, so state keeps its one path.
 
@@ -37,7 +39,8 @@ class Command(DataModel):
     request_id: str = Field(default_factory=_new_request_id)
     client_id: str | None = Field(default=None, description="The issuing client, at the edge.")
     target: str | None = Field(
-        default=None, description="A module uuid, or None for the stream's player."
+        default=None,
+        description="A module's target name, or None (or 'player') for the stream's player.",
     )
     verb: str = Field(description="What to do: play, stop, step, seek, speed, ...")
     args: dict[str, Any] = Field(default_factory=dict)
@@ -52,8 +55,9 @@ class PlayerStatus(DataModel):
     mode: Literal["live", "replay"] = Field(
         description=(
             "Which stream is open: 'replay' paces a bounded stream over the history "
-            "coverage and loops at its end; 'live' follows the source from now, with "
-            "no transport controls."
+            "coverage and loops at its end (a replay over an explicit range ends "
+            "paused instead); 'live' follows the source from now, with no transport "
+            "controls."
         )
     )
     cursor: datetime | None = Field(description="The instant of the last frame played.")
@@ -75,6 +79,20 @@ class PlayerStatus(DataModel):
     )
     frame_interval_s: float | None = Field(
         description="Seconds between frames, once two have been seen."
+    )
+    range_end: datetime | None = Field(
+        default=None,
+        description=(
+            "Exclusive end of a bounded replay ('replay' with an 'end'); null when the "
+            "replay runs to the history end."
+        ),
+    )
+    error: str | None = Field(
+        default=None,
+        description=(
+            "Why the stream stopped, when it stopped on a provider failure ('Type: text'); "
+            "null otherwise. Cleared by the next play or seek."
+        ),
     )
 
 

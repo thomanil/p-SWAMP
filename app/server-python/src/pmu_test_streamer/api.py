@@ -65,7 +65,15 @@ from typing import Literal
 
 from fastapi import APIRouter, FastAPI, HTTPException, WebSocket
 from pydantic import BaseModel, Field
-from shared import ClientId, CommandAck, get_logger, read_client_id, send_state, wait_for_disconnect
+from shared import (
+    ClientId,
+    CommandAck,
+    ErrorForwarderModule,
+    get_logger,
+    read_client_id,
+    send_state,
+    wait_for_disconnect,
+)
 
 from pswamp_core.bus import InProcessBus, Overflow, Subscription
 from pswamp_core.datagateway import DataGateway, Player, gateway_from_env
@@ -131,6 +139,9 @@ async def build_pipeline(client_id: str) -> Pipeline:
     modules = stats_modules(client_id)
     logger.info("pipeline %s: %s runs %s", client_id, modules[0].name,
                 "as its own service" if isinstance(modules[0], RemoteModule) else "in-process")
+    # Plus the forwarder that copies this pipeline's ErrorEvents to the layout's
+    # error tray, tagged with this app's slug.
+    modules.append(ErrorForwarderModule(client_id, "pmu-test-streamer"))
     return Pipeline(client_id, gateway, bus, player, modules)
 
 

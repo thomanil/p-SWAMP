@@ -27,7 +27,9 @@ from pydantic import BaseModel
 
 from .bus import Overflow
 from .log import get_logger
+from .messages.errors import ErrorEvent
 from .messages.results import AppIdentity, AppStatus, ResultEnvelope
+from .util.time import utcnow
 
 if TYPE_CHECKING:
     from .bus import Bus
@@ -86,9 +88,20 @@ class Module(ABC):
             async for message in inputs:
                 try:
                     result = await self.process(message)
-                except Exception:
+                except Exception as error:
                     logger.exception("module %s failed on %s", self.name, type(message).__name__)
                     self.status = AppStatus.UNDEFINED
+                    # The same failure, addressed to the client whose pipeline this
+                    # is: the log line above is for the operator of the process.
+                    bus.publish(
+                        ErrorEvent(
+                            timestamp=utcnow(),
+                            source=self.name,
+                            message=f"module {self.name} failed on {type(message).__name__}",
+                            detail=f"{type(error).__name__}: {error}",
+                            request_id=getattr(message, "request_id", None),
+                        )
+                    )
                     continue
                 if result is None:
                     continue

@@ -11,6 +11,7 @@ import { MeasurementsPanel } from '@/pages/grid-monitor/time-window/Measurements
 import { PmuTestStreamerPage } from '@/pages/pmu-test-streamer/PmuTestStreamerPage'
 import { ReferenceSubappPage } from '@/pages/reference-subapp/ReferenceSubappPage'
 import { FrequencyPeekPage } from '@/pages/frequency-peek/FrequencyPeekPage'
+import { TimeSeriesExplorerPage } from '@/pages/time-series-explorer/TimeSeriesExplorerPage'
 
 /**
  * The route table — the one place that knows which apps this client hosts.
@@ -60,6 +61,7 @@ function App() {
 
           <Route path="reference-subapp" element={<ReferenceSubappPage />} />
           <Route path="frequency-peek" element={<FrequencyPeekPage />} />
+          <Route path="time-series-explorer" element={<TimeSeriesExplorerPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

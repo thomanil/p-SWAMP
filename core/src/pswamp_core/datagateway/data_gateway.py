@@ -85,6 +85,11 @@ class DataGateway:
         live_handoff_margin: timedelta = DEFAULT_LIVE_HANDOFF_MARGIN,
     ):
         self.clients: dict[str, DataClient] = {}
+        #: The last failure of each client's ``coverage`` call, by client name,
+        #: cleared when it answers again. ``coverage`` below skips a failing
+        #: client rather than raising, so this is where the *reason* survives
+        #: for whoever has to tell a person (the player's error event).
+        self.coverage_failures: dict[str, str] = {}
         self._planner: SegmentPlanner | None = None
 
         if not data_clients:
@@ -205,7 +210,10 @@ class DataGateway:
                     model.__name__,
                     result,
                 )
-            elif result is not None:
+                self.coverage_failures[client.name] = f"{type(result).__name__}: {result}"
+                continue
+            self.coverage_failures.pop(client.name, None)
+            if result is not None:
                 found.append(result)
 
         if not found:
