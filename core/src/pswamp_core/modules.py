@@ -50,11 +50,18 @@ class Module(ABC):
     * ``overflow`` -- what to do when this module falls behind its input;
       ``DROP_OLDEST`` by default, since a module reading a live-rate stream
       should analyse the newest frame rather than an ever-older backlog.
+    * ``setup_models`` -- the message classes ``setup`` reads from the gateway
+      (a ``PmuHeader``, for a module that needs the stream's layout). Empty for
+      a module whose ``setup`` reads nothing. Declared, rather than left implicit
+      in the body of ``setup``, so that a host running the module in *another
+      process* (:mod:`pswamp_core.remote`) knows what to carry across before the
+      first input and can hand ``setup`` a gateway holding exactly that.
     """
 
     name: ClassVar[str] = "module"
     input_model: ClassVar[type[DataModel]]
     output_model: ClassVar[type[ResultEnvelope]]
+    setup_models: ClassVar[tuple[type[DataModel], ...]] = ()
     overflow: ClassVar[Overflow] = Overflow.DROP_OLDEST
     maxsize: ClassVar[int] = 64
 

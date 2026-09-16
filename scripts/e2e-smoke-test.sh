@@ -26,10 +26,13 @@
 #   4. a missing asset still 404s      — that fallback isn't swallowing everything
 #   5. /openapi.json has the commands  — the api describes itself
 #   6. the counter flow                — POST commands in, state down the socket
+#   7. the streamer flow               — play, and the stats MODULE's result comes down the
+#                                        socket: over the broker from the stats-worker container
+#                                        under compose, in-process under a bare `docker run` (CI)
 #
-# Steps 1-5 are curl; step 6 is tools/smoketest_reference_subapp.py, since bash
-# can't speak a WebSocket (websockets is already in the server's env via
-# uvicorn[standard]). Every step runs even if one fails; exits non-zero if any did.
+# Steps 1-5 are curl; steps 6-7 are tools/smoketest_*.py, since bash can't speak
+# a WebSocket (websockets is already in the server's env via uvicorn[standard]).
+# Every step runs even if one fails; exits non-zero if any did.
 set -uo pipefail
 
 # Run from the repo root regardless of where the script is invoked from.
@@ -200,13 +203,19 @@ uv run --project app/server-python \
   python app/server-python/tools/smoketest_reference_subapp.py "$BASE_URL" \
   || FAILURES+=("counter flow")
 
+# --- 7: the streamer, and its module wherever it runs -------------------------
+section "PMU test streamer (the stats module's result reaches the socket)"
+uv run --project app/server-python \
+  python app/server-python/tools/smoketest_pmu_test_streamer.py "$BASE_URL" \
+  || FAILURES+=("streamer flow")
+
 # --- Report ------------------------------------------------------------------
 if [ "${#FAILURES[@]}" -ne 0 ]; then
   printf '\n\033[31mSmoke test FAILED (%d):\033[0m\n' "${#FAILURES[@]}"
   for f in "${FAILURES[@]}"; do printf '  - %s\n' "$f"; done
   if [ "$STARTED_STACK" -eq 1 ]; then
-    printf '\nLast 50 lines of server log:\n'
-    docker compose logs --tail 50 server
+    printf '\nLast 50 lines of server and worker logs:\n'
+    docker compose logs --tail 50 server stats-worker
   fi
   exit 1
 fi

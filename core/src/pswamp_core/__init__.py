@@ -11,6 +11,10 @@ Layered bottom-up, each layer importing only the ones below it:
     bus          in-process publish/subscribe typed on message classes
     modules      "consume one model, produce another" as a coroutine
     pipeline     one stream's player + bus + modules, and the per-key registry
+    transport    keyed publish/subscribe between processes (a broker), for a module
+                 that runs as its own service; ``InMemoryTransport`` for tests
+    remote       the two halves of a module elsewhere: ``RemoteModule`` in the
+                 pipeline's module list, ``ModuleHost`` in the worker process
 
 See doc/server-data-architecture.md at the repo root for the whole picture.
 """

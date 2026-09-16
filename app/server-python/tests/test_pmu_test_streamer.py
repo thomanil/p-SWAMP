@@ -3,12 +3,15 @@
 
 """The streamer's providers, its module, and its pipeline -- no server started.
 
-Four things: the sample file parses into the wire shape it should; both
+Five things: the sample file parses into the wire shape it should; both
 providers pass the core's conformance suite (the worked examples of providers
 written outside the core proving themselves against the contract -- one with
 history, one that can only tail); the whole pipeline the endpoint builds runs,
 so the frames and the module's results reach the bus and the recorded/live
-switch works end to end; and the providers can be swapped by environment alone.
+switch works end to end; the providers can be swapped by environment alone;
+and the stats module runs as its own service -- the worker's ``ModuleHost``
+beside the pipeline's ``RemoteModule``, over the portless in-memory transport
+-- with the same results landing on the same bus.
 """
 
 from __future__ import annotations
@@ -23,12 +26,15 @@ from fastapi import HTTPException
 from pmu_test_streamer import api
 from pmu_test_streamer.live_client import LIVE_STREAM_ID, LiveSyntheticClient
 from pmu_test_streamer.sample_client import EPOCH, STREAM_ID, SampleRecordingClient, load_sample
-from pmu_test_streamer.stats_module import FrameStatsModule, FrameStatsResult
-from pswamp_core.bus import Overflow
-from pswamp_core.datagateway import Capability, DataGateway
+from pmu_test_streamer.stats_module import FrameStats, FrameStatsModule, FrameStatsResult
+from pswamp_core.bus import InProcessBus, Overflow
+from pswamp_core.datagateway import Capability, DataGateway, Player, gateway_from_env
 from pswamp_core.datagateway.clients import InMemoryClient
 from pswamp_core.datagateway.conformance import DataClientConformance
 from pswamp_core.messages import Command, PlayerStatus, PmuFrame, PmuHeader
+from pswamp_core.pipeline import Pipeline
+from pswamp_core.remote import ModuleHost, RemoteModule
+from pswamp_core.transport import InMemoryTransport
 from pswamp_core.util.time import utcnow
 
 # --- the sample file ---------------------------------------------------------------
@@ -356,3 +362,113 @@ async def test_provider_is_swapped_by_environment_alone(monkeypatch):
         assert status.can_go_live is False
     finally:
         await pipeline.stop()
+
+
+def test_state_keeps_stats_for_the_frame_or_the_one_just_before_it():
+    """With the module in another process its result lands after the frame;
+    the previous frame's stats are kept for that gap, and no longer."""
+    recording = load_sample()
+    header, frames = recording.header, recording.frames
+    identity = FrameStatsModule().identity
+    body = FrameStats(
+        n_stations=5, mean_frequency_hz=50.0, min_frequency_hz=50.0, max_frequency_hz=50.0,
+        angle_spread_deg=0.0, mean_voltage_kv=400.0,
+    )
+
+    def stats_for(frame: PmuFrame) -> FrameStatsResult:
+        return FrameStatsResult(timestamp=frame.timestamp, mRID=frame.mRID, app=identity, result=body)
+
+    status = PlayerStatus(
+        timestamp=utcnow(), mode="replay", cursor=None, speed=1.0, paused=True, loop=True, ended=False,
+        can_seek=True, can_go_live=True, coverage_start=EPOCH, coverage_end=None, frame_interval_s=0.05,
+    )
+    assert api._current(stats_for(frames[3]), frames[3], header, status)
+    assert api._current(stats_for(frames[2]), frames[3], header, status)  # one frame behind: kept
+    assert not api._current(stats_for(frames[1]), frames[3], header, status)  # two behind: gone
+    assert not api._current(stats_for(frames[4]), frames[3], header, status)  # from the future: gone
+    live = frames[2].model_copy(update={"mRID": LIVE_STREAM_ID})
+    assert not api._current(stats_for(live), frames[3], header, status)  # another stream: gone
+    assert not api._current(None, frames[3], header, status)
+
+
+# --- the module as its own service ---------------------------------------------------
+
+
+async def test_a_header_arriving_on_the_bus_reprimes_the_module():
+    """What makes the module host-independent: it reads the header in setup
+    *and* listens for one on the bus, so a host that hands it the header late
+    (or a changed layout) primes it the same way."""
+    module = FrameStatsModule()
+    bus = InProcessBus()
+    await module.setup(DataGateway([InMemoryClient("none", [PmuHeader])]), bus)
+    recording = load_sample()
+    assert await module.process(recording.frames[0]) is None
+    bus.publish(recording.header)
+    stats = await module.process(recording.frames[0])
+    assert stats is not None and stats.n_stations == 5
+    assert FrameStatsModule.setup_models == (PmuHeader,)
+
+
+def test_environment_sends_the_module_to_the_worker(monkeypatch):
+    monkeypatch.setattr(api, "TRANSPORT", None)
+    monkeypatch.delenv(api.MODULE_TRANSPORT_VARIABLE, raising=False)
+    assert isinstance(api.stats_modules("1")[0], FrameStatsModule)
+    monkeypatch.setattr(api, "TRANSPORT", None)
+    monkeypatch.setenv(api.MODULE_TRANSPORT_VARIABLE, "mem:pswamp_core.transport:InMemoryTransport")
+    (module,) = api.stats_modules("1")
+    assert isinstance(module, RemoteModule)
+    assert (module.name, module.key, module.output_model) == ("frame-stats", "1", FrameStatsResult)
+    assert api.stats_modules("2")[0].transport is module.transport  # one per process
+    monkeypatch.setattr(api, "TRANSPORT", None)
+
+
+async def test_stats_module_runs_as_its_own_service_over_the_transport(monkeypatch):
+    """The streamer's pipeline with the module's stand-in, and the worker's
+    host running the real module beside it, over one in-memory transport:
+    the results land on the pipeline's bus as they do in-process -- and keep
+    coming when the replay loops and its timestamps go backwards."""
+    monkeypatch.delenv("PSWAMP_DATA_CLIENTS", raising=False)
+    broker = InMemoryTransport()
+    host = ModuleHost(FrameStatsModule, broker)
+    host_task = asyncio.create_task(host.serve())
+    gateway = gateway_from_env(api.DEFAULT_DATA_CLIENTS)
+    bus = InProcessBus()
+    player = Player(gateway, bus, model=PmuFrame, loop=True)
+    remote = RemoteModule(FrameStatsModule, broker, "42")
+    pipeline = Pipeline("42", gateway, bus, player, [remote])
+    await pipeline.start()
+    try:
+        header = await api.stream_header(gateway)
+        with bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames, bus.subscribe(
+            FrameStatsResult, overflow=Overflow.GROW
+        ) as results:
+            pipeline.player.paced = False
+            bus.publish(Command(client_id="42", verb="play"))
+            played = [await asyncio.wait_for(frames.get(), 2) for _ in range(3)]
+            got = [await asyncio.wait_for(results.get(), 2) for _ in range(3)]
+            assert [r.timestamp for r in got] == [f.timestamp for f in played]
+            assert got[0].app.name == "frame-stats" and got[0].result.n_stations == 5
+            assert host.keys() == ["42"]
+
+            # The replay loops at its 60th frame: timestamps go back to the
+            # epoch, and the transport carries them regardless.
+            previous = got[-1].timestamp
+            wrapped = False
+            deadline = asyncio.get_running_loop().time() + 5
+            while not wrapped and asyncio.get_running_loop().time() < deadline:
+                result = await asyncio.wait_for(results.get(), 2)
+                wrapped = result.timestamp < previous
+                previous = result.timestamp
+            assert wrapped
+            assert remote.published > 60 and remote.dropped == 0 and remote.received > 60
+
+        pipeline.bus.publish(Command(client_id="42", verb="stop"))
+        await asyncio.sleep(0.05)
+        message = api.state_message(pipeline, header, first=False)
+        assert message.player.mode == "replay" and message.frame is not None
+    finally:
+        await pipeline.stop()
+        host_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await host_task
+    assert host.keys() == []

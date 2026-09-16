@@ -30,6 +30,18 @@ the browser's client id, so every visitor replays from the start on their own
 clock (the unit-of-isolation decision for a replay, STEP 3 §4.6). The registry
 caps and idle-evicts exactly as the grid monitor's does.
 
+**The stats module runs here or as its own service, and nothing else changes.**
+With ``PMU_TEST_STREAMER_MODULE_TRANSPORT`` unset the pipeline's module list
+holds the ``FrameStatsModule`` itself. Set to a transport spec (the Kafka one
+in ``pswamp_core.transport.kafka``, or the portless in-memory one), the list
+holds a ``RemoteModule`` standing in for it: it publishes this pipeline's
+frames (and its header) on the module's input topic under this client's key
+and puts the results it tails back on this bus, where the socket below reads
+them exactly as before. ``worker.py`` beside this file is the other side --
+the same module code, one instance per client key, in its own container. See
+"Running a module as a separate service" in ``doc/server-data-architecture.md``.
+The player, and so every command, stays in this process either way.
+
 Commands come up over REST and state goes down over the socket, as everywhere
 in this backend (AGENTS.md, doc/the-client-server-api.md). A command's reply is
 an acknowledgement that it was *dispatched* -- published on the client's bus,
@@ -58,7 +70,10 @@ from shared import ClientId, CommandAck, get_logger, read_client_id, send_state,
 from pswamp_core.bus import InProcessBus, Overflow, Subscription
 from pswamp_core.datagateway import DataGateway, Player, gateway_from_env
 from pswamp_core.messages import Command, PlayerStatus, PmuFrame, PmuHeader, StreamChanged
+from pswamp_core.modules import Module
 from pswamp_core.pipeline import CapacityError, Pipeline, PipelineRegistry
+from pswamp_core.remote import RemoteModule
+from pswamp_core.transport import Transport, transport_from_env
 
 from .stats_module import FrameStatsModule, FrameStatsResult
 
@@ -71,21 +86,52 @@ DEFAULT_DATA_CLIENTS = (
     "live:pmu_test_streamer.live_client:LiveSyntheticClient"
 )
 
+#: A transport spec, e.g. ``kafka:pswamp_core.transport.kafka:KafkaTransport``
+#: (with ``KAFKA_BOOTSTRAP_SERVERS`` beside it): the stats module then runs in
+#: the worker (``worker.py``), reached over that transport. Unset, it runs in
+#: this process. The worker reads the same variable, so the two sides cannot
+#: be configured apart.
+MODULE_TRANSPORT_VARIABLE = "PMU_TEST_STREAMER_MODULE_TRANSPORT"
+
 MAX_PIPELINES = 8
 IDLE_EVICT_SECONDS = 300.0
 
 
 # --- the pipeline, per client -------------------------------------------------
 
+#: The process's one transport to the worker, built on the first pipeline that
+#: needs it and closed by ``lifespan``; ``None`` while the module runs here.
+TRANSPORT: Transport | None = None
+
+
+def module_transport() -> Transport | None:
+    """The transport the environment names, built once per process."""
+    global TRANSPORT
+    if TRANSPORT is None:
+        TRANSPORT = transport_from_env(MODULE_TRANSPORT_VARIABLE)
+    return TRANSPORT
+
+
+def stats_modules(key: str) -> list[Module]:
+    """The pipeline's module list: the stats module itself, or its stand-in
+    when the environment sends it to the worker."""
+    transport = module_transport()
+    if transport is None:
+        return [FrameStatsModule()]
+    return [RemoteModule(FrameStatsModule, transport, key)]
+
 
 async def build_pipeline(client_id: str) -> Pipeline:
     """One client's pipeline: the configured providers, a bus, a player that
-    loops its replay, and the stats module. Called by the registry, never
-    directly."""
+    loops its replay, and the stats module -- here, or behind the transport.
+    Called by the registry, never directly."""
     gateway: DataGateway = gateway_from_env(DEFAULT_DATA_CLIENTS)
     bus = InProcessBus()
     player = Player(gateway, bus, model=PmuFrame, loop=True)
-    return Pipeline(client_id, gateway, bus, player, [FrameStatsModule()])
+    modules = stats_modules(client_id)
+    logger.info("pipeline %s: %s runs %s", client_id, modules[0].name,
+                "as its own service" if isinstance(modules[0], RemoteModule) else "in-process")
+    return Pipeline(client_id, gateway, bus, player, modules)
 
 
 REGISTRY: PipelineRegistry[Pipeline] = PipelineRegistry(
@@ -97,12 +143,16 @@ REGISTRY: PipelineRegistry[Pipeline] = PipelineRegistry(
 async def lifespan(app: FastAPI):
     """Bind the registry to the loop for as long as the server is up; drain it
     on shutdown. An idle server runs no pipeline at all."""
+    global TRANSPORT
     REGISTRY.bind(asyncio.get_running_loop())
     try:
         yield
     finally:
         await REGISTRY.stop_all()
         REGISTRY.bind(None)
+        transport, TRANSPORT = TRANSPORT, None
+        if transport is not None:
+            await transport.close()
 
 
 # --- the socket message ---------------------------------------------------------
@@ -157,10 +207,16 @@ def state_message(pipeline: Pipeline, header: PmuHeader | None, *, first: bool) 
     # The player's last frame, not the bus's newest: the player forgets it on a
     # stream switch, so a page never shows the live feed's values under a
     # "recorded, paused" badge (or the reverse). The stats result is kept only
-    # if it was computed for that very frame, for the same reason.
+    # if it belongs to that frame's stream and instant -- or to the instant one
+    # frame before it: when the module runs in the worker its result lands a
+    # few milliseconds after the frame (measured: ~5 ms median over Kafka on a
+    # laptop), and this message is pushed for the frame first. Without the
+    # one-frame grace the stats line would blank and refill twenty times a
+    # second. A stream switch still clears it: the last frame is reset, and a
+    # result from the other stream has the other mRID and a distant timestamp.
     frame = pipeline.player.last_frame
     stats = latest.get(FrameStatsResult) if latest else None
-    if frame is None or stats is None or stats.timestamp != frame.timestamp:
+    if not isinstance(frame, PmuFrame) or not _current(stats, frame, header, status):
         stats = None
     index, count = _position(status, header)
     return PmuStreamState(
@@ -171,6 +227,24 @@ def state_message(pipeline: Pipeline, header: PmuHeader | None, *, first: bool) 
         frame_index=index,
         frame_count=count,
     )
+
+
+def _current(
+    stats: FrameStatsResult | None, frame: PmuFrame, header: PmuHeader | None, status: PlayerStatus
+) -> bool:
+    """Whether ``stats`` is for ``frame``, or for the frame just before it on
+    the same stream (the one-frame grace described in ``state_message``)."""
+    if stats is None:
+        return False
+    if stats.timestamp == frame.timestamp:
+        return True
+    if stats.mRID not in (None, frame.mRID):
+        return False
+    interval = (1.0 / header.data_rate) if header else status.frame_interval_s
+    if not interval:
+        return False
+    behind = (frame.timestamp - stats.timestamp).total_seconds()
+    return 0 < behind <= interval * 1.5
 
 
 async def stream_header(gateway: DataGateway) -> PmuHeader | None:
