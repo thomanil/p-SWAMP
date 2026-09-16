@@ -22,6 +22,15 @@ dependencies = [
     "pydantic>=2.12",
 ]
 
+# The one optional dependency. `pswamp_core.transport.kafka` carries a module's
+# input and output topics between processes over a Kafka-API broker (Apache
+# Kafka locally); it imports aiokafka lazily, inside the methods that need it, so the
+# core stays pydantic-only unless a host asks for `pswamp-core[kafka]`. The web
+# backend does (app/server-python/pyproject.toml), because the PMU test
+# streamer's stats module runs as its own service.
+[project.optional-dependencies]
+kafka = ["aiokafka>=0.14,<1"]
+
 [build-system]
 requires = ["uv_build"]
 build-backend = "uv_build"

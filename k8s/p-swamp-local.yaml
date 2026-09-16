@@ -10,7 +10,16 @@
 #
 # Nothing is persisted: no DB, no persistent volumes. A rollout resets every
 # client's state, which is the expected behavior for this stateless deployment.
-# The one volume below is a read-only ConfigMap: configuration, not storage.
+# The volumes below are a read-only ConfigMap (configuration, not storage) and
+# the broker's emptyDir (scratch that dies with its pod, on purpose).
+#
+# Three Deployments: the server; the PMU test streamer's stats module as its
+# own pod (p-swamp-stats-worker, the same image with a different command); and
+# the Apache Kafka broker between them. The module runs in the worker because the
+# server's env block says so (PMU_TEST_STREAMER_MODULE_TRANSPORT); drop those
+# two variables and the module runs in the server pod, with nothing else
+# changed. See "Running a module as a separate service" in
+# doc/server-data-architecture.md.
 #
 # The PMU data sources are configured here rather than baked in. The env block
 # names the two providers (the streamer's own default, spelled out) and points
@@ -77,6 +86,15 @@ spec:
             # header is what describes its frames.
             - name: LIVE_PATH
               value: /etc/p-swamp/pmu/deployment_pmu_data_file_example.txt
+            # The stats module runs in the p-swamp-stats-worker pod, reached
+            # over the p-swamp-kafka broker: each client's pipeline then
+            # holds a RemoteModule that publishes frames on the module's input
+            # topic under the client's key and tails the results back. The
+            # worker reads the same two variables.
+            - name: PMU_TEST_STREAMER_MODULE_TRANSPORT
+              value: kafka:pswamp_core.transport.kafka:KafkaTransport
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
           volumeMounts:
             - name: pmu-data
               mountPath: /etc/p-swamp/pmu
@@ -149,3 +167,179 @@ spec:
       port: 8000        # cluster-internal Service port
       targetPort: 8000  # container port
       nodePort: 30080   # fixed external port (valid range 30000-32767)
+---
+# The stats module as its own pod: the same image with a different command
+# (src/pmu_test_streamer/worker.py). No port and no Service: it tails pmu.frame
+# off the broker below, runs one FrameStatsModule per client key it sees, and
+# publishes frame.stats.result back under that key. One replica because the
+# host owns every key it sees; two workers would each answer every frame.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp-stats-worker
+  labels:
+    app: p-swamp-stats-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp-stats-worker
+  template:
+    metadata:
+      labels:
+        app: p-swamp-stats-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: stats-worker
+          image: p-swamp:latest
+          imagePullPolicy: Never
+          command: ["python", "-m", "pmu_test_streamer.worker"]
+          env:
+            - name: PMU_TEST_STREAMER_MODULE_TRANSPORT
+              value: kafka:pswamp_core.transport.kafka:KafkaTransport
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
+          # No probes: nothing routes here (no readiness), and the process
+          # exits when it cannot serve, which restarts the pod. A liveness
+          # probe that could tell an idle worker from a stuck one would need
+          # the worker to expose something; recorded as open in STEP 5.
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              # See the server's note on CPU: the same nested-virtualization
+              # throttling applies to a 20 Hz loop here.
+              cpu: "1"
+              # The same import graph as the server but no replay pipeline:
+              # one module per client key, one consumer per topic.
+              memory: "512Mi"
+---
+# The broker between the server and the stats-worker: Apache Kafka, the
+# official image (Apache 2.0), one node in KRaft mode. The ONE image here that
+# is pulled rather than built into minikube -- hence IfNotPresent, not the
+# Never the p-swamp image needs -- so the first rollout waits for a download
+# (the start script gives it the longer timeout). Its log dir is an emptyDir:
+# ephemeral by the "no persistent volume" rule, and fine, since everything on
+# its topics is a live hop the server re-primes. Auto-creation is off; the
+# transport creates its topics with the right config.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp-kafka
+  labels:
+    app: p-swamp-kafka
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp-kafka
+  template:
+    metadata:
+      labels:
+        app: p-swamp-kafka
+    spec:
+      # The image's own `appuser`.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: kafka
+          image: apache/kafka:4.3.1
+          imagePullPolicy: IfNotPresent
+          # Every KAFKA_* variable becomes a server.properties entry.
+          env:
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: broker,controller
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: 1@localhost:9093
+            - name: KAFKA_LISTENERS
+              value: PLAINTEXT://:9092,CONTROLLER://:9093
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: PLAINTEXT://p-swamp-kafka:9092
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: CONTROLLER
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: PLAINTEXT
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "false"
+            - name: KAFKA_LOG_DIRS
+              value: /var/lib/kafka/data
+            - name: KAFKA_HEAP_OPTS
+              value: -Xmx512m -Xms256m
+          ports:
+            - name: kafka
+              containerPort: 9092
+          # The broker's own CLI asking for its api versions: a JVM start per
+          # probe, hence the long timeout and period.
+          readinessProbe:
+            exec:
+              command:
+                - /opt/kafka/bin/kafka-broker-api-versions.sh
+                - --bootstrap-server
+                - localhost:9092
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /opt/kafka/bin/kafka-broker-api-versions.sh
+                - --bootstrap-server
+                - localhost:9092
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: p-swamp-kafka
+  labels:
+    app: p-swamp-kafka
+spec:
+  type: ClusterIP
+  selector:
+    app: p-swamp-kafka
+  ports:
+    - name: kafka
+      protocol: TCP
+      port: 9092
+      targetPort: 9092

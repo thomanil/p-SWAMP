@@ -72,7 +72,10 @@ which exist to keep the "adding a page" path honest:
 persistent volume anywhere under `app/` or `k8s/`. Don't reintroduce one without
 an explicit ask. (The Nordic 44 grid model *is* a sqlite file, and the replayed
 PMU stream *is* a committed `.npz` — but both are read-only sample data the
-server opens, not storage it writes to.)
+server opens, not storage it writes to. The Kafka broker in compose runs with
+no volume and in `k8s/` on an `emptyDir`, deliberately: everything on its topics
+is a live hop between the server and the stats-worker, and a restart empties it
+at no cost.)
 
 ## Three Python projects in one repo
 
@@ -86,9 +89,12 @@ either manifest to the other's level.
 The third is **`core/` — the shared data architecture, `pswamp-core`, imported
 as `pswamp_core`** (`core/pyproject.toml`, `core/src/pswamp_core/`,
 `core/tests/`): the wire messages, the provider contract and gateway, the player,
-the in-process bus, the module base and the pipeline registry. pydantic is its
-only dependency, so a provider written outside this repo can import the contract
-and nothing else. It has **no lockfile of its own**: it is a library, consumed by
+the in-process bus, the module base, the pipeline registry, and the transport
+and remote-module pieces that let a module run as its own service. pydantic is
+its only dependency by default, so a provider written outside this repo can
+import the contract and nothing else; the one extra, `pswamp-core[kafka]`, adds
+aiokafka for the Kafka transport (`transport/kafka.py`, imported lazily), and
+the web backend takes that extra. It has **no lockfile of its own**: it is a library, consumed by
 the web backend as a second editable path dependency, and its tests run in that
 backend's environment (below). `doc/server-data-architecture.md` describes it;
 the `STEP*` files at the repo root are the working notes behind it, and STEP 4
@@ -158,7 +164,11 @@ Consequences worth knowing before touching anything:
 
 ## Architecture
 
-Two deployables, one wire protocol:
+Two deployables, one wire protocol — plus, for the PMU test streamer's stats
+module only, a worker container from the same image and the Apache Kafka broker
+it is reached through (`docker-compose.yml`'s `stats-worker` and `kafka`; the
+matching Deployments in `k8s/`). Neither is a dependency of the server: unset
+one variable and the module runs in-process, which is what CI's e2e job runs.
 
 - **`app/server-python/`** — the authoritative state server. The code lives in
   `src/` (mirroring the web client's layout), with the manifests beside it.
@@ -192,6 +202,16 @@ Two deployables, one wire protocol:
   apply the verb, so the ack never claims a command the player would only log).
   Both providers are the default (`DEFAULT_DATA_CLIENTS`); `PSWAMP_DATA_CLIENTS`
   names others. `doc/server-data-architecture.md` walks through it.
+  **It is also the worked example of a module running as its own service.**
+  With `PMU_TEST_STREAMER_MODULE_TRANSPORT` naming a transport (the core's
+  `KafkaTransport`, with `KAFKA_BOOTSTRAP_SERVERS` beside it — what compose and
+  `k8s/` set), `build_pipeline` puts a `RemoteModule` in the module list instead
+  of `FrameStatsModule`, and `worker.py` (`python -m pmu_test_streamer.worker`,
+  a plain process from the same image, no port) runs the identical module, one
+  instance per client key, tailing `pmu.frame` and publishing
+  `frame.stats.result`. Unset (the tests, CI's `docker run`) the module runs
+  in-process. The player and every command stay in the server either way. See
+  "Running a module as a separate service" in that document.
   `sample_data.txt` beside it is a **one-off sample committed for testing** — 300
   *simulated* PMU records extracted by hand from the Nordic 44 simulation that now
   lives in this same repo under `examples/nordic44_rtsim/` (voltage phasor +
@@ -780,6 +800,7 @@ underlying tech). Start the server first, then the client:
 ```
 ./scripts/start-local-hotloaded-pswamp-server.sh      # state server on 127.0.0.1:8000 (docker compose up --watch --build; streams logs, Ctrl-C stops it)
                                                      # also live-syncs root src/, so desktop-package edits hot-reload too
+                                                     # brings up three containers: kafka, the server, and the streamer's stats-worker
 ./scripts/start-local-hotloaded-pswamp-web-client.sh  # Vite/React web client w/ HMR on http://localhost:5173
 ```
 
@@ -907,7 +928,11 @@ separate envs and are hermetic to very different degrees:
   carries its own `[tool.pytest.ini_options]` too, so pointing pytest at
   `core/tests` directly (a node id, `pytest core/tests`) keeps the asyncio mode.
   `test_pmu_test_streamer.py` is the worked example of a provider inheriting
-  `DataClientConformance` with three fixtures.
+  `DataClientConformance` with three fixtures, and its last cases run the stats
+  module as its own service over the portless `InMemoryTransport`. The Kafka
+  transport's own round trip in `core/tests/test_kafka_transport.py` is
+  **skipped unless a broker is named**: `KAFKA_TEST_BOOTSTRAP_SERVERS=127.0.0.1:19092`
+  runs it against the compose stack's Kafka (its EXTERNAL listener).
 - **`./scripts/run-core-python-tests.sh`** — the desktop package's tests
   (repo-root `tests/`), in the root project's `[full]` env. A **starting point,
   not a gate**: most need external infrastructure (Kafka / NQKafka / MQTT brokers,
@@ -930,7 +955,11 @@ up the compose server (reusing one already running, and only tearing down what i
 started), checks the HTTP surface with curl — `/healthz`, the built client at `/`,
 the SPA deep-link fallback, a missing asset still 404ing, `/openapi.json` — and
 then runs the counter flow: connect a socket, POST bumps, assert the pushed
-counts, POST reset, assert zero, and assert a second client id starts at zero. Two
+counts, POST reset, assert zero, and assert a second client id starts at zero —
+and then the streamer flow (`tools/smoketest_pmu_test_streamer.py`): connect,
+POST play, wait for a state carrying the stats module's result, POST stop. Under
+compose that result crossed the broker from the stats-worker; under CI's bare
+`docker run` the same check passes with the module in-process. Two
 things worth knowing before extending it:
 
 - **The WebSocket half is Python, and needs no new dependency.**
@@ -1269,7 +1298,11 @@ What has to hold in the `static-errorcheck` job:
   permissions: there is no registry login and no `packages: write`, so a push
   could not succeed even if someone flipped the flag by accident.
 - **k8s manifest:** `p-swamp-local.yaml` is local-only (`imagePullPolicy: Never`, image
-  built into minikube). It is also **the worked example of configuring the PMU
+  built into minikube). It holds three Deployments — the server, the streamer's
+  `p-swamp-stats-worker` (same image, different command, no Service) and
+  `p-swamp-kafka` (the one *pulled* image, so `IfNotPresent`, on an
+  `emptyDir`) — and the start script rolls the first two out after waiting for
+  the broker. It is also **the worked example of configuring the PMU
   data sources from outside the image**: its env block spells out
   `PSWAMP_DATA_CLIENTS` and points the live feed's `LIVE_PATH` at
   `k8s/deployment_pmu_data_file_example.txt`, mounted read-only from a ConfigMap

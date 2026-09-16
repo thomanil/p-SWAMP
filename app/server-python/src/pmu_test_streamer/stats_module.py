@@ -55,6 +55,9 @@ class FrameStatsModule(Module):
     name = "frame-stats"
     input_model = PmuFrame
     output_model = FrameStatsResult
+    #: What ``setup`` reads from the gateway -- so a host running this module
+    #: in another process (``pswamp_core.remote``) knows to carry it across.
+    setup_models = (PmuHeader,)
 
     def __init__(self) -> None:
         super().__init__()
@@ -64,9 +67,14 @@ class FrameStatsModule(Module):
         self._ang_cols: list[int] = []
 
     async def setup(self, gateway: DataGateway, bus: Bus) -> None:
-        """Read the stream's header once, to know which columns are which."""
+        """Read the stream's header, to know which columns are which -- and keep
+        listening for one on the bus, so a header that arrives later (a worker
+        that started after the pipeline, a changed layout) re-primes the module
+        the same way. In-process the gateway read is the whole story; in
+        another process the bus is how the host hands over a late one."""
         async for header in gateway.consume(PmuHeader):
             self.use_header(header)
+        bus.add_listener(PmuHeader, self.use_header)
 
     def use_header(self, header: PmuHeader) -> None:
         self._header = header

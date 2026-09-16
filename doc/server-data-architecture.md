@@ -8,10 +8,12 @@ architecture that landed with the PMU test streamer as its first slice; the
 parts exist today and which are still open.
 
 The code is the `pswamp_core` package under `core/`, with pydantic as its only
-dependency. The PMU test streamer (`app/server-python/src/pmu_test_streamer/`,
-route `/pmu-test-streamer`) is the worked example of every piece, and is what
-the snippets below are taken from. "Adding things" at the end is the recipe
-for a module of your own and the page that shows it.
+dependency (plus aiokafka behind the `kafka` extra). The PMU test streamer
+(`app/server-python/src/pmu_test_streamer/`, route `/pmu-test-streamer`) is
+the worked example of every piece, and is what the snippets below are taken
+from. "Adding things" at the end is the recipe for a module of your own and
+the page that shows it; "Running a module as a separate service" is the
+optional last step of that recipe, explained.
 
 The document reads in two directions on purpose. **The building blocks** are
 described from the data outward -- provider, gateway, player, bus, module,
@@ -63,6 +65,11 @@ subscribes to message classes; the module subscribes to message classes; the
 player writes to the bus. Swapping a provider (top row) changes nothing else. A
 deployment's own provider -- a TSO's time-series store, a broker feed -- takes
 the place of either of the two shown.
+
+A third: L5 is the one box that can leave the process. In the compose and
+minikube stacks it does -- the module runs in the `stats-worker` container,
+reached over Kafka topics -- and nothing else in the picture changes. See
+"Running a module as a separate service".
 
 ## The building blocks
 
@@ -294,6 +301,10 @@ the same envelope when `GatewayIO` lands (deferred, see STEP 4).
 `app/server-python/src/pmu_test_streamer/stats_module.py` (a module that
 *reduces* a frame, and reads the header in `setup` to know its columns; a
 module that emits a *transformed copy* of a frame needs no `setup` at all).
+A module that reads something in `setup` declares it -- `setup_models =
+(PmuHeader,)` -- so a host running it in another process knows what to carry
+across before the first input; and it listens for the same class on the bus,
+so a header that arrives later re-primes it wherever it runs.
 
 ### Pipeline and registry — `pswamp_core.pipeline`
 
@@ -614,6 +625,21 @@ piece of `pmu_test_streamer/` to copy.
    `run-python-server-tests.sh`; restart the server script (a new package
    needs the rebuild). Tests: call `process` directly, and run the pipeline
    with `player.paced = False` reading the bus.
+8. **Optional: run the module as its own service.** In-process is the default
+   and costs nothing; if you need this, four edits, none to the module beyond
+   `setup_models` (and a bus listener for what it names; `stats_module.py`
+   shows both):
+   - `build_pipeline`: `RemoteModule(MyThingModule, transport, key)` where
+     `MyThingModule()` was, with the transport from
+     `transport_from_env("MY_THING_MODULE_TRANSPORT")` built once per process
+     and closed in `lifespan` (`stats_modules` / `module_transport` in the
+     streamer's `api.py`); unset, the list holds the module itself;
+   - `worker.py`: `raise SystemExit(main(MyThingModule, "MY_THING_MODULE_TRANSPORT"))`
+     from `pswamp_core.remote`;
+   - the variable on both sides in compose and `k8s/`, and a worker service
+     that is the same image with that command (copy `stats-worker`);
+   - a test running `ModuleHost(MyThingModule, broker)` beside the pipeline
+     over `InMemoryTransport` (copy the streamer's).
 
 **If the new module publishes a new data shape/type.** Nothing in `core/`
 changes: the bus, `Latest`, the gateway and the player are all typed on
@@ -647,6 +673,71 @@ Don't add the module to the *streamer's* pipeline and put the page in
 another package: two apps sharing a pipeline is the right-hand column of the
 table above, a decision about the key, not a shortcut.
 
+## Running a module as a separate service
+
+*What.* The module's slot in the pipeline's module list is taken by a stand-in
+that carries the module's input class out to a broker topic and its result
+class back; a worker process runs the real module, one instance per pipeline
+key. Nothing in the module changes, and nothing above the bus notices.
+
+```
+ web process (one pipeline per client)                     stats-worker process (one per deployment)
+ gateway ─ Player ─▶ InProcessBus                          KafkaTransport: one consumer per topic,
+              │ RemoteModule(FrameStatsModule, key=<client id>)           demultiplexed by record key
+              │   setup:  PmuHeader ──publish key=<id>──▶ pmu.header (compacted) ─┐
+              │   outbox: PmuFrame  ──publish key=<id>──▶ pmu.frame ──────────────┼─▶ ModuleHost(FrameStatsModule)
+              ◀── subscribe key=<id> ◀──── frame.stats.result ◀───────────────────┘     one module + bus per key
+ the socket subscribes FrameStatsResult as before;  POST ─▶ Command ─▶ Player, unchanged
+```
+
+`RemoteModule(FrameStatsModule, transport, key)` has the module's `name`,
+`input_model` and `output_model`. Its `setup` publishes what the module's own
+`setup` reads (`setup_models`, the `PmuHeader`), retained under the key; its
+`run` drains the input class off the local bus onto its topic (a `DROP_OLDEST`
+subscription, so a slow broker costs frames, not memory) and publishes what
+arrives on the result topic back onto the bus. `ModuleHost(FrameStatsModule,
+transport)` subscribes to the input topic across every key; the first input for
+a key builds that key's bus, module (its `setup` handed the retained records)
+and forwarder, and a key idle for `idle_seconds` is evicted. One variable, read
+by both sides, is the whole switch:
+
+```
+PMU_TEST_STREAMER_MODULE_TRANSPORT=kafka:pswamp_core.transport.kafka:KafkaTransport
+KAFKA_BOOTSTRAP_SERVERS=kafka:9092                # KAFKA_TOPIC_PREFIX optional
+```
+
+Unset, the module runs in-process; `mem:pswamp_core.transport:InMemoryTransport`
+is the portless value every test uses. Compose runs `kafka` (the Apache image,
+one KRaft node, no volume), the server and `stats-worker`; `k8s/` has the
+matching three Deployments; the smoke test plays the streamer and waits for the
+module's result either way.
+
+*Why.* Three decisions, argued in STEP 5:
+
+- **The hop is a transport, not a provider.** STEP 3 sketched the broker as a
+  bus via `gateway.produce`/`consume`. The streamer's replay frames are stamped
+  in January and go *backwards* at every loop; a time-addressed `DataStream`
+  would drop them. A `Transport` carries what the bus said, in order, and
+  never reads a timestamp. A broker as a *source* is still a `DataClient`.
+- **The pipeline key is the record key.** One topic per class, never per
+  client, so eight pipelines are three topics and the worker tells them apart
+  by key. No `DataModel` gains a field (ADR-005), and the streamer stays per
+  client with every command intact, since the player never leaves the server.
+- **What `setup` reads travels ahead, retained.** A compacted topic read from
+  its start is Kafka's own "newest per key", so a worker that starts late still
+  gets every header. The module also listens for `PmuHeader` on its bus, which
+  is what makes it host-independent (STEP 4 §8.1 #5, in miniature).
+
+This landed ahead of the measurements STEP 3 principle 7 asked for; STEP 5
+records the decision and the numbers to produce next.
+
+*Where.* `core/src/pswamp_core/transport/` (`Transport`, `InMemoryTransport`,
+`transport_from_env`; `kafka.py`), `core/src/pswamp_core/remote.py`
+(`RemoteModule`, `ModuleHost`, `main`); the streamer's `stats_modules`,
+`module_transport` and `worker.py`; `kafka` and `stats-worker` in
+`docker-compose.yml` and `k8s/p-swamp-local.yaml`; `core/tests/test_remote.py`
+and the last cases of `app/server-python/tests/test_pmu_test_streamer.py`.
+
 ## What is deliberately not here yet
 
 The full design, and the order things land in, is STEP 3 at the repo root.
@@ -657,6 +748,8 @@ Absent from this slice, on purpose:
 - the grid monitor re-pointed at the core (it still runs the proof-of-concept
   `Hub`/`Bus`/`HubRegistry` in `pswamp_web/`);
 - `request_id` in the browser-facing acknowledgement; batch jobs;
-- the draft's CSV and Kafka clients, a broker as a bus, any out-of-process
-  hosting — all gated on measurements first;
+- the draft's CSV and Kafka *providers* (a broker as a time-addressed source;
+  the transport is not one), and the measurements the out-of-process hosting
+  was meant to wait for (STEP 5 §6);
+- a `Command` addressed to a module, in-process or in the worker;
 - a `PmuFrameAssembler` for deployments that ingest per-PMU messages.
