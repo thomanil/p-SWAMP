@@ -36,6 +36,8 @@ import pmu_test_streamer
 import pswamp_web
 import reference_subapp
 import frequency_peek
+import time_series_explorer
+import errors
 import pswamp_web.app_status
 import pswamp_web.grid
 import pswamp_web.islanding
@@ -121,6 +123,17 @@ APPS = [
         "frequency-peek",
         frequency_peek,
         "Frequency peek.",
+    ),
+    AppEntry(
+        "time-series-explorer",
+        time_series_explorer,
+        "Timeseries Db Explorer: a range explorer over a query-answering provider (a remote time-series "
+        "store): play a range, count a range.",
+    ),
+    AppEntry(
+        "errors",
+        errors,
+        "Operational errors from any of a client's pipelines, for the layout's error tray.",
     ),
 ]
 

@@ -11,7 +11,7 @@ import contextlib
 from support import Measurement, Number, NumberResult, at, measurement, take
 
 from pswamp_core.bus import InProcessBus
-from pswamp_core.messages import AppStatus, ResultEnvelope
+from pswamp_core.messages import AppStatus, Command, ErrorEvent, ResultEnvelope
 from pswamp_core.modules import Module
 
 
@@ -55,3 +55,34 @@ async def test_module_publishes_an_envelope_per_input():
     assert module.status is AppStatus.OK
     assert module.last_result is second
     assert NumberResult.topic == "number.result"
+
+
+class Refuser(Module):
+    """A module addressed by commands, whose process always fails."""
+
+    name = "refuser"
+    input_model = Command
+    output_model = NumberResult
+
+    async def process(self, message: Command) -> Number | None:
+        raise RuntimeError("cannot " + message.verb)
+
+
+async def test_a_failing_process_publishes_an_error_event_with_the_request_id():
+    bus = InProcessBus()
+    module = Refuser()
+    task = asyncio.create_task(module.run(bus))
+    await asyncio.sleep(0)
+    try:
+        with bus.subscribe(ErrorEvent) as errors:
+            command = Command(target="refuser", verb="frobnicate")
+            bus.publish(command)
+            (event,) = await take(errors, 1)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert event.source == "refuser"
+    assert event.request_id == command.request_id
+    assert event.detail == "RuntimeError: cannot frobnicate"
+    assert module.status is AppStatus.UNDEFINED

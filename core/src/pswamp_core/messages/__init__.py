@@ -15,13 +15,20 @@ Two layers of message live here (STEP 1 A1, "two layers, not one"):
   ``PmuFrame`` (one instant of every channel), in ``pmu``;
 * **results and control** -- ``ResultEnvelope`` (what a module emits),
   ``AppStatusMessage``, ``Command``, ``PlayerStatus``, ``StreamChanged``, in
-  ``results`` and ``control``.
+  ``results`` and ``control``; ``ErrorEvent`` (an operational failure, for the
+  edge to show) in ``errors``.
+
+Beside them, in ``time_series``, the two shapes a remote time-series store
+speaks: ``TimeSeriesQuery`` (a range query going up over REST) and
+``TimeSeriesResult`` (the envelope each answer rides in on a Kafka topic).
 """
 
 from .control import Command, PlayerStatus, StreamChanged
 from .data_model import DataModel, topic_from_name
+from .errors import ErrorEvent
 from .pmu import PmuFrame, PmuHeader
 from .results import AppIdentity, AppStatus, AppStatusMessage, ResultEnvelope
+from .time_series import TimeSeriesQuery, TimeSeriesResult
 
 __all__ = [
     "AppIdentity",
@@ -29,10 +36,13 @@ __all__ = [
     "AppStatusMessage",
     "Command",
     "DataModel",
+    "ErrorEvent",
     "PlayerStatus",
     "PmuFrame",
     "PmuHeader",
     "ResultEnvelope",
     "StreamChanged",
+    "TimeSeriesQuery",
+    "TimeSeriesResult",
     "topic_from_name",
 ]

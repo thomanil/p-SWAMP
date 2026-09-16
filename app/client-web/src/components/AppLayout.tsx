@@ -1,6 +1,7 @@
 import { ExternalLinkIcon } from 'lucide-react'
 import { NavLink, Outlet } from 'react-router'
 
+import { ErrorTray } from '@/components/ErrorTray'
 import { CLIENT_ID } from '@/lib/clientId'
 import { BASE_PATH } from '@/lib/basePath'
 import { cn } from '@/lib/utils'
@@ -23,6 +24,7 @@ const NAV_ITEMS = [
   { to: '/pmu-test-streamer', label: 'PMU Test Streamer', end: false },
   { to: '/reference-subapp', label: 'Reference example', end: false },
   { to: '/frequency-peek', label: 'Frequency peek', end: false },
+  { to: '/time-series-explorer', label: 'Timeseries Db Explorer', end: false },
 ]
 
 function isLocalhost(): boolean {
@@ -73,6 +75,11 @@ export function AppLayout() {
           )}
         </nav>
       </header>
+
+      {/* Outside the outlet, so it survives navigation: the one socket the
+          layout itself owns, carrying operational errors from any of this
+          browser's pipelines. Draws nothing until there is one. */}
+      <ErrorTray />
 
       <main className="flex flex-1 items-center justify-center p-6">
         <Outlet />

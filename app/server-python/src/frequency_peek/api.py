@@ -32,7 +32,7 @@ from typing import Literal
 
 from fastapi import APIRouter, FastAPI, WebSocket
 from pydantic import BaseModel, Field
-from shared import event_queue, get_logger, read_client_id, serve_updates
+from shared import ErrorForwarderModule, event_queue, get_logger, read_client_id, serve_updates
 
 from pswamp_core.bus import InProcessBus
 from pswamp_core.datagateway import DataGateway, Player, gateway_from_env
@@ -80,7 +80,8 @@ async def build_pipeline(client_id: str) -> LivePipeline:
     gateway: DataGateway = gateway_from_env(DEFAULT_DATA_CLIENTS, variable=DATA_CLIENTS_VARIABLE)
     bus = InProcessBus()
     player = Player(gateway, bus, model=PmuFrame, autoplay=True, loop=True)
-    return LivePipeline(client_id, gateway, bus, player, [FrequencyModule()])
+    modules = [FrequencyModule(), ErrorForwarderModule(client_id, "frequency-peek")]
+    return LivePipeline(client_id, gateway, bus, player, modules)
 
 
 REGISTRY: PipelineRegistry[LivePipeline] = PipelineRegistry(

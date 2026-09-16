@@ -35,6 +35,13 @@ own per-connection task rather than fanning out to a client's sockets.
 unchanged: the core bus kept `add_listener(topic, fn)`, with a message class as
 the topic, so a page over `pswamp_core` wakes on its result class the same way
 a monitor page wakes on a store topic.
+
+`ErrorForwarderModule` and `HUB` come from the `errors` app package: every app
+that builds a core pipeline appends one forwarder to its module list, so a
+pipeline's `ErrorEvent`s reach the layout's error tray with the app's slug on
+them. Re-exported here so those apps import it from the one place they already
+import from; `errors` itself never imports `shared` (see its docstring), which
+is what keeps this from being a cycle.
 """
 
 import contextlib
@@ -43,6 +50,8 @@ from collections.abc import AsyncIterator
 from fastapi import WebSocket
 from pydantic import BaseModel
 
+from errors.forwarder import ErrorForwarderModule
+from errors.hub import HUB
 from pswamp_web.log import get_logger
 from pswamp_web.pump import event_queue, serve_updates, wait_for_disconnect
 from pswamp_web.sessions import SessionRegistry
@@ -56,8 +65,10 @@ from pswamp_web.wire import (
 
 __all__ = [
     "CLIENT_ID_PATTERN",
+    "HUB",
     "ClientId",
     "CommandAck",
+    "ErrorForwarderModule",
     "SocketRegistry",
     "event_queue",
     "get_logger",

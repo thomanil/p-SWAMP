@@ -13,12 +13,17 @@
 # The volumes below are a read-only ConfigMap (configuration, not storage) and
 # the broker's emptyDir (scratch that dies with its pod, on purpose).
 #
-# Three Deployments: the server; the PMU test streamer's stats module as its
-# own pod (p-swamp-stats-worker, the same image with a different command); and
-# the Apache Kafka broker between them. The module runs in the worker because the
-# server's env block says so (PMU_TEST_STREAMER_MODULE_TRANSPORT); drop those
-# two variables and the module runs in the server pod, with nothing else
-# changed. See "Running a module as a separate service" in
+# Four Deployments: the server; the PMU test streamer's stats module as its
+# own pod (p-swamp-stats-worker, the same image with a different command); the
+# dummy time-series store the Time Series Explorer queries (p-swamp-time-series-stub,
+# the same image again, with a Service since the server calls it over HTTP);
+# and the Apache Kafka broker between all of them. The module runs in the
+# worker because the server's env block says so
+# (PMU_TEST_STREAMER_MODULE_TRANSPORT); drop those two variables and the module
+# runs in the server pod, with nothing else changed. Likewise the explorer reads
+# the stub because TIME_SERIES_EXPLORER_DATA_CLIENTS says so; drop it and the
+# explorer runs over the sample recording in the image. See "Running a module
+# as a separate service" and "A remote time-series store as a provider" in
 # doc/server-data-architecture.md.
 #
 # The PMU data sources are configured here rather than baked in. The env block
@@ -94,6 +99,19 @@ spec:
             - name: PMU_TEST_STREAMER_MODULE_TRANSPORT
               value: kafka:pswamp_core.transport.kafka:KafkaTransport
             - name: KAFKA_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
+            # The Time Series Explorer's provider is the time-series client
+            # over a remote store: it POSTs range queries to TSDB_URL (the
+            # p-swamp-time-series-stub Service below) and reads the answers
+            # off a Kafka topic on TSDB_BOOTSTRAP_SERVERS. A deployment with a
+            # real store keeps these three lines and changes the URL -- the
+            # contract is the client's docstring (core/src/pswamp_core/
+            # datagateway/clients/time_series_database.py).
+            - name: TIME_SERIES_EXPLORER_DATA_CLIENTS
+              value: tsdb:pswamp_core.datagateway.clients.time_series_database:TimeSeriesDatabaseClient
+            - name: TSDB_URL
+              value: http://p-swamp-time-series-stub:8100
+            - name: TSDB_BOOTSTRAP_SERVERS
               value: p-swamp-kafka:9092
           volumeMounts:
             - name: pmu-data
@@ -219,6 +237,86 @@ spec:
               # The same import graph as the server but no replay pipeline:
               # one module per client key, one consumer per topic.
               memory: "512Mi"
+---
+# The dummy time-series store the explorer queries: the same image with a
+# different command (src/time_series_stub/), standing where a deployment's own
+# api over its database would stand. It serves HTTP -- the server's
+# time-series client POSTs range queries to it -- so it gets a Service and
+# /healthz probes; its answers go out on the broker's results topic. Its
+# "database" is the sample recording tiled twenty times.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp-time-series-stub
+  labels:
+    app: p-swamp-time-series-stub
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp-time-series-stub
+  template:
+    metadata:
+      labels:
+        app: p-swamp-time-series-stub
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: time-series-stub
+          image: p-swamp:latest
+          imagePullPolicy: Never
+          command: ["python", "-m", "time_series_stub"]
+          env:
+            - name: TIME_SERIES_STUB_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
+            - name: TIME_SERIES_STUB_REPEAT
+              value: "20"
+          ports:
+            - name: http
+              containerPort: 8100
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8100
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8100
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: p-swamp-time-series-stub
+  labels:
+    app: p-swamp-time-series-stub
+spec:
+  type: ClusterIP
+  selector:
+    app: p-swamp-time-series-stub
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8100
+      targetPort: 8100
 ---
 # The broker between the server and the stats-worker: Apache Kafka, the
 # official image (Apache 2.0), one node in KRaft mode. The ONE image here that

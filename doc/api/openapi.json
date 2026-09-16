@@ -321,6 +321,78 @@
         "title": "CommandAck",
         "type": "object"
       },
+      "ErrorNotice": {
+        "description": "An ``ErrorEvent`` from one of the client's pipelines, tagged with which app's.\n\n``type`` is ``\"state\"`` like every other socket message in this backend --\nthe web client's socket hook forwards only those -- even though a notice is\nan event rather than a snapshot. ``id`` lets the tray dismiss one and\nde-duplicate a replay after a reconnect.",
+        "properties": {
+          "app": {
+            "description": "The app slug whose pipeline raised it, e.g. 'time-series-explorer'.",
+            "title": "App",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The exception, as 'Type: text'.",
+            "title": "Detail"
+          },
+          "id": {
+            "description": "Unique per notice; the tray keys and dismisses by it.",
+            "title": "Id",
+            "type": "string"
+          },
+          "message": {
+            "description": "One line for a person.",
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The Command it answers, if any.",
+            "title": "Request Id"
+          },
+          "source": {
+            "description": "Who saw it: 'player', a module's name.",
+            "title": "Source",
+            "type": "string"
+          },
+          "timestamp": {
+            "description": "When the failure was seen.",
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "app",
+          "source",
+          "message",
+          "timestamp"
+        ],
+        "title": "ErrorNotice",
+        "type": "object"
+      },
       "FrameStats": {
         "description": "What the module computes for one instant.",
         "properties": {
@@ -1147,6 +1219,19 @@
             "title": "Ended",
             "type": "boolean"
           },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Why the stream stopped, when it stopped on a provider failure ('Type: text'); null otherwise. Cleared by the next play or seek.",
+            "title": "Error"
+          },
           "frame_interval_s": {
             "anyOf": [
               {
@@ -1176,7 +1261,7 @@
             "title": "Mrid"
           },
           "mode": {
-            "description": "Which stream is open: 'replay' paces a bounded stream over the history coverage and loops at its end; 'live' follows the source from now, with no transport controls.",
+            "description": "Which stream is open: 'replay' paces a bounded stream over the history coverage and loops at its end (a replay over an explicit range ends paused instead); 'live' follows the source from now, with no transport controls.",
             "enum": [
               "live",
               "replay"
@@ -1187,6 +1272,20 @@
           "paused": {
             "title": "Paused",
             "type": "boolean"
+          },
+          "range_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Exclusive end of a bounded replay ('replay' with an 'end'); null when the replay runs to the history end.",
+            "title": "Range End"
           },
           "speed": {
             "description": "Replay speed multiplier; 1.0 is real time.",
@@ -1476,6 +1575,29 @@
         "title": "PmuStreamState",
         "type": "object"
       },
+      "RangeBody": {
+        "description": "A half-open range ``[start, end)`` of the provider's timeline.",
+        "properties": {
+          "end": {
+            "description": "Exclusive end, ISO 8601; must be after start.",
+            "format": "date-time",
+            "title": "End",
+            "type": "string"
+          },
+          "start": {
+            "description": "Inclusive start, ISO 8601.",
+            "format": "date-time",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "title": "RangeBody",
+        "type": "object"
+      },
       "ReferenceSubappState": {
         "description": "The single message shape pushed to a client on connect and every change.\n\nKeys are snake_case on the wire, and stay that way: the page reads the\ngenerated type for this model rather than a renamed mirror of it.",
         "properties": {
@@ -1546,6 +1668,117 @@
         "title": "ReplayStatus",
         "type": "object"
       },
+      "RowCount": {
+        "description": "How many frames the store returned for a range, and how long it took.",
+        "properties": {
+          "count": {
+            "description": "Frames received; partial when 'error' is set.",
+            "minimum": 0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "elapsed_s": {
+            "description": "Wall-clock seconds the query took.",
+            "minimum": 0,
+            "title": "Elapsed S",
+            "type": "number"
+          },
+          "end": {
+            "description": "Exclusive end of the range counted.",
+            "format": "date-time",
+            "title": "End",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Why the count stopped early ('Type: text'); null when it completed.",
+            "title": "Error"
+          },
+          "start": {
+            "description": "Inclusive start of the range counted.",
+            "format": "date-time",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "count",
+          "elapsed_s"
+        ],
+        "title": "RowCount",
+        "type": "object"
+      },
+      "RowCountResult": {
+        "description": "The module's envelope; its class name is its topic: ``row.count.result``.",
+        "properties": {
+          "app": {
+            "$ref": "#/components/schemas/AppIdentity"
+          },
+          "mRID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mrid"
+          },
+          "parameters": {
+            "additionalProperties": true,
+            "description": "The module's settings, for the record.",
+            "title": "Parameters",
+            "type": "object"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Set when this result answers a Command.",
+            "title": "Request Id"
+          },
+          "result": {
+            "$ref": "#/components/schemas/RowCount"
+          },
+          "timestamp": {
+            "description": "The instant the result is about.",
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "version": {
+            "const": "v1",
+            "default": "v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "app",
+          "result"
+        ],
+        "title": "RowCountResult",
+        "type": "object"
+      },
       "SeekBody": {
         "properties": {
           "offset_s": {
@@ -1575,6 +1808,62 @@
           "speed"
         ],
         "title": "SpeedBody",
+        "type": "object"
+      },
+      "TimeSeriesExplorerState": {
+        "description": "The one message pushed on connect and on every change.\n\nIts parts are core messages carried as they are: the browser's types for\n``PmuHeader``, ``PmuFrame``, ``PlayerStatus`` and ``RowCountResult`` are\ngenerated from these very classes. Errors are inside them --\n``player.error`` and ``count.result.error`` -- because they are *state*: why\nthe replay is stopped, why the count is short. The error *event* goes to\nthe layout's tray, not here.",
+        "properties": {
+          "count": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RowCountResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The row-count module's latest result; null until the first count."
+          },
+          "frame": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PmuFrame"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The frame at the cursor, once one has played."
+          },
+          "header": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PmuHeader"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The channel layout. Sent on the first message only; null afterwards."
+          },
+          "player": {
+            "$ref": "#/components/schemas/PlayerStatus",
+            "description": "Where the replay is, its coverage, its bounded range and any error."
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "header",
+          "player",
+          "frame",
+          "count"
+        ],
+        "title": "TimeSeriesExplorerState",
         "type": "object"
       },
       "TimeWindowSlice": {
@@ -2428,6 +2717,219 @@
         ]
       }
     },
+    "/api/time-series-explorer/count": {
+      "post": {
+        "description": "Count the frames in ``[start, end)``. The batch case: the row-count module\nasks the provider for the range itself, unpaced, and publishes one result\ncarrying this command's request id.",
+        "operationId": "time_series_explorer_count",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RangeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "The range lies outside the provider's coverage, or there is none."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Count",
+        "tags": [
+          "time-series-explorer"
+        ]
+      }
+    },
+    "/api/time-series-explorer/playback/play-range": {
+      "post": {
+        "description": "Replay exactly ``[start, end)`` at real time, then end paused. The stream\ncase: the player asks the provider for the range and paces it.",
+        "operationId": "time_series_explorer_play_range",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RangeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "The range lies outside the provider's coverage, or there is none."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Play Range",
+        "tags": [
+          "time-series-explorer"
+        ]
+      }
+    },
+    "/api/time-series-explorer/playback/stop": {
+      "post": {
+        "description": "Pause the replay where it is.",
+        "operationId": "time_series_explorer_stop",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "The range lies outside the provider's coverage, or there is none."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop",
+        "tags": [
+          "time-series-explorer"
+        ]
+      }
+    },
+    "/api/time-series-explorer/refresh": {
+      "post": {
+        "description": "Ask the provider again what it holds. The one command a page sends when\nthe provider stopped answering: if it is back, the next state carries its\ncoverage and clears the error; if not, the state still says so.",
+        "operationId": "time_series_explorer_refresh",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refresh",
+        "tags": [
+          "time-series-explorer"
+        ]
+      }
+    },
     "/api/time-window/channels": {
       "get": {
         "description": "Every selectable channel, for the picker. Static for the process, so it is\na plain GET rather than part of the socket protocol.",
@@ -2608,6 +3110,14 @@
     {
       "description": "Frequency peek.",
       "name": "frequency-peek"
+    },
+    {
+      "description": "Timeseries Db Explorer: a range explorer over a query-answering provider (a remote time-series store): play a range, count a range.",
+      "name": "time-series-explorer"
+    },
+    {
+      "description": "Operational errors from any of a client's pipelines, for the layout's error tray.",
+      "name": "errors"
     }
   ],
   "x-websocket-channels": [
@@ -2674,6 +3184,22 @@
         "$ref": "#/components/schemas/FrequencyPeekState"
       },
       "path": "/api/frequency-peek/ws"
+    },
+    {
+      "app": "time-series-explorer",
+      "direction": "server-to-client",
+      "message": {
+        "$ref": "#/components/schemas/TimeSeriesExplorerState"
+      },
+      "path": "/api/time-series-explorer/ws"
+    },
+    {
+      "app": "errors",
+      "direction": "server-to-client",
+      "message": {
+        "$ref": "#/components/schemas/ErrorNotice"
+      },
+      "path": "/api/errors/ws"
     }
   ]
 }

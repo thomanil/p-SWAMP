@@ -2,13 +2,12 @@
 
 How PMU data moves from a data source to a browser in the p-SWAMP server, and
 what each piece on the way is for. This is the durable description of the
-architecture that landed with the PMU test streamer as its first slice; the
-`STEP*` documents at the repo root are the working notes that led to it, and
-`STEP4-WIP-data-integration-impl-for-single-module.md` says exactly which
-parts exist today and which are still open.
+architecture that landed with the PMU test streamer as its first slice. The
+last section says what is still open.
 
 The code is the `pswamp_core` package under `core/`, with pydantic as its only
-dependency (plus aiokafka behind the `kafka` extra). The PMU test streamer
+dependency (plus aiokafka behind the `kafka` extra, and httpx beside it behind
+the `timeseries` extra). The PMU test streamer
 (`app/server-python/src/pmu_test_streamer/`, route `/pmu-test-streamer`) is
 the worked example of every piece, and is what the snippets below are taken
 from. "Adding things" at the end is the recipe for a module of your own and
@@ -227,8 +226,17 @@ await player.step(-1)         # one frame back
 await player.seek(t)          # a NEW stream from t, announced as StreamChanged
 await player.go_live()        # a NEW, open-ended stream from now; mode "live"
 await player.replay()         # back to the recording's start, paused; mode "replay"
-player.status()               # PlayerStatus: mode, cursor, speed, paused, can_seek, can_go_live, coverage…
+await player.replay(t0, t1)   # a BOUNDED replay of [t0, t1): ends paused at t1, never loops
+player.status()               # PlayerStatus: mode, cursor, speed, paused, can_seek, can_go_live, coverage, range_end, error…
 ```
+
+A bounded replay (the `replay` verb with `end`, and `play: true` to start it)
+ends paused at `end` even on a looping player. A provider that raises mid-stream
+-- or whose coverage call fails, at start or later -- ends the stream paused
+with `PlayerStatus.error` set to the client's own error and an `ErrorEvent` on
+the bus naming that client; the pipeline still starts, so the page connects and
+shows why. The `refresh` verb asks the gateway again; a play or seek that finds
+the source clears the error.
 
 *Why.* The gateway yields as fast as the provider reads; a human watching a
 disturbance needs real time, and needs to scrub. Three decisions live here so
@@ -295,7 +303,7 @@ subscribes, calls, wraps in the envelope (`timestamp`, `app` identity,
 `parameters`, `request_id`) and publishes. The page that shows it subscribes to
 `FrameStatsResult`, never to the module. This is the coroutine module; the
 desktop package's thread-based `SnapshotApp`s are bridged to the same bus and
-the same envelope when `GatewayIO` lands (deferred, see STEP 4).
+the same envelope when `GatewayIO` lands (deferred; see the last section).
 
 *Where.* `core/src/pswamp_core/modules.py`;
 `app/server-python/src/pmu_test_streamer/stats_module.py` (a module that
@@ -516,7 +524,7 @@ The command carries a `request_id`, generated on the server and logged with
 the verb; a module answering a command copies it onto its `ResultEnvelope`, so a
 result on a shared bus can be routed back to the client that asked. (Returning
 it to the browser in the acknowledgement is the one edge change still pending;
-see STEP 4.)
+see the last section.)
 
 ## What is per client, what is shared
 
@@ -616,7 +624,7 @@ piece of `pmu_test_streamer/` to copy.
    Open the queue before building the opening message. The handshake around
    it (`read_client_id`, `accept`, `REGISTRY.acquire`, 1013 on
    `CapacityError`, `release`) is not shared yet -- copy the streamer's
-   `connected_pipeline` and point it at your registry (STEP 4 §8.1 item 8).
+   `connected_pipeline` and point it at your registry.
 5. **Commands**, if any: `POST`s that `REGISTRY.peek` (404 if none) and
    `bus.publish(Command(...))`; `dispatch` in the streamer is the model.
 6. **The page**: `useServerSocket<Wire['MyThingState']>(MY_THING_WS_PATH)`;
@@ -712,10 +720,10 @@ one KRaft node, no volume), the server and `stats-worker`; `k8s/` has the
 matching three Deployments; the smoke test plays the streamer and waits for the
 module's result either way.
 
-*Why.* Three decisions, argued in STEP 5:
+*Why.* Three decisions:
 
-- **The hop is a transport, not a provider.** STEP 3 sketched the broker as a
-  bus via `gateway.produce`/`consume`. The streamer's replay frames are stamped
+- **The hop is a transport, not a provider.** An earlier sketch had the broker
+  as a bus via `gateway.produce`/`consume`. The streamer's replay frames are stamped
   in January and go *backwards* at every loop; a time-addressed `DataStream`
   would drop them. A `Transport` carries what the bus said, in order, and
   never reads a timestamp. A broker as a *source* is still a `DataClient`.
@@ -726,10 +734,10 @@ module's result either way.
 - **What `setup` reads travels ahead, retained.** A compacted topic read from
   its start is Kafka's own "newest per key", so a worker that starts late still
   gets every header. The module also listens for `PmuHeader` on its bus, which
-  is what makes it host-independent (STEP 4 §8.1 #5, in miniature).
+  is what makes it host-independent.
 
-This landed ahead of the measurements STEP 3 principle 7 asked for; STEP 5
-records the decision and the numbers to produce next.
+This landed ahead of the measurements the design asked for before adding a
+broker; the numbers to produce next are listed in the last section.
 
 *Where.* `core/src/pswamp_core/transport/` (`Transport`, `InMemoryTransport`,
 `transport_from_env`; `kafka.py`), `core/src/pswamp_core/remote.py`
@@ -738,18 +746,71 @@ records the decision and the numbers to produce next.
 `docker-compose.yml` and `k8s/p-swamp-local.yaml`; `core/tests/test_remote.py`
 and the last cases of `app/server-python/tests/test_pmu_test_streamer.py`.
 
+## A remote time-series store as a provider
+
+*What.* `TimeSeriesDatabaseClient` (`datagateway/clients/time_series_database.py`,
+the `pswamp-core[timeseries]` extra) is a `DataClient` over a deployment's own
+time-series database, reached through a small REST api in front of it. A range
+query goes up as `POST /v1/queries`; the records come back as `TimeSeriesResult`
+envelopes on a Kafka topic, keyed by the query's id, closed by an `end` (or
+`error`) envelope; coverage is `GET /v1/coverage`. **The contract is the class's
+docstring.** Configuration is the `TSDB_*` block.
+
+```
+ gateway.consume(PmuFrame, t0, t1)
+   └─ TimeSeriesDatabaseClient ── subscribe topic (key = query_id) ── POST /v1/queries ──▶ the store's api
+                                ◀── time.series.result envelopes … {kind: "end"} ◀─────── its database
+```
+
+*Why.* Results are messages end to end, and the store's owner can put anything
+behind the POST. The price is correlation -- a `query_id` on every envelope, an
+explicit `end`, an `error` envelope, subscribe-before-POST -- paid once, in the
+client. The dummy service `app/server-python/src/time_series_stub/` (the sample
+recording tiled to a minute, `python -m time_series_stub`) stands in for a
+deployment's api in compose and k8s, so the whole path runs from this repo.
+`/time-series-explorer` drives it two ways: **play-range** (the player's bounded
+replay, above) and **count** (`RowCountModule`, the first `Command` addressed to
+a module, `target="row-count"`). Open points are in the last section.
+
+*Where.* `messages/time_series.py`, `datagateway/clients/time_series_database.py`,
+`transport/kafka.py:create_topic`; `time_series_stub/`, `time_series_explorer/`;
+`time-series-stub` in `docker-compose.yml` and `k8s/p-swamp-local.yaml`. Tests:
+`tests/test_time_series_database_client.py` runs the conformance suite over the
+client wired to the stub in-process (`httpx.ASGITransport`, `InMemoryResultFeed`);
+`KAFKA_TEST_BOOTSTRAP_SERVERS` gates the round trip through a real topic.
+
+## The error topic
+
+*What.* `ErrorEvent` (`messages/errors.py`) is what a pipeline publishes when
+something *operational* fails: the player's provider raised, a module's
+`process` raised. The bus is per pipeline, so the edge adds one hop: an
+`ErrorForwarderModule` per pipeline (`app/server-python/src/errors/`, via
+`shared.py`) copies them into a per-client hub tagged with the app's slug, and
+`/api/errors/ws` pushes them to the layout's `<ErrorTray>` on every page. Not an
+alarm: grid alarms are a correctly running application's result.
+
+*Where.* `messages/errors.py`; `datagateway/player.py` (`_on_stream_error`),
+`modules.py`; `app/server-python/src/errors/`; `hooks/useErrorFeed.ts`,
+`components/ErrorTray.tsx`.
+
 ## What is deliberately not here yet
 
-The full design, and the order things land in, is STEP 3 at the repo root.
 Absent from this slice, on purpose:
 
 - the bridge from the desktop package's thread-based `SnapshotApp`s to the bus
   (`GatewayIO`, `AppIO`) and the thread-hosted player that goes with it;
 - the grid monitor re-pointed at the core (it still runs the proof-of-concept
-  `Hub`/`Bus`/`HubRegistry` in `pswamp_web/`);
-- `request_id` in the browser-facing acknowledgement; batch jobs;
-- the draft's CSV and Kafka *providers* (a broker as a time-addressed source;
-  the transport is not one), and the measurements the out-of-process hosting
-  was meant to wait for (STEP 5 §6);
-- a `Command` addressed to a module, in-process or in the worker;
+  `Hub`/`Bus`/`HubRegistry` in `pswamp_web/`), and so its own hub wired into
+  the error topic;
+- `request_id` in the browser-facing acknowledgement; batch jobs beyond the
+  explorer's row count;
+- the draft's CSV provider and a broker *as history* (a topic's retention as a
+  time-addressed source; the transport is not one), and the measurements the
+  out-of-process hosting was meant to wait for (frame-to-result latency and
+  broker throughput at the target rates);
+- paging and backpressure in the time-series provider, and models beyond the
+  PMU pair in it; `Module.run` carrying a `Command` natively (the row-count
+  module overrides it);
+- a `Command` addressed to a module *in the worker* (in-process, the explorer
+  has one);
 - a `PmuFrameAssembler` for deployments that ingest per-PMU messages.
