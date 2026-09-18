@@ -51,20 +51,62 @@ which exist to keep the "adding a page" path honest:
   and keep it current: change a convention here
   first, don't grow features on it, and don't use it for p-SWAMP experiments —
   generate a new subapp for those.
-- **`/pmu-test-streamer` is the older demo** it replaced, a PMU record streamer
-  with playback controls (back / play / stop / forward) over a canned sample. It
-  predates the monitor and used to play the reference role. It is **slated for
-  retirement**: it still works and is still described below where it does
-  something the reference app does not, but don't cite it as the example to copy
-  and don't make anything new depend on it.
+- **`/pmu-test-streamer` is the thin slice of the target data architecture** —
+  the committed sample recording, and a synthetic live feed beside it, through
+  the shared core (`core/`, see "Three Python projects in one repo" and
+  `doc/server-data-architecture.md`): two providers behind the `DataClient`
+  contract in one `DataGateway`, a `Player` that either replays the recording
+  paced by the replay commands (back / play / stop / forward / seek / speed) or
+  tails the live feed with no transport at all, switched by two more commands
+  (replay / live) — each a `POST` that becomes a `Command` on the client's bus —
+  a module computing per-frame stats off that bus, and one pipeline per client.
+  The page shows a Recorded | Live switch and, while live, a red LIVE badge with
+  every transport control disabled. It used
+  to be the older demo the reference example replaced, and was slated for
+  retirement; it is now **the worked example of a provider, a module and a page
+  over the core**, and the first place the architecture is tested before the
+  grid monitor is re-pointed at it. It is *not* the example of a bare subapp —
+  that stays `/reference-subapp`.
+- **`/time-series-explorer` is the worked example of a provider that answers
+  *queries*, and of a module driven by a command.** Its provider is the core's
+  `TimeSeriesDatabaseClient` (`core/src/pswamp_core/datagateway/clients/time_series_database.py`,
+  behind the `pswamp-core[timeseries]` extra): a range request goes **up as a
+  REST `POST`** to a configured URL, and the answer comes **down on a configured
+  Kafka topic** as correlated envelopes — the shape a deployment implements once
+  in front of its own time-series database. **The contract is that class's
+  docstring**; read it there, not here. Beside it, `src/time_series_stub/` is
+  the dummy implementation of that REST service (`python -m time_series_stub`,
+  the same image as a separate container, serving the sample recording tiled
+  to a minute), rigged in compose and the local k8s manifest. The page asks
+  one range two ways, each a `POST` that becomes a `Command` on the client's
+  bus: **play-range** (the *stream* case — the player replays exactly
+  `[start, end)` paced and ends paused there, a bounded replay the player grew
+  for this) and **count** (the *batch* case — a `RowCountModule` addressed by
+  `Command.target`, pulling the range from the gateway itself, unpaced, and
+  answering with one result carrying the command's `request_id`). Its default
+  provider is the sample recording, so CI's bare `docker run` exercises the
+  page too; compose and k8s switch it to the time-series client with
+  `TIME_SERIES_EXPLORER_DATA_CLIENTS` and the `TSDB_*` block.
+
+Beside the pages, **the layout owns one socket of its own: the error tray.**
+`src/errors/` is the app package with no pipeline: every app that builds a core
+pipeline appends an `ErrorForwarderModule` (from `shared.py`) to its module
+list, which copies each `ErrorEvent` on that pipeline's bus — the player's
+provider failed, a module's `process` raised — into a per-client hub, and
+`/api/errors/ws` pushes them to `AppLayout`'s `<ErrorTray>`, so a failure in
+one page's replay is on screen whichever page the person is on. Errors here are
+*operational*; grid alarms stay the grid monitor's domain state.
 
 **The client-server stack is stateless on purpose.** There is no database and no
 persistent volume anywhere under `app/` or `k8s/`. Don't reintroduce one without
 an explicit ask. (The Nordic 44 grid model *is* a sqlite file, and the replayed
 PMU stream *is* a committed `.npz` — but both are read-only sample data the
-server opens, not storage it writes to.)
+server opens, not storage it writes to. The Kafka broker in compose runs with
+no volume and in `k8s/` on an `emptyDir`, deliberately: everything on its topics
+is a live hop between the server and the stats-worker, and a restart empties it
+at no cost.)
 
-## Two Python projects in one repo
+## Three Python projects in one repo
 
 The root `pyproject.toml` + `uv.lock` belong to the **desktop `p-swamp` package**
 (root `src/pswamp/`, imported as `pswamp`; PySide6, pyqtgraph, Kafka). The web
@@ -73,22 +115,42 @@ still resolve **separately** — which is the point, since Qt + Kafka and FastAP
 uvicorn have no business being solved as one dependency problem. Don't hoist
 either manifest to the other's level.
 
-They are not, however, independent. **The dependency runs one way, web →
-desktop:**
+The third is **`core/` — the shared data architecture, `pswamp-core`, imported
+as `pswamp_core`** (`core/pyproject.toml`, `core/src/pswamp_core/`,
+`core/tests/`): the wire messages, the provider contract and gateway, the player,
+the in-process bus, the module base, the pipeline registry, and the transport
+and remote-module pieces that let a module run as its own service. pydantic is
+its only dependency by default, so a provider written outside this repo can
+import the contract and nothing else; two extras add what two optional pieces
+need, both imported lazily — `pswamp-core[kafka]` adds aiokafka for the Kafka
+transport (`transport/kafka.py`), `pswamp-core[timeseries]` adds httpx beside
+it for the time-series provider (`datagateway/clients/time_series_database.py`)
+— and the web backend takes both. It has **no lockfile of its own**: it is a library, consumed by
+the web backend as a second editable path dependency, and its tests run in that
+backend's environment (below). `doc/server-data-architecture.md` describes it;
+the `STEP*` files at the repo root are the working notes behind it, and STEP 4
+says which parts exist. It is named `core` because that is what it is to the
+client-server stack; the desktop package is "the desktop package" in this file,
+never "the core", to keep the two apart.
+
+They are not, however, independent. **The dependencies run one way, web →
+desktop and web → core:**
 
 ```toml
 # app/server-python/pyproject.toml
-dependencies = ["fastapi…", "uvicorn…", "p-swamp"]
+dependencies = ["fastapi…", "uvicorn…", "p-swamp", "pswamp-core"]
 
 [tool.uv.sources]
-p-swamp = { path = "../../", editable = true }   # the repo root
+p-swamp = { path = "../../", editable = true }       # the repo root
+pswamp-core = { path = "../../core", editable = true }
 ```
 
-That single stanza is the whole seam. `pswamp_web/` imports `pswamp.*`; nothing
-under root `src/pswamp/` imports anything from `app/`, and nothing may start.
-Editable, so an edit to root `src/pswamp/` is live in the server with no
-reinstall — locally through the venv, and in the container through the compose
-watch that syncs root `src/` into it.
+Those two stanzas are the whole seam. `pswamp_web/` imports `pswamp.*`; the app
+packages import `pswamp_core.*`; nothing under root `src/pswamp/` or `core/`
+imports anything from `app/`, and nothing may start. `core/` does not import the
+desktop package either. Editable, so an edit to root `src/pswamp/` or `core/` is
+live in the server with no reinstall — locally through the venv, and in the
+container through the compose watch that syncs both into it.
 
 Consequences worth knowing before touching anything:
 
@@ -101,13 +163,21 @@ Consequences worth knowing before touching anything:
   that the image mirrors the *repo root*, not just the server dir — see the
   workspace note at the top of the Dockerfile's runtime stage for why the depth is
   required rather than a matter of taste.
-- **`./scripts/error_check.sh` gates `app/` fully; root `src/` only for syntax.**
-  ruff, `tsc` and the lockfile check are scoped to `app/`. Root `src/` now gets a
-  **syntax-only** `py_compile` gate (it ships in the image, so it must at least
-  parse) — but it is *not* lint-gated: `ruff check` deliberately stays `app/`-only,
-  with a `TODO` beside the src/ step in the script. Widening ruff to `src/` means
-  first dealing with the existing desktop code's lint state (~334 pyflakes
-  findings), which is a real piece of work and not a one-line scope change.
+- **`./scripts/error_check.sh` gates `app/` and `core/` fully; root `src/` only
+  for syntax.** ruff, `tsc` and the lockfile check are scoped to `app/`, and a
+  separate "Python (core)" section runs `py_compile` and the same pinned ruff over
+  `core/`. Root `src/` gets a **syntax-only** `py_compile` gate (it ships in the
+  image, so it must at least parse) — but it is *not* lint-gated: `ruff check`
+  deliberately stays off it, with a `TODO` beside the src/ step in the script.
+  Widening ruff to `src/` means first dealing with the existing desktop code's
+  lint state (~334 pyflakes findings), which is a real piece of work and not a
+  one-line scope change.
+- **`core/` is in the image too**, copied and installed editable beside the
+  desktop package (its manifest is copied before the dependency resolve, its
+  source after; `--no-emit-package pswamp-core` keeps it out of the wheel layer),
+  synced by compose watch and named in `--reload-dir`. `core/tests/` is kept out
+  by `.dockerignore`. Nothing in the Dockerfile names a module, so a new module
+  under `core/src/pswamp_core/` needs no build change.
 - **The web backend takes p-swamp with no extras.** `[full]` is what carries
   PySide6, pyqtgraph, kafka-python, nqkafka and tops-rt; none of that belongs in a
   headless server image. `synchrophasor` is a *base* root dependency but is
@@ -116,14 +186,24 @@ Consequences worth knowing before touching anything:
   git rather than an index. The Dockerfile's `import server` smoke test is what
   makes both exclusions checked decisions rather than hopeful ones.
 - **A dependency for the web backend goes in `app/server-python/pyproject.toml`**,
-  never the root one — and vice versa. After editing either, re-lock **both**:
-  `(cd app/server-python && uv lock --upgrade-package p-swamp)` is what refreshes
-  the web backend's view of the root manifest. A plain `uv lock` will report
-  "Resolved N packages" without re-reading the path dependency.
+  never the root one — and vice versa. A dependency for the core goes in
+  `core/pyproject.toml`, and think twice: pydantic is meant to stay the only one.
+  After editing the root or core manifest, re-lock the web backend's view of it:
+  `(cd app/server-python && uv lock --upgrade-package p-swamp)` or
+  `… --upgrade-package pswamp-core`. A plain `uv lock` will report
+  "Resolved N packages" without re-reading a path dependency.
 
 ## Architecture
 
-Two deployables, one wire protocol:
+Two deployables, one wire protocol — plus, for the PMU test streamer's stats
+module only, a worker container from the same image and the Apache Kafka broker
+it is reached through (`docker-compose.yml`'s `stats-worker` and `kafka`; the
+matching Deployments in `k8s/`), and, for the Time Series Explorer only, the
+dummy time-series service from the same image (`time-series-stub`) that the
+explorer's provider queries over REST and reads back over that same broker.
+None is a dependency of the server: unset one variable and the module runs
+in-process, unset another and the explorer runs over the sample recording,
+which is what CI's e2e job runs.
 
 - **`app/server-python/`** — the authoritative state server. The code lives in
   `src/` (mirroring the web client's layout), with the manifests beside it.
@@ -141,24 +221,48 @@ Two deployables, one wire protocol:
   imports **relatively** (`from .model import ...`). It is the smallest complete
   subapp: no ticker, no data file, no lifespan, so what remains is exactly the
   wiring every app needs.
-  **`src/pmu_test_streamer/`** is the older demo, kept for now and slated for
-  retirement, and it is worth reading only for the two things it adds on top: a
-  `lifespan` that runs a playback `ticker()`, and a data file shipped beside its
-  code.
-  The streamer's `model.py` owns that `sample_data.txt` (read once at import,
-  one record per line): a **one-off sample committed for testing** — 300
+  **`src/pmu_test_streamer/`** is the thin slice of the data architecture over
+  the shared core — read it to see what an app package looks like when the core
+  does the streaming: `sample_client.py` (a `DataClient` over the sample file —
+  a provider written *outside* `core/` on purpose, importing only the contract;
+  `HISTORY_CONSUME`, and the one that serves the `PmuHeader`), `live_client.py`
+  (the second provider: `LIVE_CONSUME` only, the same rows re-stamped on the
+  wall clock at 20 Hz by a ticker that runs between the gateway's `open` and
+  `close`; it serves frames and no header, on purpose — see its docstring),
+  `stats_module.py` (a `Module` consuming `PmuFrame` off the bus and publishing
+  `FrameStatsResult` onto it), and `api.py` (a `PipelineRegistry` bound in its
+  `lifespan`, a socket that subscribes the client's bus *before* its first send
+  and coalesces into one `PmuStreamState` per change, and eight POSTs that each
+  publish a `Command` — or answer **409** when the player's current mode cannot
+  apply the verb, so the ack never claims a command the player would only log).
+  Both providers are the default (`DEFAULT_DATA_CLIENTS`); `PSWAMP_DATA_CLIENTS`
+  names others. `doc/server-data-architecture.md` walks through it.
+  **It is also the worked example of a module running as its own service.**
+  With `PMU_TEST_STREAMER_MODULE_TRANSPORT` naming a transport (the core's
+  `KafkaTransport`, with `KAFKA_BOOTSTRAP_SERVERS` beside it — what compose and
+  `k8s/` set), `build_pipeline` puts a `RemoteModule` in the module list instead
+  of `FrameStatsModule`, and `worker.py` (`python -m pmu_test_streamer.worker`,
+  a plain process from the same image, no port) runs the identical module, one
+  instance per client key, tailing `pmu.frame` and publishing
+  `frame.stats.result`. Unset (the tests, CI's `docker run`) the module runs
+  in-process. The player and every command stay in the server either way. See
+  "Running a module as a separate service" in that document.
+  `sample_data.txt` beside it is a **one-off sample committed for testing** — 300
   *simulated* PMU records extracted by hand from the Nordic 44 simulation that now
   lives in this same repo under `examples/nordic44_rtsim/` (voltage phasor +
-  measured frequency, five stations at 20 Hz, spanning a line trip). Sharing a
-  repo with that simulation buys the streamer nothing: it is still a static
-  fixture and nothing generates it. (The *grid monitor* is the one that really
-  runs the desktop package's code; the streamer does not, and should not start.)
-  Don't add tooling or deps to regenerate it unless asked;
-  replacing it is a file swap, since no code parses the contents. **`src/shared.py`** is what an app
+  measured frequency, five stations at 20 Hz, spanning a line trip). It is parsed
+  lazily, on the first pipeline built, into one `PmuHeader` and sixty
+  `PmuFrame`s. Sharing a repo with that simulation buys the streamer nothing: it
+  is still a static fixture and nothing generates it. (The *grid monitor* is the
+  one that really runs the desktop package's analysis code; the streamer runs
+  the *core* and a toy module.) Don't add tooling or deps to regenerate it
+  unless asked; replacing it is a file swap as long as the line format holds. **`src/shared.py`** is what an app
   package imports its domain-free helpers from — `SocketRegistry`, plus
   `ClientId`, `CommandAck`, `read_client_id`, `get_logger` re-exported from
   `pswamp_web/` (see "The p-SWAMP web layer" for why the definitions live down
-  there and the import runs inward); it is *not* an app package and never appears
+  there and the import runs inward), and `event_queue` + `serve_updates`, the
+  grid monitor's event-driven push loop from `pswamp_web/pump.py`, which
+  serves a core pipeline unchanged; it is *not* an app package and never appears
   in `APPS`.
   Note the spelling split: a package dir must be a Python identifier
   (`reference_subapp`) while its URL prefix is hyphenated to match the page route
@@ -200,20 +304,24 @@ Two deployables, one wire protocol:
   commands, where the connection half lives once in
   `src/hooks/useServerSocket.ts` and the app's own hook
   (`useReferenceSubappSocket`) adds only its wire type and its commands.
-  `/pmu-test-streamer` (`PmuTestStreamerPage`) is the older demo beside it, on
-  its way out. See
-  "Adding a p-SWAMP view" and "Adding a page" below.
+  `/pmu-test-streamer` (`PmuTestStreamerPage`) is the data-architecture slice
+  beside it: a frame table, the stats module's result, a Recorded | Live switch,
+  and controls rendered from the player's own status — `mode` decides whether the
+  transport row is enabled at all (never while live, where a red LIVE badge says
+  why), `can_seek` whether seek and step-back are, `can_go_live` whether the
+  switch is. See "Adding a p-SWAMP view" and "Adding a page" below.
 
 Key invariants to preserve:
 
 - **State is per-client and in-memory only.** Each browser has one random integer
   id, persisted in `localStorage` and sent as `?client_id=` on every WebSocket URL;
-  each scaffold app keeps one small model per id in its own module-level
-  `states: dict[str, …]` — `ReferenceSubappModel` in `reference_subapp`, a
-  position + play flag in `pmu_test_streamer` — never evicted (a bounded,
+  the reference app keeps one small model per id in its own module-level
+  `states: dict[str, …]` (`ReferenceSubappModel`), never evicted (a bounded,
   acceptable leak here, since the value is a couple of integers and not a
-  pipeline). That dict is the only store: nothing is persisted, so a process/pod
-  restart puts every client back at the start. That reset is expected behavior,
+  pipeline); the streamer keeps one core `Pipeline` per id in a
+  `PipelineRegistry`, capped and idle-evicted like the grid monitor's hubs.
+  Nothing is persisted, so a process/pod restart puts every client back at the
+  start. That reset is expected behavior,
   not a bug. Note the id
   became stable per browser rather than per page mount when the grid monitor
   needed it to be, so the demo now resumes across a reload too — not only across
@@ -496,7 +604,8 @@ Three things worth knowing before touching it:
 Sanity values, for checking a change did not quietly break the pipeline: median
 frequency **50.0009 Hz**, median voltage **418.6 kV**, islanded stations **6500,
 6700, 6701**, island groups summing to exactly **44** stations with no overlap,
-and the dashboard opening exactly **5** WebSockets — for **one** pipeline, however
+and the dashboard opening exactly **6** WebSockets — five for the panels, one
+the layout's error tray holds on every page — for **one** pipeline, however
 many panels are open.
 
 **The disturbance now arrives on the client's own clock.** Each client's replay
@@ -711,8 +820,8 @@ socket — `pswamp_web/grid/` — just omits the name.
 
 `src/reference_subapp/` is the one to copy: the smallest complete api, and
 nothing in it is there for a reason peculiar to itself. If the app ships a **data
-file** beside its code, that needs no Dockerfile change either — read it once at
-import off `Path(__file__).parent`, as `pmu_test_streamer/model.py` and
+file** beside its code, that needs no Dockerfile change either — locate it off
+`Path(__file__).parent`, as `pmu_test_streamer/sample_client.py` and
 `pswamp_web/data/` both do, since `COPY src/ ./src/` takes the whole tree. Put
 anything a second app would otherwise duplicate in `src/shared.py`; the per-app
 `states` dict, `state_message`, any ticker, and command dispatch deliberately
@@ -726,6 +835,8 @@ underlying tech). Start the server first, then the client:
 ```
 ./scripts/start-local-hotloaded-pswamp-server.sh      # state server on 127.0.0.1:8000 (docker compose up --watch --build; streams logs, Ctrl-C stops it)
                                                      # also live-syncs root src/, so desktop-package edits hot-reload too
+                                                     # brings up four containers: kafka, the server, the streamer's stats-worker,
+                                                     # and the explorer's time-series-stub (a dummy store behind the REST + Kafka contract)
 ./scripts/start-local-hotloaded-pswamp-web-client.sh  # Vite/React web client w/ HMR on http://localhost:5173
 ```
 
@@ -846,7 +957,23 @@ separate envs and are hermetic to very different degrees:
   dev group and kept out of the image by the Dockerfile's `--no-dev` (`tests/` is
   also excluded from the build context by `.dockerignore` and never copied — only
   `src/` is). Add a suite here for any new backend api with non-trivial lifecycle
-  logic.
+  logic. **The same runner also runs `core/tests/`** — the shared core's own
+  suite (the gateway routing cases, the bus, the player, the registry, the
+  provider conformance suite) — through a second entry in the server manifest's
+  `testpaths`, so one command and one CI job cover both. `core/pyproject.toml`
+  carries its own `[tool.pytest.ini_options]` too, so pointing pytest at
+  `core/tests` directly (a node id, `pytest core/tests`) keeps the asyncio mode.
+  `test_pmu_test_streamer.py` is the worked example of a provider inheriting
+  `DataClientConformance` with three fixtures, and its last cases run the stats
+  module as its own service over the portless `InMemoryTransport`. The Kafka
+  transport's own round trip in `core/tests/test_kafka_transport.py` is
+  **skipped unless a broker is named**: `KAFKA_TEST_BOOTSTRAP_SERVERS=127.0.0.1:19092`
+  runs it against the compose stack's Kafka (its EXTERNAL listener). The same
+  variable gates the time-series provider's round trip through a real topic in
+  `tests/test_time_series_database_client.py`; the rest of that file — the
+  conformance suite over the client wired to the stub service in-process
+  (`httpx.ASGITransport` for the REST half, the client's `InMemoryResultFeed`
+  as the stub's sink) — needs neither a port nor a broker.
 - **`./scripts/run-core-python-tests.sh`** — the desktop package's tests
   (repo-root `tests/`), in the root project's `[full]` env. A **starting point,
   not a gate**: most need external infrastructure (Kafka / NQKafka / MQTT brokers,
@@ -869,7 +996,11 @@ up the compose server (reusing one already running, and only tearing down what i
 started), checks the HTTP surface with curl — `/healthz`, the built client at `/`,
 the SPA deep-link fallback, a missing asset still 404ing, `/openapi.json` — and
 then runs the counter flow: connect a socket, POST bumps, assert the pushed
-counts, POST reset, assert zero, and assert a second client id starts at zero. Two
+counts, POST reset, assert zero, and assert a second client id starts at zero —
+and then the streamer flow (`tools/smoketest_pmu_test_streamer.py`): connect,
+POST play, wait for a state carrying the stats module's result, POST stop. Under
+compose that result crossed the broker from the stats-worker; under CI's bare
+`docker run` the same check passes with the module in-process. Two
 things worth knowing before extending it:
 
 - **The WebSocket half is Python, and needs no new dependency.**
@@ -929,7 +1060,7 @@ network.
 Deploy / test the real artifact:
 
 ```
-./scripts/start-pswamp-in-local-minikube-cluster.sh   # build into minikube + apply k8s/p-swamp-local.yaml
+./scripts/start-pswamp-in-local-minikube-cluster.sh   # build into minikube + ConfigMap from k8s/deployment_pmu_data_file_example.txt + apply k8s/p-swamp-local.yaml
 ./scripts/logs-minikube.sh     # follow server logs (kubectl logs -f, bound to one pod)
 ```
 
@@ -1197,7 +1328,28 @@ What has to hold in the `static-errorcheck` job:
   `latest` and the branch tag both move, and neither triggers a k8s rollout on
   its own (the pod spec doesn't change) — the sha tag does.
 - **k8s manifest:** `p-swamp-local.yaml` is local-only (`imagePullPolicy: Never`, image
-  built into minikube)
+  built into minikube). It holds four Deployments — the server, the streamer's
+  `p-swamp-stats-worker` (same image, different command, no Service), the
+  explorer's `p-swamp-time-series-stub` (same image again, with a ClusterIP
+  Service and `/healthz` probes, since the server calls it over HTTP) and
+  `p-swamp-kafka` (the one *pulled* image, so `IfNotPresent`, on an
+  `emptyDir`) — and the start script rolls the first three out after waiting
+  for the broker. It is also **the worked example of configuring the PMU
+  data sources from outside the image**: its env block spells out
+  `PSWAMP_DATA_CLIENTS` and points the live feed's `LIVE_PATH` at
+  `k8s/deployment_pmu_data_file_example.txt`, mounted read-only from a ConfigMap
+  that `start-pswamp-in-local-minikube-cluster.sh` builds from that file before
+  applying the manifest. In the example file every value counts up by one per
+  frame from a round start (100 kV, 0°, 60 Hz), the same in every station, so
+  Live mode visibly shows the configured source, and that it is moving, while
+  Recorded still replays the image's own recording. A replacement file must keep
+  the recording's channel layout (five stations at 20 Hz), because the live
+  client serves no header. The ConfigMap is configuration, not storage: the
+  "no persistent volume" rule stands. The same env block is **the worked
+  example of pointing a page at a remote store**: `TIME_SERIES_EXPLORER_DATA_CLIENTS`
+  names the time-series client, `TSDB_URL` the stub's Service and
+  `TSDB_BOOTSTRAP_SERVERS` the broker — a deployment with a real store keeps
+  those three lines and changes the URL.
 
 ## Workflow rules
 

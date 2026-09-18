@@ -13,6 +13,35 @@ services:
       # Compose sync writes may not always emit inotify events in-container;
       # polling keeps reload reliable across host/container boundaries.
       WATCHFILES_FORCE_POLLING: "true"
+      # The PMU test streamer's stats module runs as its own service -- the
+      # stats-worker below -- reached over the kafka broker: each client's
+      # pipeline then holds a RemoteModule that publishes its frames on the
+      # module's input topic under the client's key and tails the results
+      # back. Unset this one variable and the module runs in this process,
+      # unchanged (which is what CI's e2e job, a bare `docker run`, exercises).
+      # The worker reads the same variable, so the two sides cannot disagree.
+      PMU_TEST_STREAMER_MODULE_TRANSPORT: "kafka:pswamp_core.transport.kafka:KafkaTransport"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      # The Time Series Explorer reads a *remote* store: the time-series client
+      # (core/src/pswamp_core/datagateway/clients/time_series_database.py)
+      # POSTs each range query to TSDB_URL -- the time-series-stub below, a
+      # dummy of the api a deployment would put in front of its database --
+      # and reads the answers off a Kafka topic on TSDB_BOOTSTRAP_SERVERS.
+      # Unset the first variable and the page runs over the sample recording
+      # in this process, unchanged (what CI's bare `docker run` exercises).
+      # The stub reads the matching TIME_SERIES_STUB_* block.
+      TIME_SERIES_EXPLORER_DATA_CLIENTS: "tsdb:pswamp_core.datagateway.clients.time_series_database:TimeSeriesDatabaseClient"
+      TSDB_URL: "http://time-series-stub:8100"
+      TSDB_BOOTSTRAP_SERVERS: "kafka:9092"
+    # The broker is reached lazily, on the first streamer socket, not at
+    # startup -- but a publish to a broker that is still booting is dropped
+    # (and logged), so wait for kafka to be healthy rather than race it. The
+    # stub likewise: the explorer's first socket asks it for coverage.
+    depends_on:
+      kafka:
+        condition: service_healthy
+      time-series-stub:
+        condition: service_healthy
     # Dev-only override: run uvicorn with --reload so the files synced in by
     # `watch` (below) trigger an in-process hot reload. The Dockerfile's prod
     # CMD (plain `python server.py`) is left untouched — this reloader never
@@ -30,9 +59,12 @@ services:
         "/workspace/p-SWAMP/app/server-python/src",
         "--reload-dir",
         "/workspace/p-SWAMP/src",
+        "--reload-dir",
+        "/workspace/p-SWAMP/core",
       ]
-    # The server has no external dependencies, so "is the process serving?" is
-    # the whole health story — /healthz covers it. curl returns non-zero if the
+    # /healthz is the process's own health — "is it serving?" — and stays so:
+    # the broker is an optional dependency of one module on one page, reached
+    # lazily, not a precondition for the server. curl returns non-zero if the
     # endpoint doesn't answer.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
@@ -72,6 +104,11 @@ services:
         - path: src
           action: sync
           target: /workspace/p-SWAMP/src
+        # And for the shared core at core/ (pswamp_core), installed editable
+        # the same way, so an edit to a message model or the player hot-reloads.
+        - path: core
+          action: sync
+          target: /workspace/p-SWAMP/core
         # Dependency changes are the exception: new packages have to be
         # installed, which a file sync can't do. These rebuild the image and
         # recreate the container instead — slower, on purpose. Without this,
@@ -80,3 +117,128 @@ services:
           action: rebuild
         - path: app/server-python/uv.lock
           action: rebuild
+        - path: core/pyproject.toml
+          action: rebuild
+
+  # The stats module as its own process (src/pmu_test_streamer/worker.py): the
+  # SAME image, a different command. No port: it tails pmu.frame off the broker
+  # below, runs one FrameStatsModule per client key it sees, and publishes
+  # frame.stats.result back under that key. The module code is unchanged; only
+  # where it runs is. A plain python process has no --reload, so the watch
+  # entries restart it on a sync instead. The second `build: .` is a cache hit.
+  stats-worker:
+    build: .
+    image: p-swamp:latest
+    command: ["python", "-m", "pmu_test_streamer.worker"]
+    environment:
+      PMU_TEST_STREAMER_MODULE_TRANSPORT: "kafka:pswamp_core.transport.kafka:KafkaTransport"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    # No healthcheck: nothing routes to it, and it exits (and is restarted)
+    # when it cannot serve. Its logs are the view: one line per client key
+    # started and evicted.
+    restart: unless-stopped
+    develop:
+      watch:
+        - path: app/server-python/src
+          action: sync+restart
+          target: /workspace/p-SWAMP/app/server-python/src
+        - path: core
+          action: sync+restart
+          target: /workspace/p-SWAMP/core
+        - path: app/server-python/pyproject.toml
+          action: rebuild
+        - path: app/server-python/uv.lock
+          action: rebuild
+        - path: core/pyproject.toml
+          action: rebuild
+
+  # A dummy time-series store behind the REST + Kafka provider contract
+  # (src/time_series_stub/): the SAME image, a different command, standing
+  # where a deployment's own api over its time-series database would stand.
+  # The server's time-series client POSTs range queries to it on :8100 and
+  # reads the answers off the results topic on the broker below. Its
+  # "database" is the streamer's sample recording tiled twenty times (a
+  # minute of timeline). It serves HTTP, so unlike the worker it has a
+  # healthcheck, and the server waits for it. Not published to the host:
+  # nothing outside the compose network needs it.
+  time-series-stub:
+    build: .
+    image: p-swamp:latest
+    command: ["python", "-m", "time_series_stub"]
+    environment:
+      TIME_SERIES_STUB_BOOTSTRAP_SERVERS: "kafka:9092"
+      TIME_SERIES_STUB_REPEAT: "20"
+    expose:
+      - "8100"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8100/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    develop:
+      watch:
+        - path: app/server-python/src
+          action: sync+restart
+          target: /workspace/p-SWAMP/app/server-python/src
+        - path: core
+          action: sync+restart
+          target: /workspace/p-SWAMP/core
+        - path: app/server-python/pyproject.toml
+          action: rebuild
+        - path: app/server-python/uv.lock
+          action: rebuild
+        - path: core/pyproject.toml
+          action: rebuild
+
+  # The broker between the server and the stats-worker: Apache Kafka, the
+  # official image (Apache 2.0), one node in KRaft mode (broker and controller
+  # in one process, no ZooKeeper). Ephemeral on purpose -- no volume, by the
+  # "no persistent volume" rule in AGENTS.md: everything on its topics is a
+  # live hop between two processes, and a restart empties them at no cost
+  # (the server re-sends each client's header on its next pipeline). The
+  # EXTERNAL listener on 19092 is for the host: the broker-gated transport
+  # tests (KAFKA_TEST_BOOTSTRAP_SERVERS=127.0.0.1:19092) and any Kafka CLI on
+  # a laptop. Auto-creation is off: the transport creates its topics itself,
+  # with the right config (the header topic is compacted).
+  #
+  # The image turns every KAFKA_* variable into a server.properties entry.
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:19092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,EXTERNAL://localhost:19092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      # One node, so every internal topic has one replica.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: "/tmp/kraft-combined-logs"
+      # A dev broker; the JVM would otherwise take a quarter of the machine.
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"
+    ports:
+      - "19092:19092"
+    # The broker's own CLI asking it for its api versions: answers only once
+    # the broker is serving. A JVM start per probe, hence the long timeout.
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped

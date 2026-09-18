@@ -13,10 +13,10 @@
 #     - tsc -b ....... type-check (also catches unused locals, bad imports)
 #     - eslint . ..... lint (flat eslint.config.js, react-hooks etc)
 #
-#   Python (app/server-python)
+#   Python (app/server-python + core)
 #     - uv lock --check  pyproject.toml vs uv.lock in sync (read-only)
-#     - py_compile ..... syntax/AST errors (app/ + the older root src/ package)
-#     - ruff check ..... lint (pyflakes F — real bugs, not style), app/ only, from the locked dev group
+#     - py_compile ..... syntax/AST errors (app/, core/, + the older root src/ package)
+#     - ruff check ..... lint (pyflakes F — real bugs, not style), app/ + core/, from the locked dev group
 #
 #   The api contract (doc/api/openapi.json + app/client-web/src/api/schema.ts)
 #     - generate-api-contract.sh --check — both are generated and committed, so a
@@ -131,6 +131,26 @@ else
   # `ruff format`, nor inherit ruff's other opinionated families (I, B, S…).
   RUFF=(uv run --project app/server-python --only-group dev ruff)
   run "ruff check (Python lint)"   "${RUFF[@]}" check --select F app
+fi
+
+# --- Python: the shared core (core/) -----------------------------------------
+#
+# The third Python project: pswamp_core, installed editable into the server env
+# and shipped in the image. New code, so it is fully gated -- same syntax check
+# and the same pinned ruff as app/ (unlike the older root src/, which is
+# syntax-only above).
+section "Python (core)"
+CORE_PY_FILES=()
+while IFS= read -r -d '' py_file; do
+  CORE_PY_FILES+=("$py_file")
+done < <(find core -name '*.py' -not -path '*/__pycache__/*' -not -path '*/.venv/*' -print0)
+
+if [ "${#CORE_PY_FILES[@]}" -eq 0 ]; then
+  echo "  (no Python files found under core/)"
+else
+  run "py_compile (core syntax/AST)" python3 -m py_compile "${CORE_PY_FILES[@]}"
+  run "ruff check (core lint)" \
+    uv run --project app/server-python --only-group dev ruff check --select F core
 fi
 
 # --- The published api contract ---------------------------------------------

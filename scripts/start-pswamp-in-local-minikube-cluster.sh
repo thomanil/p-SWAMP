@@ -68,13 +68,29 @@ echo "Building p-swamp:latest into minikube..."
 minikube image build -t p-swamp:latest .
 
 # --- Apply manifests and roll out ------------------------------------------
+# The live feed's data file first, as the ConfigMap the Deployment mounts (see
+# the env block and `volumes` in k8s/p-swamp-local.yaml). Built from the file
+# rather than inlined in the manifest, so the example data stays a plain text
+# file anyone can edit or swap; the dry-run-then-apply form is idempotent.
 echo "Applying manifests..."
+kubectl create configmap p-swamp-pmu-data \
+  --from-file=k8s/deployment_pmu_data_file_example.txt \
+  --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f k8s/p-swamp-local.yaml
 
 # `kubectl apply` won't restart pods if the manifest text is unchanged, even
 # though we just rebuilt :latest. Force a new pod so the fresh image is used.
 echo "Rolling out..."
-kubectl rollout restart deployment/p-swamp
+# The broker first: it is the one image pulled rather than built (hence the
+# longer timeout on a first run), and it is never restarted here -- it was not
+# rebuilt, and a restart would empty its topics for nothing. Then the three
+# pods built from the fresh image: the stats-worker, the time-series stub
+# (which the server's explorer page calls, so it is up before the server),
+# and the server.
+kubectl rollout status deployment/p-swamp-kafka --timeout=300s
+kubectl rollout restart deployment/p-swamp deployment/p-swamp-stats-worker deployment/p-swamp-time-series-stub
+kubectl rollout status deployment/p-swamp-stats-worker --timeout=120s
+kubectl rollout status deployment/p-swamp-time-series-stub --timeout=120s
 kubectl rollout status deployment/p-swamp --timeout=120s
 
 # --- Reach the Service ------------------------------------------------------
