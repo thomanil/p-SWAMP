@@ -21,6 +21,30 @@ before. **The worked example** ("What happens when you click Live", below) is
 walked the other way, from the button in the browser up to the two data
 clients, because that is the order in which a request actually travels.
 
+## The layers
+
+The core is a stack of eight layers, numbered from the bottom, and the `L`
+numbers in the pictures and sections below refer to it. **Each layer imports
+only the ones below it**, and nothing above -- which is what lets a provider
+be written outside the repo against L1 and L2 alone, and a module be moved to
+another process without touching the layers either side of it.
+
+| | Layer | What it is | Where |
+|---|---|---|---|
+| L1 | Messages | The wire models: `DataModel` and every message derived from it -- `PmuHeader`, `PmuFrame`, `Command`, `PlayerStatus`, `ResultEnvelope`, `ErrorEvent`. pydantic only; what every arrow carries | `messages/` |
+| L2 | Gateway | The provider contract (`DataClient`, its capabilities) and the `DataGateway` that stitches providers into one time-addressed stream | `datagateway/` |
+| L3 | Player | Paces a gateway stream and owns the transport controls: play, pause, step, seek, speed, replay, live | `datagateway/player.py` |
+| L4 | Bus | In-process publish/subscribe typed on message classes; one per pipeline | `bus/` |
+| L5 | Modules | Analysis: consume one message class off the bus, publish another | `modules.py`, `remote.py` |
+| L6 | Pipeline | One stream's gateway, player, bus and modules as a unit, and the registry that keeps one per key | `pipeline.py` |
+| L7 | Hosting | Which process each piece runs in, from the environment: providers and transports by name, a module as its own service | `transport/`, `datagateway/config.py`, `remote.main` |
+| L8 | Web edge | The app package: POSTs that become commands, the socket that pushes state | `app/server-python/src/<app>/` |
+
+Not every layer is a hop that data passes through. L1 is the vocabulary of
+all the others; L6 is the box drawn around L2–L5; L7 is deployment. So the
+pictures below, which follow a frame and a command, show rows only for L2,
+L3, L4, L5 and L8.
+
 ## The idea in one picture
 
 ```
@@ -57,9 +81,9 @@ clients, because that is the order in which a request actually travels.
 ```
 
 Two things to notice. **Every arrow carries a pydantic model** (`PmuFrame`,
-`PlayerStatus`, `Command`, …): the wire format is JSON with a schema version,
-end to end, and the browser's TypeScript types are generated from those same
-classes. And **nothing above the bus knows what is below it**: the endpoint
+`PlayerStatus`, `Command`, …) -- that is L1: the wire format is JSON with a
+schema version, end to end, and the browser's TypeScript types are generated
+from those same classes. And **nothing above the bus knows what is below it**: the endpoint
 subscribes to message classes; the module subscribes to message classes; the
 player writes to the bus. Swapping a provider (top row) changes nothing else. A
 deployment's own provider -- a TSO's time-series store, a broker feed -- takes
