@@ -1183,7 +1183,7 @@ mind when editing that script:
 - **Dockerfile base images are digest-pinned**, with the readable tag kept as a
   comment and refresh instructions inline. Those digests are multi-arch indexes,
   so the Dockerfile builds natively on amd64 and arm64 alike — which is what lets
-  an arm64 laptop build it locally. What **CI builds is amd64 only**; see "CI".
+  an arm64 laptop build it locally. What **CI publishes is amd64 only**; see "CI".
 - **The deployable is named `p-swamp` everywhere** — local image tag, k8s
   Deployment/Service/Ingress, `app:` labels and selectors, container name, and k8s
 - **The minikube NodePort is 30080**, set in `k8s/p-swamp-local.yaml` and
@@ -1214,14 +1214,10 @@ mind when editing that script:
   it. Ruff's own version is pinned in the `dev` dependency group of
   `app/server-python/pyproject.toml` and locked, so everyone runs the identical
   linter.
-- **CI checks; it never publishes and never deploys.** The workflows (below)
-  check pull requests and check that the image still builds from `main`. No
-  image is pushed to any registry — **this repo cannot host binaries** — and
-  nothing rolls anything out to a cluster. The `Dockerfile` is an *example* of
-  how to containerise the stack; a downstream deployment builds its own image
-  from it (see "CI"). The **pre-push hook** is still the first gate and the fast
-  one — run `error_check.sh` before finishing any change rather than discovering
-  it in CI.
+- **CI publishes; it never deploys.** The workflows (below) check pull requests
+  and push an image from `main`. Nothing rolls anything out to a cluster. The **pre-push hook**
+  is still the first gate and the fast one — run `error_check.sh` before finishing
+  any change rather than discovering it in CI.
 
 ## CI
 
@@ -1233,34 +1229,13 @@ mind when editing that script:
   through their runner scripts (`run-python-server-tests.sh`; the desktop
   `run-core-python-tests.sh` step is commented out with a TODO until its
   missing-module failure is resolved), so `error_check.sh` stays strictly static.
-- **`build-container.yml`** runs on every push to `main` and from the Actions
-  tab: it builds the image with `push: false`, starts it, checks `/healthz`
-  answers, and discards it. **It publishes nothing.** It runs no gates of its
-  own — `main` is protected, so every commit on it already passed the checks on
-  its pull request. What it adds over the pull-request smoke test is a build of
-  the *merged* result with the `GIT_SHA` build arg threaded in as a deployment
-  would pass it. Its job is `build-container`; it needs no secret and only
-  `contents: read`.
+- **`build-and-publish.yml`** runs on every push to `main`, on a `v*` tag, and
+  from the Actions tab: it builds the image and pushes it to **GHCR**
+  (`ghcr.io/<owner>/<repo>`). It runs no gates of its own — `main` is protected,
+  so every commit on it already passed the checks on its pull request. No secret
+  to configure — the automatic `GITHUB_TOKEN` covers GHCR.
 
 A branch with no PR open runs nothing.
-
-**Nothing in this repo publishes a container image, by constraint rather than
-by omission: this repo cannot host binaries.** The `Dockerfile` is an **example**
-of how to containerise the stack — the one the compose, minikube and CI paths
-all build from — and a downstream deployment builds its own image from it:
-
-```
-git clone <this repo> && cd p-SWAMP
-docker build --build-arg GIT_SHA="$(git rev-parse HEAD)" -t <registry>/p-swamp:<tag> .
-docker push <registry>/p-swamp:<tag>
-```
-
-What holds for such a build: the context is the repo root (see below), the
-`GIT_SHA` build arg is what the client footer shows on deployed origins, and a
-deployment should pin to an immutable tag of its own making (the commit sha)
-rather than a moving one, since a moving tag never triggers a k8s rollout on its
-own. Don't add a registry push back to either workflow without an explicit ask;
-if hosting ever becomes possible, that is a decision for an ADR.
 
 **Blocking a merge on the checks is a repo setting, not something a workflow
 can express.** Settings → Branches → branch protection for `main` → "Require
@@ -1270,6 +1245,16 @@ renaming a job silently un-requires it there — rename the job and the protecti
 rule together. (The jobs used to live in a single `ci-pipeline.yml`, and before
 that the check job was called `check`; if protection was configured against
 either, it needs re-selecting.)
+
+GHCR is the only registry. A GitLab pipeline publishing to a GitLab registry was
+built and tested against the internal mirror's runners, then dropped: publishing
+to one place is enough. It is recoverable rather than guessed at, if it is ever
+revived:
+
+```
+git log --diff-filter=D -- .gitlab-ci.yml   # find the deleting commit
+git show <sha>^:.gitlab-ci.yml
+```
 
 Two things that pipeline learned the hard way, and that any future one on those
 runners will hit again:
@@ -1310,7 +1295,7 @@ What has to hold in the `static-errorcheck` job:
   ran as *pending* rather than passed — so a PR whose files all fell outside a
   filter would sit "Expected — waiting for status to be reported" and be
   unmergeable for ever. A docs-only PR therefore pays for a heavily cached run.
-  The `main` push trigger in `build-container.yml` has none either: every
+  The `main` push trigger in `build-and-publish.yml` has none either: every
   change to `main` builds. If one is ever added there, use directory globs (a
   per-file list once silently missed `pyproject.toml`/`uv.lock`), cover root
   `src/**` and the root `pyproject.toml` (both are in the image), and list the
@@ -1324,10 +1309,10 @@ What has to hold in the `static-errorcheck` job:
   with `uvicorn --reload` for local dev — which is not what ships. It needs `uv`
   on the runner for the WebSocket half, keyed on the same `uv.lock` cache as the
   `static-errorcheck` job.
-- **The CI image is `linux/amd64` only**, stated explicitly via `platforms:` in
-  both workflows. Dev boxes here are often arm64, but they build their own image
-  via compose/minikube, so an emulated arm64 leg would cost every push for a
-  check nothing needs. The *Dockerfile* is
+- **The published image is `linux/amd64` only**, stated explicitly via
+  `platforms:`. Dev boxes here are often arm64, but they build their own image via
+  compose/minikube and never pull the published one, so an emulated arm64 leg
+  would cost every push for an artifact nothing consumes. The *Dockerfile* is
   still multi-arch-capable (both base images are multi-arch index digests, and
   `uv.lock` carries wheel hashes for both) — adding arm64 back is a `platforms`
   edit plus a QEMU/binfmt step, not a rewrite. Don't drop lock hashes to "fix" a
@@ -1335,10 +1320,14 @@ What has to hold in the `static-errorcheck` job:
 - **Build context is the repo root**, as in compose and the minikube script — the
   `web-build` stage needs `app/client-web/` and the runtime stage needs root
   `src/` — so it can't be narrowed to `app/server-python/`.
-- **`push: false` + `load: true` in `build-container.yml` is the whole
-  "nothing published" guarantee**, together with the job's `contents: read`-only
-  permissions: there is no registry login and no `packages: write`, so a push
-  could not succeed even if someone flipped the flag by accident.
+- **A new GHCR package starts PRIVATE.** An unauthenticated pull (e.g. from
+  minikube) fails until it is flipped to public once in the package settings —
+  done once for this package, so it now pulls anonymously. The workflow sets
+  `org.opencontainers.image.source`, so the package links back to the repo and
+  inherits its visibility.
+- **Pin deployments to the immutable `sha-<full sha>` tag**, not to `:latest`.
+  `latest` and the branch tag both move, and neither triggers a k8s rollout on
+  its own (the pod spec doesn't change) — the sha tag does.
 - **k8s manifest:** `p-swamp-local.yaml` is local-only (`imagePullPolicy: Never`, image
   built into minikube). It holds four Deployments — the server, the streamer's
   `p-swamp-stats-worker` (same image, different command, no Service), the

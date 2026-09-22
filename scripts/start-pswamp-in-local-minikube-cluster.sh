@@ -65,7 +65,26 @@ fi
 # Build inside minikube's runtime so the image lands where the kubelet looks (and
 # the arch matches the node — matters on arm64).
 echo "Building p-swamp:latest into minikube..."
-minikube image build -t p-swamp:latest .
+# `minikube image build` exits 0 even when the build FAILS (minikube#12986;
+# reproduced on v1.38.1 with a Dockerfile that is just `RUN false`), so `set -e`
+# never fires and the script would go on to apply manifests and restart every
+# pod against an image that was never produced -- ErrImageNeverPull on a fresh
+# cluster, or the *previous* build silently redeployed on a warm one. So keep
+# the build log and check it for BuildKit's failure line ourselves, then check
+# the image is actually in minikube's store.
+BUILD_LOG="$(mktemp)"
+minikube image build -t p-swamp:latest . 2>&1 | tee "$BUILD_LOG"
+if grep -q '^ERROR: failed to' "$BUILD_LOG"; then
+  rm -f "$BUILD_LOG"
+  echo >&2
+  echo "Refusing to deploy: the image build failed (see the BuildKit error above)." >&2
+  exit 1
+fi
+rm -f "$BUILD_LOG"
+if ! minikube image ls | grep -q '/p-swamp:latest$'; then
+  echo "Refusing to deploy: p-swamp:latest is not in minikube's image store after the build." >&2
+  exit 1
+fi
 
 # --- Apply manifests and roll out ------------------------------------------
 # The live feed's data file first, as the ConfigMap the Deployment mounts (see
