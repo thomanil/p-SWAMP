@@ -44,8 +44,7 @@ from .frequency_module import FrequencyModule, FrequencyResult
 logger = get_logger("frequency-peek")
 
 #: The providers a deployment gets unless FREQUENCY_PEEK_DATA_CLIENTS names
-#: others. The recording is here for the header the module reads its column
-#: layout from; the live feed is what the page shows.
+#: others: the recording as history, and the live feed the page shows.
 DEFAULT_DATA_CLIENTS = (
     "sample:pmu_test_streamer.sample_client:SampleRecordingClient,"
     "live:pmu_test_streamer.live_client:LiveSyntheticClient"

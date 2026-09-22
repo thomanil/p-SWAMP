@@ -35,7 +35,7 @@ With ``PMU_TEST_STREAMER_MODULE_TRANSPORT`` unset the pipeline's module list
 holds the ``FrameStatsModule`` itself. Set to a transport spec (the Kafka one
 in ``pswamp_core.transport.kafka``, or the portless in-memory one), the list
 holds a ``RemoteModule`` standing in for it: it publishes this pipeline's
-frames (and its header) on the module's input topic under this client's key
+frames on the module's input topic under this client's key
 and puts the results it tails back on this bus, where the socket below reads
 them exactly as before. ``worker.py`` beside this file is the other side --
 the same module code, one instance per client key, in its own container. See
@@ -77,7 +77,7 @@ from shared import (
 
 from pswamp_core.bus import InProcessBus, Overflow, Subscription
 from pswamp_core.datagateway import DataGateway, Player, gateway_from_env
-from pswamp_core.messages import Command, PlayerStatus, PmuFrame, PmuHeader, StreamChanged
+from pswamp_core.messages import Command, PlayerStatus, PmuFrame, StreamChanged
 from pswamp_core.modules import Module
 from pswamp_core.pipeline import CapacityError, Pipeline, PipelineRegistry
 from pswamp_core.remote import RemoteModule
@@ -88,7 +88,7 @@ from .stats_module import FrameStatsModule, FrameStatsResult
 logger = get_logger("pmu")
 
 #: The providers a deployment gets unless PSWAMP_DATA_CLIENTS names others: the
-#: recording (history, and the header) plus the synthetic live feed.
+#: recording (history) plus the synthetic live feed.
 DEFAULT_DATA_CLIENTS = (
     "sample:pmu_test_streamer.sample_client:SampleRecordingClient,"
     "live:pmu_test_streamer.live_client:LiveSyntheticClient"
@@ -175,28 +175,34 @@ class PmuStreamState(BaseModel):
     A declared model, because this IS the downstream half of the published
     contract: api_contract.py collects it via this package's WS_MESSAGE export.
     Its parts are core messages carried as they are -- the browser's types for
-    ``PmuHeader``, ``PmuFrame``, ``PlayerStatus`` and ``FrameStatsResult`` are
-    generated from these very classes, and nothing renames a field on the way.
+    ``PmuFrame`` (and the ``PmuHeader`` inside it), ``PlayerStatus`` and
+    ``FrameStatsResult`` are generated from these very classes, and nothing
+    renames a field on the way. The channel layout comes with every frame, as
+    ``frame.header``; there is no separate header message.
     """
 
     type: Literal["state"] = "state"
-    header: PmuHeader | None = Field(
-        description="The channel layout. Sent on the first message only; null afterwards."
+    frame: PmuFrame | None = Field(
+        description="The frame at the cursor, with its channel layout, once one has played."
     )
-    frame: PmuFrame | None = Field(description="The frame at the cursor, once one has played.")
     player: PlayerStatus = Field(description="Where the replay is and which controls apply.")
     stats: FrameStatsResult | None = Field(description="The stats module's latest result.")
     frame_index: int | None = Field(description="0-based position of the cursor in the recording.")
     frame_count: int | None = Field(description="How many frames the recording holds.")
 
 
-def _position(status: PlayerStatus, header: PmuHeader | None) -> tuple[int | None, int | None]:
+def _interval(frame: PmuFrame | None, status: PlayerStatus) -> float | None:
+    """Seconds between frames: the layout's declared rate first, since it is
+    exact, where the player's measured interval carries whatever jitter the
+    last stream had."""
+    return (1.0 / frame.header.data_rate) if frame else status.frame_interval_s
+
+
+def _position(status: PlayerStatus, frame: PmuFrame | None) -> tuple[int | None, int | None]:
     """The cursor as an index into the recording -- meaningless while live."""
     if status.mode == "live":
         return None, None
-    # The header's declared rate first: it is exact, where the player's measured
-    # interval carries whatever jitter the last stream had.
-    interval = (1.0 / header.data_rate) if header else status.frame_interval_s
+    interval = _interval(frame, status)
     if not interval or status.coverage_start is None:
         return None, None
     count = None
@@ -208,7 +214,7 @@ def _position(status: PlayerStatus, header: PmuHeader | None) -> tuple[int | Non
     return index, count
 
 
-def state_message(pipeline: Pipeline, header: PmuHeader | None, *, first: bool) -> PmuStreamState:
+def state_message(pipeline: Pipeline) -> PmuStreamState:
     """The current state: a live snapshot of the player, the frame it last
     played on the stream that is open, and the module's result for that frame."""
     latest = pipeline.latest
@@ -226,13 +232,14 @@ def state_message(pipeline: Pipeline, header: PmuHeader | None, *, first: bool) 
     # second. A stream switch still clears it: the last frame is reset, and a
     # result from the other stream has the other mRID and a distant timestamp.
     frame = pipeline.player.last_frame
+    if not isinstance(frame, PmuFrame):
+        frame = None
     stats = latest.get(FrameStatsResult) if latest else None
-    if not isinstance(frame, PmuFrame) or not _current(stats, frame, header, status):
+    if frame is None or not _current(stats, frame, status):
         stats = None
-    index, count = _position(status, header)
+    index, count = _position(status, frame)
     return PmuStreamState(
-        header=header if first else None,
-        frame=frame if isinstance(frame, PmuFrame) else None,
+        frame=frame,
         player=status,
         stats=stats,
         frame_index=index,
@@ -240,9 +247,7 @@ def state_message(pipeline: Pipeline, header: PmuHeader | None, *, first: bool) 
     )
 
 
-def _current(
-    stats: FrameStatsResult | None, frame: PmuFrame, header: PmuHeader | None, status: PlayerStatus
-) -> bool:
+def _current(stats: FrameStatsResult | None, frame: PmuFrame, status: PlayerStatus) -> bool:
     """Whether ``stats`` is for ``frame``, or for the frame just before it on
     the same stream (the one-frame grace described in ``state_message``)."""
     if stats is None:
@@ -251,19 +256,11 @@ def _current(
         return True
     if stats.mRID not in (None, frame.mRID):
         return False
-    interval = (1.0 / header.data_rate) if header else status.frame_interval_s
+    interval = _interval(frame, status)
     if not interval:
         return False
     behind = (frame.timestamp - stats.timestamp).total_seconds()
     return 0 < behind <= interval * 1.5
-
-
-async def stream_header(gateway: DataGateway) -> PmuHeader | None:
-    """The stream's layout, asked of the gateway like any other range query."""
-    header: PmuHeader | None = None
-    async for message in gateway.consume(PmuHeader):
-        header = message  # the newest wins
-    return header
 
 
 # --- logging -------------------------------------------------------------------
@@ -473,9 +470,7 @@ def subscribe_updates(pipeline: Pipeline) -> Subscription:
     )
 
 
-async def serve_stream(
-    ws: WebSocket, pipeline: Pipeline, header: PmuHeader | None, updates: Subscription
-) -> None:
+async def serve_stream(ws: WebSocket, pipeline: Pipeline, updates: Subscription) -> None:
     """Push the state on every change until the client disconnects.
 
     Drains the page's subscription and coalesces: when the reader wakes it
@@ -488,7 +483,7 @@ async def serve_stream(
         async for _ in updates:
             while updates.get_nowait() is not None:
                 pass
-            await send_state(ws, state_message(pipeline, header, first=False))
+            await send_state(ws, state_message(pipeline))
 
     pusher = asyncio.create_task(push())
     try:
@@ -509,7 +504,6 @@ async def ws_endpoint(ws: WebSocket) -> None:
         # the snapshot and the subscription would otherwise publish its status
         # to nobody, and a paused player sends nothing later to make up for it.
         with subscribe_updates(pipeline) as updates:
-            header = await stream_header(pipeline.gateway)
-            await send_state(ws, state_message(pipeline, header, first=True))
-            await serve_stream(ws, pipeline, header, updates)
+            await send_state(ws, state_message(pipeline))
+            await serve_stream(ws, pipeline, updates)
     log_event("disconnected", ws.query_params.get("client_id", "?"))

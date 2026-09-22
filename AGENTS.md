@@ -225,12 +225,12 @@ which is what CI's e2e job runs.
   the shared core — read it to see what an app package looks like when the core
   does the streaming: `sample_client.py` (a `DataClient` over the sample file —
   a provider written *outside* `core/` on purpose, importing only the contract;
-  `HISTORY_CONSUME`, and the one that serves the `PmuHeader`), `live_client.py`
-  (the second provider: `LIVE_CONSUME` only, the same rows re-stamped on the
-  wall clock at 20 Hz by a ticker that runs between the gateway's `open` and
-  `close`; it serves frames and no header, on purpose — see its docstring),
-  `stats_module.py` (a `Module` consuming `PmuFrame` off the bus and publishing
-  `FrameStatsResult` onto it), and `api.py` (a `PipelineRegistry` bound in its
+  `HISTORY_CONSUME`), `live_client.py` (the second provider: `LIVE_CONSUME`
+  only, the same rows re-stamped on the wall clock at 20 Hz by a ticker that
+  runs between the gateway's `open` and `close`), `stats_module.py` (a `Module`
+  consuming `PmuFrame` off the bus and publishing `FrameStatsResult` onto it,
+  reading the channel layout off each frame's own `header`), and `api.py` (a
+  `PipelineRegistry` bound in its
   `lifespan`, a socket that subscribes the client's bus *before* its first send
   and coalesces into one `PmuStreamState` per change, and eight POSTs that each
   publish a `Command` — or answer **409** when the player's current mode cannot
@@ -251,8 +251,11 @@ which is what CI's e2e job runs.
   *simulated* PMU records extracted by hand from the Nordic 44 simulation that now
   lives in this same repo under `examples/nordic44_rtsim/` (voltage phasor +
   measured frequency, five stations at 20 Hz, spanning a line trip). It is parsed
-  lazily, on the first pipeline built, into one `PmuHeader` and sixty
-  `PmuFrame`s. Sharing a repo with that simulation buys the streamer nothing: it
+  lazily, on the first pipeline built, into sixty `PmuFrame`s, each carrying the
+  one `PmuHeader` (**a frame is self-describing**: the channel layout rides
+  inside every frame, so any single frame is enough to work from — see the
+  docstring of `core/src/pswamp_core/messages/pmu.py` for the cost and the
+  reasoning). Sharing a repo with that simulation buys the streamer nothing: it
   is still a static fixture and nothing generates it. (The *grid monitor* is the
   one that really runs the desktop package's analysis code; the streamer runs
   the *core* and a toy module.) Don't add tooling or deps to regenerate it
@@ -1343,9 +1346,10 @@ What has to hold in the `static-errorcheck` job:
   applying the manifest. In the example file every value counts up by one per
   frame from a round start (100 kV, 0°, 60 Hz), the same in every station, so
   Live mode visibly shows the configured source, and that it is moving, while
-  Recorded still replays the image's own recording. A replacement file must keep
-  the recording's channel layout (five stations at 20 Hz), because the live
-  client serves no header. The ConfigMap is configuration, not storage: the
+  Recorded still replays the image's own recording. A replacement file keeps
+  the recording's channel layout (five stations at 20 Hz), since the live client
+  parses it with the recording's format and stamps that layout into every
+  frame it emits. The ConfigMap is configuration, not storage: the
   "no persistent volume" rule stands. The same env block is **the worked
   example of pointing a page at a remote store**: `TIME_SERIES_EXPLORER_DATA_CLIENTS`
   names the time-series client, `TSDB_URL` the stub's Service and

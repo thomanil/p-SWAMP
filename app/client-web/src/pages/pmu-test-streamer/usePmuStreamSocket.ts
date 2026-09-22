@@ -27,12 +27,15 @@ export function usePmuStreamSocket() {
   const { message, status, connected } =
     useServerSocket<PmuStreamState>(PMU_STREAM_WS_PATH)
 
-  // The channel layout arrives on the first message of a connection only (it
-  // never changes for a recording, and it is ~1 KB nobody wants at 20 Hz), so
-  // it is kept here. Derived-state-during-render is React's own pattern for
-  // "remember something from an earlier render" without an effect.
+  // The channel layout rides inside every frame (`frame.header`). The last one
+  // seen is kept here so the table keeps its layout while no frame is at the
+  // cursor -- a paused replay at its start, right after a stream switch.
+  // Compared by `header_id` (a content hash), so a frame carrying the same
+  // layout as the last one costs no state change. Derived-state-during-render
+  // is React's own pattern for "remember something from an earlier render".
   const [header, setHeader] = useState<PmuHeader | null>(null)
-  if (message?.header && message.header !== header) setHeader(message.header)
+  const seen = message?.frame?.header
+  if (seen && seen.header_id !== header?.header_id) setHeader(seen)
 
   const fire = (action: 'play' | 'stop' | 'forward' | 'back' | 'live' | 'replay') =>
     fireCommand(

@@ -12,13 +12,12 @@ between runs.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 from uuid import uuid4
 
 import pytest
-from support import Measurement, at, take
+from support import Measurement, take
 
 from pswamp_core.datagateway import MissingSettingError
 from pswamp_core.transport import transport_from_env
@@ -72,16 +71,3 @@ async def test_stream_round_trip_by_key():
     assert got == ("k1", got[1]) and got[1].mRID == "m1"
     assert sorted(k for k, _ in both) == ["k1", "k2"]
 
-
-@needs_broker
-async def test_retained_records_reach_a_late_subscriber_newest_per_key():
-    transport = make_transport()
-    try:
-        await transport.publish(Measurement(mRID="old", value=1.0, timestamp=at(0)), "k", retained=True)
-        await transport.publish(Measurement(mRID="new", value=2.0, timestamp=at(1)), "k", retained=True)
-        await asyncio.sleep(0.5)
-        with transport.subscribe(Measurement, "k", retained=True) as late:
-            got = await take(late, 2, timeout=10)  # not yet compacted: both, in order, newest last
-    finally:
-        await transport.close()
-    assert [m.mRID for _, m in got] == ["old", "new"]

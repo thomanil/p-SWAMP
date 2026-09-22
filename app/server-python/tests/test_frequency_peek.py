@@ -16,21 +16,11 @@ from pswamp_core.datagateway import Capability
 from pswamp_core.messages import PmuFrame, PmuHeader
 
 
-async def _header(pipeline) -> PmuHeader:
-    header = None
-    async for message in pipeline.gateway.consume(PmuHeader):
-        header = message
-    assert header is not None
-    return header
-
-
 @pytest.mark.asyncio
 async def test_module_keeps_only_the_frequency_per_station(monkeypatch):
     monkeypatch.delenv(api.DATA_CLIENTS_VARIABLE, raising=False)
     pipeline = await api.build_pipeline("7")
-    header = await _header(pipeline)
     module = FrequencyModule()
-    module.use_header(header)
 
     coverage = await pipeline.gateway.coverage(PmuFrame, capability=Capability.HISTORY_CONSUME)
     assert coverage is not None
@@ -41,9 +31,12 @@ async def test_module_keeps_only_the_frequency_per_station(monkeypatch):
     result = await module.process(frame)
 
     assert result is not None
-    assert list(result.frequency_hz) == header.stations
+    assert list(result.frequency_hz) == frame.header.stations
     assert all(v is None or 40 < v < 70 for v in result.frequency_hz.values())
-    assert await module.process(frame.model_copy(update={"header_id": "other"})) is None
+    # A frame with another layout re-primes the module rather than being dropped.
+    other = PmuHeader(station=["z"], channel=["f"], measurement=["f"], units=["Hz"], data_rate=1.0)
+    changed = await module.process(frame.model_copy(update={"header": other, "values": [49.5]}))
+    assert changed is not None and changed.frequency_hz == {"z": 49.5}
 
 
 @pytest.mark.asyncio

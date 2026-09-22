@@ -48,7 +48,7 @@ function statusLine(player: PlayerStatus | undefined): string {
  * start of the provider's coverage, which the page shows.
  */
 export function TimeSeriesExplorerPage() {
-  const { state, header, status, connected, refusal, playRange, stop, count, refresh } =
+  const { state, status, connected, refusal, playRange, stop, count, refresh } =
     useTimeSeriesExplorerSocket()
 
   const [fromS, setFromS] = useState(0)
@@ -67,13 +67,12 @@ export function TimeSeriesExplorerPage() {
   const result = state?.count?.result ?? null
 
   // The frequency column of each station, for a one-line summary of the frame
-  // at the cursor; the header says which columns those are.
-  const frequencies =
-    header && frame
-      ? header.measurement
-          .map((m, i) => (m === 'f' ? `${header.station[i]} ${frame.values[i]?.toFixed(3) ?? '—'} Hz` : null))
-          .filter((s): s is string => s !== null)
-      : []
+  // at the cursor; the frame's own header says which columns those are.
+  const frequencies = frame
+    ? frame.header.measurement
+        .map((m, i) => (m === 'f' ? `${frame.header.station[i]} ${frame.values[i]?.toFixed(3) ?? '—'} Hz` : null))
+        .filter((s): s is string => s !== null)
+    : []
 
   const send = (action: (start: string, end: string) => void) => {
     if (coverageStart === null) return

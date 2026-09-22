@@ -53,9 +53,9 @@ class Dies(InMemoryClient):
 
 async def test_forwarder_in_a_pipeline_tags_the_notice_with_the_app():
     hub = ErrorHub()
-    header = PmuHeader.build(timestamp=utcnow(), mRID="d", station=["x"], channel=["f"], measurement=["f"], units=["Hz"], data_rate=1.0)
-    frame = PmuFrame(timestamp=utcnow(), mRID="d", header_id=header.header_id, values=[50.0])
-    client = Dies("dies", [PmuHeader, PmuFrame], [header, frame], capabilities=Capability.HISTORY_CONSUME)
+    header = PmuHeader(station=["x"], channel=["f"], measurement=["f"], units=["Hz"], data_rate=1.0)
+    frame = PmuFrame(timestamp=utcnow(), mRID="d", header=header, values=[50.0])
+    client = Dies("dies", [PmuFrame], [frame], capabilities=Capability.HISTORY_CONSUME)
     bus = InProcessBus()
     forwarder = ErrorForwarderModule("client-9", "some-app", hub)
     pipeline = Pipeline("client-9", DataGateway([client]), bus, Player(DataGateway([client]), bus, model=PmuFrame, paced=False), [forwarder])

@@ -107,9 +107,8 @@ async def explorer_flow(base_url: str, ws_url: str) -> None:
         first = json.loads(await asyncio.wait_for(ws.recv(), RECV_TIMEOUT))
         player = first.get("player", {})
         check(
-            "on connect: a state with the header, a paused replay and the provider's coverage",
+            "on connect: a state with a paused replay and the provider's coverage",
             first.get("type") == "state"
-            and first.get("header") is not None
             and player.get("mode") == "replay"
             and player.get("paused") is True
             and player.get("coverage_start") is not None

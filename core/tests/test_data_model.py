@@ -21,7 +21,6 @@ from pswamp_core.messages.pmu import header_id_of
     ("name", "topic"),
     [
         ("PmuFrame", "pmu.frame"),
-        ("PmuHeader", "pmu.header"),
         ("FrameStatsResult", "frame.stats.result"),
         ("MeasurementPMUVoltage", "measurement.pmu.voltage"),
         ("N44Frame", "n.44.frame"),
@@ -70,9 +69,7 @@ def test_aware_timestamps_are_converted_to_utc():
 
 
 def test_json_round_trip_with_null_values():
-    header = PmuHeader.build(
-        timestamp=at(0),
-        mRID="stream",
+    header = PmuHeader(
         station=["a", "a", "b"],
         channel=["V", "V", "f"],
         measurement=["V_Magnitude", "V_Angle", "f"],
@@ -82,7 +79,7 @@ def test_json_round_trip_with_null_values():
     frame = PmuFrame(
         timestamp=at(0.05),
         mRID="stream",
-        header_id=header.header_id,
+        header=header,
         values=[1.0, None, float("nan")],
     )
     text = frame.model_dump_json()
@@ -90,31 +87,40 @@ def test_json_round_trip_with_null_values():
     back = PmuFrame.model_validate_json(text)
     assert back.values == [1.0, None, None]
     assert back.timestamp == frame.timestamp
+    assert back.header == header and back.header.header_id == header.header_id
+
+
+def test_a_frame_carries_its_layout_and_its_width_is_checked():
+    header = PmuHeader(station=["a", "b"], channel=["f", "f"], measurement=["f", "f"], units=["Hz", "Hz"], data_rate=1.0)
+    frame = PmuFrame(timestamp=at(0), mRID="s", header=header, values=[50.0, 50.1])
+    assert frame.header is header and frame.header.columns(measurement="f") == [0, 1]
+    with pytest.raises(ValidationError):
+        PmuFrame(timestamp=at(0), mRID="s", header=header, values=[50.0])
+    with pytest.raises(ValidationError):
+        PmuFrame(timestamp=at(0), mRID="s", header=header, values=[50.0, 50.1], quality=[0])
+    # The id is a serialised, cached property: in the JSON, and one object per instance.
+    assert '"header_id":"' in frame.model_dump_json()
+    assert header.header_id is header.header_id
 
 
 def test_header_id_is_a_content_hash():
     args = (["a"], ["V"], ["V_Magnitude"], ["kV"], 20.0)
     assert header_id_of(*args) == header_id_of(*args)
     assert header_id_of(*args) != header_id_of(["b"], ["V"], ["V_Magnitude"], ["kV"], 20.0)
-    header = PmuHeader.build(
-        timestamp=at(0), mRID="s", station=["a"], channel=["V"],
-        measurement=["V_Magnitude"], units=["kV"], data_rate=20.0,
-    )
+    header = PmuHeader(station=["a"], channel=["V"], measurement=["V_Magnitude"], units=["kV"], data_rate=20.0)
     assert header.header_id == header_id_of(*args)
 
 
 def test_header_rows_must_align():
     with pytest.raises(ValidationError):
         PmuHeader(
-            timestamp=at(0), mRID="s", header_id="x",
             station=["a", "a"], channel=["V"], measurement=["V"], units=["kV"],
             data_rate=20.0,
         )
 
 
 def test_header_column_lookup():
-    header = PmuHeader.build(
-        timestamp=at(0), mRID="s",
+    header = PmuHeader(
         station=["a", "a", "b", "b"], channel=["V", "V", "V", "V"],
         measurement=["V_Magnitude", "f", "V_Magnitude", "f"], units=["kV", "Hz"] * 2,
         data_rate=20.0,

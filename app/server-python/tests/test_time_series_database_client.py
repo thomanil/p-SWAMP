@@ -33,7 +33,7 @@ from pswamp_core.datagateway.clients.time_series_database import (
     TimeSeriesDatabaseClient,
 )
 from pswamp_core.datagateway.conformance import DataClientConformance
-from pswamp_core.messages import Command, PlayerStatus, PmuFrame, PmuHeader
+from pswamp_core.messages import Command, PlayerStatus, PmuFrame
 from time_series_stub.app import create_app
 from time_series_stub.kafka_sink import KafkaSink
 from time_series_stub.recording import TiledRecording
@@ -67,17 +67,15 @@ class TestTimeSeriesDatabaseClientConformance(DataClientConformance):
         return list(load_sample().frames)
 
 
-async def test_header_and_frames_are_served_through_the_contract():
+async def test_frames_are_served_through_the_contract_with_their_layout():
     client = hermetic_client(repeat=2)
     gateway = DataGateway([client])
-    headers = [h async for h in gateway.consume(PmuHeader)]
-    assert headers == [load_sample().header]
     coverage = await gateway.coverage(PmuFrame)
     assert coverage is not None
     assert coverage.range.end - coverage.range.start == timedelta(seconds=6.0)
     t0 = coverage.range.start
     chunk = [f async for f in gateway.consume(PmuFrame, t0 + timedelta(seconds=4), t0 + timedelta(seconds=5))]
-    assert len(chunk) == 20 and all(f.header_id == headers[0].header_id for f in chunk)
+    assert len(chunk) == 20 and all(f.header == load_sample().header for f in chunk)
     await client.close()
 
 

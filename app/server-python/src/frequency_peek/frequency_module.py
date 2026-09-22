@@ -6,8 +6,9 @@
 The smallest module that *reduces* a frame -- it keeps one measurement of the
 seven hundred-odd values in a frame and drops the rest. It reads ``PmuFrame``
 off its pipeline's bus and publishes ``FrequencyResult`` back onto it; the page
-subscribes to that, never to this module. ``setup`` reads the stream's header
-once, to know which columns carry ``f``; nothing else here knows the layout.
+subscribes to that, never to this module. Which columns carry ``f`` it reads
+off the frame's own header, re-deriving them when the layout changes; nothing
+else here knows the layout.
 
 Imports only ``pswamp_core``.
 """
@@ -18,8 +19,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from pswamp_core.bus import Bus
-from pswamp_core.datagateway import DataGateway
 from pswamp_core.messages import PmuFrame, PmuHeader, ResultEnvelope
 from pswamp_core.modules import Module
 
@@ -52,17 +51,13 @@ class FrequencyModule(Module):
         self._header_id: str | None = None
         self._columns: list[tuple[str, int]] = []  # (station, column index)
 
-    async def setup(self, gateway: DataGateway, bus: Bus) -> None:
-        """Read the stream's header once, to know which columns are frequencies."""
-        async for header in gateway.consume(PmuHeader):
-            self.use_header(header)
-
     def use_header(self, header: PmuHeader) -> None:
+        """Derive the frequency columns for ``header``; called on a change of layout."""
         self._header_id = header.header_id
         self._columns = [(header.station[i], i) for i in header.columns(measurement="f")]
         self.parameters = {"header_id": header.header_id}
 
     async def process(self, frame: PmuFrame) -> Frequencies | None:
-        if self._header_id is None or frame.header_id != self._header_id:
-            return None
+        if frame.header.header_id != self._header_id:
+            self.use_header(frame.header)
         return Frequencies(frequency_hz={station: frame.values[i] for station, i in self._columns})

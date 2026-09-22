@@ -31,13 +31,10 @@ id; a pipeline keyed per stream publishes under the stream name; the worker on
 the other side runs one module instance per key it sees. Nothing in a
 ``DataModel`` changes for the move.
 
-**Retained messages are the one thing a subscriber gets from before it
-subscribed.** A module that reads the stream's layout in ``setup`` needs the
-``PmuHeader`` before its first frame, and a worker may start after the
-pipeline published it -- so ``publish(..., retained=True)`` asks the transport
-to keep the newest message per key, and ``subscribe(..., retained=True)`` to
-deliver it first. On Kafka that is a compacted topic read from its start; in
-memory it is a dict. A class is either retained or streamed, never both.
+**A subscriber hears only what is said after it subscribes.** A transport
+keeps nothing and replays nothing: a frame carries its own layout
+(``PmuFrame.header``), so a worker that starts late is primed by the first
+frame it sees.
 
 One broker consumer per model per process (STEP 3 §4.4): ``subscribe`` fans a
 shared feed out to subscriber queues with the bus's own ``Overflow`` policy,
@@ -98,7 +95,6 @@ class TransportSubscription(Subscription):
         transport: Transport,
         model: type[DataModel],
         key: str | None,
-        retained: bool,
         overflow: Overflow,
         maxsize: int,
     ) -> None:
@@ -106,14 +102,9 @@ class TransportSubscription(Subscription):
         self._transport = transport
         self.model = model
         self.key = key
-        self.retained = retained
 
-    def wants(self, key: str, message: DataModel, retained: bool) -> bool:
-        return (
-            retained == self.retained
-            and isinstance(message, self.models)
-            and (self.key is None or key == self.key)
-        )
+    def wants(self, key: str, message: DataModel) -> bool:
+        return isinstance(message, self.models) and (self.key is None or key == self.key)
 
     async def ready(self, timeout: float | None = None) -> None:
         """Wait until the broker-side feed behind this subscription is consuming.
@@ -121,7 +112,7 @@ class TransportSubscription(Subscription):
         A subscriber that publishes right after subscribing and expects to hear
         the echo needs this; a pipeline tailing results does not.
         """
-        event = self._transport._ready.get((self.model, self.retained))
+        event = self._transport._ready.get(self.model)
         if event is not None:
             await asyncio.wait_for(event.wait(), timeout)
 
@@ -145,9 +136,9 @@ class Transport(ABC):
     def __init__(self, name: str = "transport") -> None:
         self.name = name
         self._subscriptions: list[TransportSubscription] = []
-        self._feeds: dict[tuple[type[DataModel], bool], asyncio.Task] = {}
-        #: Set while the feed for a (model, retained) pair is actually consuming.
-        self._ready: dict[tuple[type[DataModel], bool], asyncio.Event] = {}
+        self._feeds: dict[type[DataModel], asyncio.Task] = {}
+        #: Set while the feed for a model is actually consuming.
+        self._ready: dict[type[DataModel], asyncio.Event] = {}
 
     # --- configuration ----------------------------------------------------------------
 
@@ -191,12 +182,11 @@ class Transport(ABC):
     # --- the contract -------------------------------------------------------------------
 
     @abstractmethod
-    async def publish(self, message: DataModel, key: str, *, retained: bool = False) -> None:
+    async def publish(self, message: DataModel, key: str) -> None:
         """Send ``message`` on its class's topic under ``key``.
 
-        ``retained`` asks the transport to keep the newest message per key for
-        subscribers that arrive later. Raises on failure; the caller decides
-        whether to count and carry on (a live stream) or to stop.
+        Raises on failure; the caller decides whether to count and carry on (a
+        live stream) or to stop.
         """
 
     def subscribe(
@@ -204,47 +194,45 @@ class Transport(ABC):
         model: type[DataModel],
         key: str | None = None,
         *,
-        retained: bool = False,
         overflow: Overflow = Overflow.DROP_OLDEST,
         maxsize: int = 256,
     ) -> TransportSubscription:
         """A queue of ``(key, message)`` for ``model``, one key or every key.
 
         The first subscriber to a model starts its feed; the last one to close
-        stops it. ``retained`` must match how the class is published.
+        stops it.
         """
-        subscription = TransportSubscription(self, model, key, retained, overflow, maxsize)
+        subscription = TransportSubscription(self, model, key, overflow, maxsize)
         self._subscriptions.append(subscription)
-        self._ensure_feed(model, retained)
+        self._ensure_feed(model)
         return subscription
 
     # --- the shared feed ----------------------------------------------------------------
 
     @abstractmethod
     def _feed(
-        self, model: type[DataModel], retained: bool, ready: asyncio.Event
+        self, model: type[DataModel], ready: asyncio.Event
     ) -> AsyncIterator[tuple[str, DataModel]]:
         """One broker consumer over ``model``'s topic, yielding ``(key, message)``
         until cancelled. Sets ``ready`` once it is actually consuming. Raising
         ends one attempt; the base class reopens it with backoff."""
 
-    def _ensure_feed(self, model: type[DataModel], retained: bool) -> None:
-        pair = (model, retained)
-        if pair not in self._feeds:
-            self._ready[pair] = asyncio.Event()
-            self._feeds[pair] = asyncio.create_task(
-                self._run_feed(model, retained), name=f"{self.name}.feed.{model.topic}"
+    def _ensure_feed(self, model: type[DataModel]) -> None:
+        if model not in self._feeds:
+            self._ready[model] = asyncio.Event()
+            self._feeds[model] = asyncio.create_task(
+                self._run_feed(model), name=f"{self.name}.feed.{model.topic}"
             )
 
-    async def _run_feed(self, model: type[DataModel], retained: bool) -> None:
-        ready = self._ready[(model, retained)]
+    async def _run_feed(self, model: type[DataModel]) -> None:
+        ready = self._ready[model]
         delay = _RECONNECT_DELAY
         while True:
             delivered = 0
             try:
-                async for key, message in self._feed(model, retained, ready):
+                async for key, message in self._feed(model, ready):
                     delivered += 1
-                    self._deliver(model, retained, key, message)
+                    self._deliver(key, message)
                 logger.warning("%s: feed of %s ended; reopening", self.name, model.topic)
             except asyncio.CancelledError:
                 raise
@@ -255,22 +243,20 @@ class Transport(ABC):
             await asyncio.sleep(delay)
             delay = _RECONNECT_DELAY if delivered else min(delay * 2, _MAX_RECONNECT_DELAY)
 
-    def _deliver(
-        self, model: type[DataModel], retained: bool, key: str, message: DataModel
-    ) -> None:
+    def _deliver(self, key: str, message: DataModel) -> None:
         for subscription in list(self._subscriptions):
-            if subscription.wants(key, message, retained):
+            if subscription.wants(key, message):
                 subscription.offer((key, message))  # type: ignore[arg-type]
 
     def _detach(self, subscription: TransportSubscription) -> None:
         """Called by a closing subscription; stops its feed if it was the last."""
         if subscription in self._subscriptions:
             self._subscriptions.remove(subscription)
-        pair = (subscription.model, subscription.retained)
-        if any((s.model, s.retained) == pair for s in self._subscriptions):
+        model = subscription.model
+        if any(s.model is model for s in self._subscriptions):
             return
-        feed = self._feeds.pop(pair, None)
-        self._ready.pop(pair, None)
+        feed = self._feeds.pop(model, None)
+        self._ready.pop(model, None)
         if feed is not None:
             feed.cancel()
 
@@ -280,46 +266,24 @@ class InMemoryTransport(Transport):
 
     One instance handed to both sides -- the pipeline's ``RemoteModule`` and the
     worker's ``ModuleHost`` -- is the whole broker between them, which is what
-    every hermetic test uses. Retained messages are a dict of the newest per
-    ``(class, key)``, replayed into a retained subscription as it opens.
-    Constructible with no settings, so ``from_env("mem")`` needs no variables
-    and ``mem:pswamp_core.transport:InMemoryTransport`` is a legal, portless
+    every hermetic test uses. Constructible with no settings, so
+    ``from_env("mem")`` needs no variables and
+    ``mem:pswamp_core.transport:InMemoryTransport`` is a legal, portless
     configuration.
     """
 
     def __init__(self, name: str = "memory") -> None:
         super().__init__(name)
-        self._retained: dict[tuple[type[DataModel], str], DataModel] = {}
         self.published = 0
 
-    async def publish(self, message: DataModel, key: str, *, retained: bool = False) -> None:
-        if retained:
-            self._retained[(type(message), key)] = message
+    async def publish(self, message: DataModel, key: str) -> None:
         self.published += 1
-        self._deliver(type(message), retained, key, message)
+        self._deliver(key, message)
 
-    def subscribe(
-        self,
-        model: type[DataModel],
-        key: str | None = None,
-        *,
-        retained: bool = False,
-        overflow: Overflow = Overflow.DROP_OLDEST,
-        maxsize: int = 256,
-    ) -> TransportSubscription:
-        subscription = super().subscribe(
-            model, key, retained=retained, overflow=overflow, maxsize=maxsize
-        )
-        if retained:
-            for (cls, held_key), message in self._retained.items():
-                if subscription.wants(held_key, message, True):
-                    subscription.offer((held_key, message))  # type: ignore[arg-type]
-        return subscription
-
-    def _ensure_feed(self, model: type[DataModel], retained: bool) -> None:
+    def _ensure_feed(self, model: type[DataModel]) -> None:
         return  # publish delivers directly; there is no consumer to run
 
-    async def _feed(self, model, retained, ready):  # pragma: no cover - never started
+    async def _feed(self, model, ready):  # pragma: no cover - never started
         ready.set()
         return
         yield

@@ -11,6 +11,12 @@ to *that*, never to the module. Nothing in ``api.py`` names this module beyond
 constructing it. That is STEP 1 A3 ("a module reads a topic, analyses, writes a
 different-typed result to another topic") on the smallest possible example.
 
+It needs the stream's layout to know which columns are which, and reads it off
+each frame (``frame.header``): the column indexes are derived once per layout
+and kept until a frame arrives with a different ``header_id``. So the module
+has no ``setup`` and runs the same whether it sits in the pipeline's process
+or in the worker.
+
 Result models are ordinary pydantic, so ``FrameStatsResult`` enters the
 generated OpenAPI contract as-is: the browser's type for it is generated, not
 hand-written, and no adapter sits between the module and the page.
@@ -22,8 +28,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from pswamp_core.bus import Bus
-from pswamp_core.datagateway import DataGateway
 from pswamp_core.messages import PmuFrame, PmuHeader, ResultEnvelope
 from pswamp_core.modules import Module
 
@@ -55,37 +59,25 @@ class FrameStatsModule(Module):
     name = "frame-stats"
     input_model = PmuFrame
     output_model = FrameStatsResult
-    #: What ``setup`` reads from the gateway -- so a host running this module
-    #: in another process (``pswamp_core.remote``) knows to carry it across.
-    setup_models = (PmuHeader,)
 
     def __init__(self) -> None:
         super().__init__()
-        self._header: PmuHeader | None = None
+        self._header_id: str | None = None
         self._f_cols: list[int] = []
         self._v_cols: list[int] = []
         self._ang_cols: list[int] = []
 
-    async def setup(self, gateway: DataGateway, bus: Bus) -> None:
-        """Read the stream's header, to know which columns are which -- and keep
-        listening for one on the bus, so a header that arrives later (a worker
-        that started after the pipeline, a changed layout) re-primes the module
-        the same way. In-process the gateway read is the whole story; in
-        another process the bus is how the host hands over a late one."""
-        async for header in gateway.consume(PmuHeader):
-            self.use_header(header)
-        bus.add_listener(PmuHeader, self.use_header)
-
     def use_header(self, header: PmuHeader) -> None:
-        self._header = header
+        """Derive the column indexes for ``header``; called on a change of layout."""
+        self._header_id = header.header_id
         self._f_cols = header.columns(measurement="f")
         self._v_cols = header.columns(measurement="V_Magnitude")
         self._ang_cols = header.columns(measurement="V_Angle")
         self.parameters = {"header_id": header.header_id, "stations": header.stations}
 
     async def process(self, frame: PmuFrame) -> FrameStats | None:
-        if self._header is None or frame.header_id != self._header.header_id:
-            return None
+        if frame.header.header_id != self._header_id:
+            self.use_header(frame.header)
         f = [v for i in self._f_cols if (v := frame.values[i]) is not None]
         v = [x for i in self._v_cols if (x := frame.values[i]) is not None]
         ang = [a for i in self._ang_cols if (a := frame.values[i]) is not None]

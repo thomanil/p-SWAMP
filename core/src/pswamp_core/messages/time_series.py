@@ -54,8 +54,8 @@ ResultKind = Literal["record", "end", "error"]
 class TimeSeriesQuery(BaseModel):
     """A range query, as the client POSTs it to the service.
 
-    ``model`` is the *topic string* of the message class wanted (``pmu.frame``,
-    ``pmu.header``), which is how the core names a message class on the wire.
+    ``model`` is the *topic string* of the message class wanted (``pmu.frame``),
+    which is how the core names a message class on the wire.
     A ``None`` bound is open: ``start`` ``None`` is "from the earliest you
     hold", ``end`` ``None`` is "to the latest you hold". The window is
     half-open, ``[start, end)``.

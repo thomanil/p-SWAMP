@@ -89,9 +89,8 @@ async def stream_flow(base_url: str, ws_url: str) -> None:
     async with connect(f"{ws_url}{WS_PATH}?client_id={client_id}") as ws:
         first = json.loads(await asyncio.wait_for(ws.recv(), RECV_TIMEOUT))
         check(
-            "on connect: a state with the header, paused replay, no stats yet",
+            "on connect: a state with a paused replay and no stats yet",
             first.get("type") == "state"
-            and first.get("header") is not None
             and first.get("player", {}).get("mode") == "replay"
             and first.get("player", {}).get("paused") is True
             and first.get("stats") is None,

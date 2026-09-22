@@ -86,9 +86,8 @@ spec:
               value: "sample:pmu_test_streamer.sample_client:SampleRecordingClient,live:pmu_test_streamer.live_client:LiveSyntheticClient"
             # Each provider reads its own {NAME}_{SETTING} block. The live feed
             # cycles the rows of this file instead of the image's sample_data.txt.
-            # It must keep the recording's channel layout (the same five stations
-            # at 20 Hz): the live client serves no header, so the recording's
-            # header is what describes its frames.
+            # It keeps the recording's channel layout (the same five stations at
+            # 20 Hz), which the live client stamps into every frame it emits.
             - name: LIVE_PATH
               value: /etc/p-swamp/pmu/deployment_pmu_data_file_example.txt
             # The stats module runs in the p-swamp-stats-worker pod, reached

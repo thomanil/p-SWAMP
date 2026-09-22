@@ -51,7 +51,7 @@ def test_sample_parses_into_one_header_and_sixty_frames():
     assert header.measurement[:3] == ["V_Magnitude", "V_Angle", "f"]
     assert header.units[:3] == ["kV", "deg", "Hz"]
     assert frames[0].timestamp == EPOCH + timedelta(seconds=0.05)
-    assert all(f.header_id == header.header_id for f in frames)
+    assert all(f.header == header for f in frames)  # every frame carries the layout
     assert all(f.mRID == STREAM_ID for f in frames)
     assert all(len(f.values) == 15 for f in frames)
     assert frames[0].values[0] == pytest.approx(419.95)
@@ -89,12 +89,13 @@ class TestSampleRecordingClientConformance(DataClientConformance):
         return list(client_under_test.frames)
 
 
-async def test_header_is_served_as_its_own_model():
-    gateway = DataGateway([SampleRecordingClient()])
-    headers = [h async for h in gateway.consume(PmuHeader)]
-    assert len(headers) == 1
-    assert headers[0].header_id == load_sample().header.header_id
+async def test_frames_carry_the_layout_and_the_client_serves_nothing_else():
+    client = SampleRecordingClient()
+    gateway = DataGateway([client])
+    assert client.supported_models == {PmuFrame}
     assert await gateway.coverage(PmuFrame) is not None
+    frames = [f async for f in gateway.consume(PmuFrame)]
+    assert len(frames) == 60 and all(f.header.header_id == load_sample().header.header_id for f in frames)
 
 
 # --- the module ------------------------------------------------------------------------
@@ -139,7 +140,6 @@ class TestLiveSyntheticClientConformance(DataClientConformance):
 async def test_live_client_ticks_at_the_recording_rate_with_its_own_identity():
     client = LiveSyntheticClient()
     assert client.capabilities == Capability.LIVE_CONSUME
-    assert not client.supports(PmuHeader)  # it serves frames only; see the module docstring
     await client.open()
     try:
         assert client.ticking
@@ -153,7 +153,7 @@ async def test_live_client_ticks_at_the_recording_rate_with_its_own_identity():
     recording = load_sample()
     assert len(got) >= 3  # ~7 at 20 Hz; a lower bound, since runners jitter
     assert all(f.mRID == LIVE_STREAM_ID for f in got)
-    assert all(f.header_id == recording.header.header_id for f in got)
+    assert all(f.header == recording.header for f in got)  # the live source describes itself
     assert all(len(f.values) == recording.header.n_columns for f in got)
     stamps = [f.timestamp for f in got]
     assert all(start <= t < start + timedelta(seconds=0.35) for t in stamps)
@@ -172,8 +172,8 @@ K8S_EXAMPLE_FILE = Path(__file__).resolve().parents[3] / "k8s" / "deployment_pmu
 
 def test_k8s_example_file_feeds_the_live_client_with_constant_frames(monkeypatch):
     """The deployment example: the live client re-pointed by ``LIVE_PATH`` at a
-    file outside the image. It must keep the recording's channel layout (the live
-    client serves no header, so the recording's describes its frames). Every
+    file outside the image. It keeps the recording's channel layout, which every
+    frame it emits carries. Every
     value counts up by one per frame from a round start, the same in every
     station, so a page in live mode shows at a glance both that the configured
     source is what feeds it and that it is moving."""
@@ -208,14 +208,12 @@ async def test_pipeline_streams_frames_and_stats_onto_the_bus(monkeypatch):
         assert stats.app.name == "frame-stats"
         assert stats.result.n_stations == 5
 
-        header = await api.stream_header(pipeline.gateway)
-        message = api.state_message(pipeline, header, first=True)
-        assert message.header is not None
+        message = api.state_message(pipeline)
+        assert message.frame is not None and message.frame.header.n_columns == 15
         assert message.frame_count == 60
         assert message.frame_index is not None and 0 <= message.frame_index < 60
         assert message.player.mode == "replay" and message.player.can_seek
         assert message.player.can_go_live
-        assert api.state_message(pipeline, header, first=False).header is None
     finally:
         await pipeline.stop()
 
@@ -228,7 +226,7 @@ async def test_default_pipeline_replays_then_goes_live_then_returns(monkeypatch)
     pipeline = await api.build_pipeline("43")
     await pipeline.start()
     try:
-        header = await api.stream_header(pipeline.gateway)
+        header = load_sample().header
         with pipeline.bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames, pipeline.bus.subscribe(
             FrameStatsResult, overflow=Overflow.GROW
         ) as results, pipeline.bus.subscribe(PlayerStatus, overflow=Overflow.GROW) as statuses:
@@ -250,12 +248,12 @@ async def test_default_pipeline_replays_then_goes_live_then_returns(monkeypatch)
                     live_frames.append(frame)
             assert len(live_frames) == 3
             assert all(abs((utcnow() - f.timestamp).total_seconds()) < 2 for f in live_frames)
-            assert all(f.header_id == header.header_id for f in live_frames)
+            assert all(f.header == header for f in live_frames)
             while results.get_nowait() is not None:
                 pass
             stats = await asyncio.wait_for(results.get(), 2)
             assert stats.result.n_stations == 5  # the module still works on live frames
-            message = api.state_message(pipeline, header, first=False)
+            message = api.state_message(pipeline)
             assert message.player.mode == "live"
             assert message.frame_index is None and message.frame_count is None
             assert message.frame is not None and message.frame.mRID == LIVE_STREAM_ID
@@ -265,15 +263,15 @@ async def test_default_pipeline_replays_then_goes_live_then_returns(monkeypatch)
             status = await _wait_status(statuses, lambda s: s.mode == "replay")
             assert status.paused is True and status.can_seek is True
             assert status.cursor == EPOCH + timedelta(seconds=0.05)
-            index, count = api._position(status, header)
+            index, count = api._position(status, load_sample().frames[0])
             assert (index, count) == (0, 60)
             # Nothing has played on the replay yet: the page must not be shown
             # the live feed's last frame (or its stats) under a "recorded" badge.
-            message = api.state_message(pipeline, header, first=False)
+            message = api.state_message(pipeline)
             assert message.frame is None and message.stats is None
             await pipeline.player.step()
             await asyncio.sleep(0.05)
-            message = api.state_message(pipeline, header, first=False)
+            message = api.state_message(pipeline)
             assert message.frame is not None and message.frame.mRID == STREAM_ID
     finally:
         await pipeline.stop()
@@ -335,15 +333,12 @@ class TinyClient(InMemoryClient):
     """A stand-in provider, to prove the swap is configuration only."""
 
     def __init__(self, name: str):
-        header = PmuHeader.build(
-            timestamp=EPOCH, mRID="tiny", station=["x"], channel=["f"], measurement=["f"],
-            units=["Hz"], data_rate=1.0,
-        )
+        header = PmuHeader(station=["x"], channel=["f"], measurement=["f"], units=["Hz"], data_rate=1.0)
         frames = [
-            PmuFrame(timestamp=EPOCH + timedelta(seconds=i), mRID="tiny", header_id=header.header_id, values=[50.0 + i])
+            PmuFrame(timestamp=EPOCH + timedelta(seconds=i), mRID="tiny", header=header, values=[50.0 + i])
             for i in range(3)
         ]
-        super().__init__(name, [PmuHeader, PmuFrame], [header, *frames], capabilities=Capability.HISTORY_CONSUME)
+        super().__init__(name, [PmuFrame], frames, capabilities=Capability.HISTORY_CONSUME)
 
 
 async def test_provider_is_swapped_by_environment_alone(monkeypatch):
@@ -367,8 +362,7 @@ async def test_provider_is_swapped_by_environment_alone(monkeypatch):
 def test_state_keeps_stats_for_the_frame_or_the_one_just_before_it():
     """With the module in another process its result lands after the frame;
     the previous frame's stats are kept for that gap, and no longer."""
-    recording = load_sample()
-    header, frames = recording.header, recording.frames
+    frames = load_sample().frames
     identity = FrameStatsModule().identity
     body = FrameStats(
         n_stations=5, mean_frequency_hz=50.0, min_frequency_hz=50.0, max_frequency_hz=50.0,
@@ -382,31 +376,33 @@ def test_state_keeps_stats_for_the_frame_or_the_one_just_before_it():
         timestamp=utcnow(), mode="replay", cursor=None, speed=1.0, paused=True, loop=True, ended=False,
         can_seek=True, can_go_live=True, coverage_start=EPOCH, coverage_end=None, frame_interval_s=0.05,
     )
-    assert api._current(stats_for(frames[3]), frames[3], header, status)
-    assert api._current(stats_for(frames[2]), frames[3], header, status)  # one frame behind: kept
-    assert not api._current(stats_for(frames[1]), frames[3], header, status)  # two behind: gone
-    assert not api._current(stats_for(frames[4]), frames[3], header, status)  # from the future: gone
+    assert api._current(stats_for(frames[3]), frames[3], status)
+    assert api._current(stats_for(frames[2]), frames[3], status)  # one frame behind: kept
+    assert not api._current(stats_for(frames[1]), frames[3], status)  # two behind: gone
+    assert not api._current(stats_for(frames[4]), frames[3], status)  # from the future: gone
     live = frames[2].model_copy(update={"mRID": LIVE_STREAM_ID})
-    assert not api._current(stats_for(live), frames[3], header, status)  # another stream: gone
-    assert not api._current(None, frames[3], header, status)
+    assert not api._current(stats_for(live), frames[3], status)  # another stream: gone
+    assert not api._current(None, frames[3], status)
 
 
 # --- the module as its own service ---------------------------------------------------
 
 
-async def test_a_header_arriving_on_the_bus_reprimes_the_module():
-    """What makes the module host-independent: it reads the header in setup
-    *and* listens for one on the bus, so a host that hands it the header late
-    (or a changed layout) primes it the same way."""
+async def test_the_module_primes_itself_from_the_frame_and_follows_a_layout_change():
+    """What makes the module host-independent: it needs nothing before its
+    first frame. The layout comes with the frame, so a fresh instance -- in a
+    worker that started late, say -- works from the first frame it sees, and
+    a frame with a different layout re-primes it."""
     module = FrameStatsModule()
-    bus = InProcessBus()
-    await module.setup(DataGateway([InMemoryClient("none", [PmuHeader])]), bus)
     recording = load_sample()
-    assert await module.process(recording.frames[0]) is None
-    bus.publish(recording.header)
     stats = await module.process(recording.frames[0])
     assert stats is not None and stats.n_stations == 5
-    assert FrameStatsModule.setup_models == (PmuHeader,)
+    assert module.parameters["header_id"] == recording.header.header_id
+
+    other = PmuHeader(station=["z"], channel=["f"], measurement=["f"], units=["Hz"], data_rate=1.0)
+    stats = await module.process(PmuFrame(timestamp=EPOCH, mRID="z", header=other, values=[49.5]))
+    assert stats is not None and stats.n_stations == 1 and stats.mean_frequency_hz == 49.5
+    assert module.parameters == {"header_id": other.header_id, "stations": ["z"]}
 
 
 def test_environment_sends_the_module_to_the_worker(monkeypatch):
@@ -438,7 +434,6 @@ async def test_stats_module_runs_as_its_own_service_over_the_transport(monkeypat
     pipeline = Pipeline("42", gateway, bus, player, [remote])
     await pipeline.start()
     try:
-        header = await api.stream_header(gateway)
         with bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames, bus.subscribe(
             FrameStatsResult, overflow=Overflow.GROW
         ) as results:
@@ -464,7 +459,7 @@ async def test_stats_module_runs_as_its_own_service_over_the_transport(monkeypat
 
         pipeline.bus.publish(Command(client_id="42", verb="stop"))
         await asyncio.sleep(0.05)
-        message = api.state_message(pipeline, header, first=False)
+        message = api.state_message(pipeline)
         assert message.player.mode == "replay" and message.frame is not None
     finally:
         await pipeline.stop()

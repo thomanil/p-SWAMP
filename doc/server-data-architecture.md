@@ -31,7 +31,7 @@ another process without touching the layers either side of it.
 
 | | Layer | What it is | Where |
 |---|---|---|---|
-| L1 | Messages | The wire models: `DataModel` and every message derived from it -- `PmuHeader`, `PmuFrame`, `Command`, `PlayerStatus`, `ResultEnvelope`, `ErrorEvent`. pydantic only; what every arrow carries | `messages/` |
+| L1 | Messages | The wire models: `DataModel` and every message derived from it -- `PmuFrame` (carrying its `PmuHeader`), `Command`, `PlayerStatus`, `ResultEnvelope`, `ErrorEvent`. pydantic only; what every arrow carries | `messages/` |
 | L2 | Gateway | The provider contract (`DataClient`, its capabilities) and the `DataGateway` that stitches providers into one time-addressed stream | `datagateway/` |
 | L3 | Player | Paces a gateway stream and owns the transport controls: play, pause, step, seek, speed, replay, live | `datagateway/player.py` |
 | L4 | Bus | In-process publish/subscribe typed on message classes; one per pipeline | `bus/` |
@@ -50,7 +50,7 @@ L3, L4, L5 and L8.
 ```
                     the repo's own providers, in one gateway:
                     the committed sample recording      the same rows re-stamped
-                    (history, and the header)           on the wall clock (live)
+                    (history)                           on the wall clock (live)
                               │                              │
                               ▼                              ▼
    L2  DataClient   ┌────────────────────────┐  ┌──────────────────────┐   capabilities declared:
@@ -124,15 +124,24 @@ with the schema attached to each entry.
 `pmu.py` (measurements), `results.py` (what modules emit), `control.py`
 (commands and player state).
 
-The measurement shape is **one instant of every channel**:
+The measurement shape is **one instant of every channel, carrying its layout**:
 
 ```python
-PmuHeader   # sent once: station / channel / measurement / units per column, data_rate, header_id
-PmuFrame    # per instant: timestamp, header_id, values: list[float | None]  (NaN is null on the wire)
+PmuFrame    # per instant: timestamp, mRID, header, values: list[float | None]  (NaN is null on the wire)
+PmuHeader   # nested in every frame: station / channel / measurement / units per column, data_rate;
+            # header_id is a content hash, computed and cached, so a consumer can spot a change cheaply
 ```
 
 `PmuHeader` is the config-frame analogue; `header.columns(measurement="f")`
-is the query p-SWAMP's applications already make of a labelled window.
+is the query p-SWAMP's applications already make of a labelled window. It
+rides inside every frame. That repeats ~1 KB per frame for the sample (about
+3.4x a bare frame before compression, ~1.2x after, since a broker's batch
+compression collapses the repeats), and it is what makes any single frame
+enough to work from: a module reads the layout off the frame it is
+processing, a worker that starts late is primed by its first input, a live
+source describes itself, and a changed layout is simply the next frame's
+header. The measurement behind the choice is in the docstring of
+`messages/pmu.py`.
 
 ### Providers — `pswamp_core.datagateway.DataClient`
 
@@ -170,12 +179,10 @@ the repo" and "navigate history" coexist.
 The reference client (`InMemoryClient`): `datagateway/clients/in_memory.py`. Two
 providers written *outside* the core, as a TSO's would be, both under
 `app/server-python/src/pmu_test_streamer/`: `sample_client.py` (the recording:
-history, and the one that serves the `PmuHeader`) and `live_client.py` (a
-synthetic live feed: `LIVE_CONSUME` only, the recording's rows re-stamped on
-the wall clock at 20 Hz). The live one deliberately serves **no header** -- a
-header is a point-in-time record, and a client that can only tail is never
-asked for the past -- so on its own it renders no table; the composed default
-pairs it with the recording.
+history) and `live_client.py` (a synthetic live feed: `LIVE_CONSUME` only, the
+recording's rows re-stamped on the wall clock at 20 Hz). Both serve `PmuFrame`
+and nothing else; each frame carries its layout, so either one on its own is
+enough for a page to render a table.
 
 A provider proves itself with the **conformance suite** — inherit it, supply
 three fixtures. The cases follow the declared capabilities: the history cases
@@ -331,12 +338,9 @@ the same envelope when `GatewayIO` lands (deferred; see the last section).
 
 *Where.* `core/src/pswamp_core/modules.py`;
 `app/server-python/src/pmu_test_streamer/stats_module.py` (a module that
-*reduces* a frame, and reads the header in `setup` to know its columns; a
-module that emits a *transformed copy* of a frame needs no `setup` at all).
-A module that reads something in `setup` declares it -- `setup_models =
-(PmuHeader,)` -- so a host running it in another process knows what to carry
-across before the first input; and it listens for the same class on the bus,
-so a header that arrives later re-primes it wherever it runs.
+*reduces* a frame; it derives its column indexes from `frame.header` on the
+first frame and again whenever a frame's `header_id` differs, so it has no
+`setup`, and the same instance runs unchanged in another process).
 
 ### Pipeline and registry — `pswamp_core.pipeline`
 
@@ -385,7 +389,7 @@ client-id handshake is not yet shared; see "Adding things".
 ## How data flows: source to browser
 
 ```
- 1  sample_data.txt          parsed once, lazily, into 1 PmuHeader + 60 PmuFrame (20 Hz, 5 stations)
+ 1  sample_data.txt          parsed once, lazily, into 60 PmuFrame (20 Hz, 5 stations), each carrying the one PmuHeader
         │
  2  SampleRecordingClient    coverage() = [first frame, last frame + 50 ms)   capabilities = HISTORY_CONSUME
     LiveSyntheticClient      coverage() = [now - 50 ms, ∞) live                capabilities = LIVE_CONSUME
@@ -410,10 +414,11 @@ client-id handshake is not yet shared; see "Adding things".
  7  browser                  useServerSocket → usePmuStreamSocket → FrameTable + controls
 ```
 
-Step 6 is the delta discipline of the web layer applied here: the header
-(~1 KB) travels once, on the first message; each later message is the frame at
-the cursor, the player's status and the latest module result. A slow socket
-sees the newest state, never a backlog.
+Step 6 coalesces: each message is the frame at the cursor (with its layout
+inside), the player's status and the latest module result. A slow socket sees
+the newest state, never a backlog. The page keeps the last layout it saw, so
+the table stays laid out while no frame is at the cursor (a replay paused at
+its start after a stream switch).
 
 ## What happens when you click Live: the chain, walked from the browser up
 
@@ -514,7 +519,7 @@ what it did not declare.
   queue is removed in `finally`, so a switch away stops the delivery.
 - `SampleRecordingClient.consume` iterates its sixty parsed frames and yields
   those inside the range. The frames were parsed once, lazily, from
-  `sample_data.txt`, and carry the header's `header_id`.
+  `sample_data.txt`, and each carries the recording's header.
 
 That is the top of the chain. From here everything runs **back down**, and it
 is the same path for both sources: the read task parks the frame; the run loop
@@ -574,8 +579,8 @@ ticker starts. Eight browsers in live mode are eight tickers; evicting a
 pipeline calls `gateway.close()` and stops that one.
 
 What is actually shared across pipelines is exactly one thing: the **parsed
-recording**. `load_sample()` is `lru_cache`d by path, so the sixty frames and
-the header are read from `sample_data.txt` once per process and every
+recording**. `load_sample()` is `lru_cache`d by path, so the sixty frames (and
+the one header object they all point at) are read from `sample_data.txt` once per process and every
 `SampleRecordingClient` holds the same frozen objects. That is safe because
 nothing writes to them; the live client copies each row's `values` before
 stamping it. The registry itself is shared, of course -- it is the one map from
@@ -627,22 +632,24 @@ piece of `pmu_test_streamer/` to copy.
 2. **The module**, in its own file: a pydantic result body, the envelope
    (`class MyThingResult(ResultEnvelope[MyThingBody])`, topic `my.thing.result`),
    and a `Module` subclass with `name`, `input_model`, `output_model` and
-   `process`. `setup` only if it needs the header (`stats_module.py` does).
-   Import only `pswamp_core`.
+   `process`. Read the layout off `frame.header` when it matters, re-deriving
+   on a changed `header_id` (`stats_module.py` does); `setup` only for
+   something a module needs from the gateway itself (`row_count_module.py`
+   keeps the gateway). Import only `pswamp_core`.
 3. **The pipeline**, copied from the streamer's `build_pipeline`, `REGISTRY`
    and `lifespan`. The module list there is the only registry a module has.
    Name the provider in the `gateway_from_env` spec string and give the app its
    own `variable=`; don't import `pmu_test_streamer`. A page with no transport
    wants `Player(..., autoplay=True, loop=True)`, or it shows dashes for ever.
-4. **The socket**: a state model exported as `WS_MESSAGE`, carrying the header
-   on the first message only and the envelope as it is; `state_message`
-   reading `pipeline.latest.get(MyThingResult)`; and the grid monitor's
-   push loop from `shared.py`, which serves a core bus unchanged:
+4. **The socket**: a state model exported as `WS_MESSAGE`, carrying the
+   envelope as it is (and the frame at the cursor, if the page shows one --
+   its layout comes inside it); `state_message` reading
+   `pipeline.latest.get(MyThingResult)`; and the grid monitor's push loop
+   from `shared.py`, which serves a core bus unchanged:
 
    ```python
    with event_queue(pipeline.bus, MyThingResult) as updates:
-       header = await stream_header(pipeline.gateway)
-       await serve_updates(ws, updates, lambda event: state_message(pipeline, header, first=event is None))
+       await serve_updates(ws, updates, lambda event: state_message(pipeline))
    ```
 
    Open the queue before building the opening message. The handshake around
@@ -658,9 +665,8 @@ piece of `pmu_test_streamer/` to copy.
    needs the rebuild). Tests: call `process` directly, and run the pipeline
    with `player.paced = False` reading the bus.
 8. **Optional: run the module as its own service.** In-process is the default
-   and costs nothing; if you need this, four edits, none to the module beyond
-   `setup_models` (and a bus listener for what it names; `stats_module.py`
-   shows both):
+   and costs nothing; if you need this, four edits, none to the module (its
+   input carries everything it needs, as `stats_module.py` shows):
    - `build_pipeline`: `RemoteModule(MyThingModule, transport, key)` where
      `MyThingModule()` was, with the transport from
      `transport_from_env("MY_THING_MODULE_TRANSPORT")` built once per process
@@ -698,7 +704,8 @@ chain on a non-PMU `Measurement`). What has to be done:
   a provider answering `coverage`/`consume` for that class, and a
   `Player(model=YourType)` in the pipeline. One player streams one class.
 - A `PmuHeader` is the PMU stream's layout, not the core's: a new type has no
-  header unless you define one, and the page sends what it needs.
+  header unless you nest one in it, as `PmuFrame` does, and the page sends
+  what it needs.
 - Regenerate the contract; the browser type follows from the state model.
 
 Don't add the module to the *streamer's* pipeline and put the page in
@@ -716,22 +723,20 @@ key. Nothing in the module changes, and nothing above the bus notices.
  web process (one pipeline per client)                     stats-worker process (one per deployment)
  gateway ─ Player ─▶ InProcessBus                          KafkaTransport: one consumer per topic,
               │ RemoteModule(FrameStatsModule, key=<client id>)           demultiplexed by record key
-              │   setup:  PmuHeader ──publish key=<id>──▶ pmu.header (compacted) ─┐
-              │   outbox: PmuFrame  ──publish key=<id>──▶ pmu.frame ──────────────┼─▶ ModuleHost(FrameStatsModule)
+              │   outbox: PmuFrame  ──publish key=<id>──▶ pmu.frame ──────────────┬─▶ ModuleHost(FrameStatsModule)
               ◀── subscribe key=<id> ◀──── frame.stats.result ◀───────────────────┘     one module + bus per key
  the socket subscribes FrameStatsResult as before;  POST ─▶ Command ─▶ Player, unchanged
 ```
 
 `RemoteModule(FrameStatsModule, transport, key)` has the module's `name`,
-`input_model` and `output_model`. Its `setup` publishes what the module's own
-`setup` reads (`setup_models`, the `PmuHeader`), retained under the key; its
-`run` drains the input class off the local bus onto its topic (a `DROP_OLDEST`
-subscription, so a slow broker costs frames, not memory) and publishes what
-arrives on the result topic back onto the bus. `ModuleHost(FrameStatsModule,
+`input_model` and `output_model`. Its `run` drains the input class off the
+local bus onto its topic (a `DROP_OLDEST` subscription, so a slow broker costs
+frames, not memory) and publishes what arrives on the result topic back onto
+the bus. `ModuleHost(FrameStatsModule,
 transport)` subscribes to the input topic across every key; the first input for
-a key builds that key's bus, module (its `setup` handed the retained records)
-and forwarder, and a key idle for `idle_seconds` is evicted. One variable, read
-by both sides, is the whole switch:
+a key builds that key's bus, module and forwarder, and a key idle for
+`idle_seconds` is evicted. One variable, read by both sides, is the whole
+switch:
 
 ```
 PMU_TEST_STREAMER_MODULE_TRANSPORT=kafka:pswamp_core.transport.kafka:KafkaTransport
@@ -755,10 +760,11 @@ module's result either way.
   client, so eight pipelines are three topics and the worker tells them apart
   by key. No `DataModel` gains a field (ADR-005), and the streamer stays per
   client with every command intact, since the player never leaves the server.
-- **What `setup` reads travels ahead, retained.** A compacted topic read from
-  its start is Kafka's own "newest per key", so a worker that starts late still
-  gets every header. The module also listens for `PmuHeader` on its bus, which
-  is what makes it host-independent.
+- **The input is all the worker needs.** A frame carries its layout, so a
+  worker that starts late -- or a key that was evicted and rebuilt -- is primed
+  by the first frame it sees, and a changed layout is just the next frame. The
+  price is the layout repeated in every record, about 1.2x on the wire once
+  the broker's batch compression has collapsed it.
 
 This landed ahead of the measurements the design asked for before adding a
 broker; the numbers to produce next are listed in the last section.

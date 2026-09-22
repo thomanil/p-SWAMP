@@ -11,8 +11,8 @@ OpenAPI contract without an adapter.
 
 Two layers of message live here (STEP 1 A1, "two layers, not one"):
 
-* **measurements** -- ``PmuHeader`` (the channel layout, sent once) and
-  ``PmuFrame`` (one instant of every channel), in ``pmu``;
+* **measurements** -- ``PmuFrame`` (one instant of every channel, carrying
+  its ``PmuHeader``, the channel layout, inside it), in ``pmu``;
 * **results and control** -- ``ResultEnvelope`` (what a module emits),
   ``AppStatusMessage``, ``Command``, ``PlayerStatus``, ``StreamChanged``, in
   ``results`` and ``control``; ``ErrorEvent`` (an operational failure, for the

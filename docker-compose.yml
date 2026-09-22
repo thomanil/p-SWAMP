@@ -203,11 +203,11 @@ services:
   # in one process, no ZooKeeper). Ephemeral on purpose -- no volume, by the
   # "no persistent volume" rule in AGENTS.md: everything on its topics is a
   # live hop between two processes, and a restart empties them at no cost
-  # (the server re-sends each client's header on its next pipeline). The
+  # (every frame carries its own layout, so nothing on them is needed later). The
   # EXTERNAL listener on 19092 is for the host: the broker-gated transport
   # tests (KAFKA_TEST_BOOTSTRAP_SERVERS=127.0.0.1:19092) and any Kafka CLI on
-  # a laptop. Auto-creation is off: the transport creates its topics itself,
-  # with the right config (the header topic is compacted).
+  # a laptop. Auto-creation is off: the transport creates its topics itself
+  # (one partition, so a topic stays totally ordered).
   #
   # The image turns every KAFKA_* variable into a server.properties entry.
   kafka:

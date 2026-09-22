@@ -9,7 +9,6 @@ import { useServerSocket } from '@/hooks/useServerSocket'
  *  in app/server-python/src/time_series_explorer/api.py, not a hand-copy of it.
  *  The page reads these fields as the server names them, snake_case and all. */
 export type TimeSeriesExplorerState = Wire['TimeSeriesExplorerState']
-export type PmuHeader = Wire['PmuHeader']
 export type PlayerStatus = Wire['PlayerStatus']
 export type RowCountResult = Wire['RowCountResult']
 
@@ -28,11 +27,6 @@ export type RowCountResult = Wire['RowCountResult']
 export function useTimeSeriesExplorerSocket() {
   const { message, status, connected } =
     useServerSocket<TimeSeriesExplorerState>(TIME_SERIES_EXPLORER_WS_PATH)
-
-  // The channel layout arrives on the first message of a connection only, so
-  // it is kept here (derived-state-during-render, as the streamer does).
-  const [header, setHeader] = useState<PmuHeader | null>(null)
-  if (message?.header && message.header !== header) setHeader(message.header)
 
   const [refusal, setRefusal] = useState<string | null>(null)
   const send = useCallback(async (promise: Promise<void>) => {
@@ -67,5 +61,5 @@ export function useTimeSeriesExplorerSocket() {
     [send],
   )
 
-  return { state: message, header, status, connected, refusal, playRange, stop, count, refresh }
+  return { state: message, status, connected, refusal, playRange, stop, count, refresh }
 }

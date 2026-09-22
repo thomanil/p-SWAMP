@@ -1147,17 +1147,14 @@ export interface components {
         };
         /**
          * PmuFrame
-         * @description One instant of every channel in a stream, in header column order.
+         * @description One instant of every channel in a stream, with the layout the values follow.
          */
         PmuFrame: {
-            /**
-             * Header Id
-             * @description The header this frame's columns follow.
-             */
-            header_id: string;
+            /** @description The channel layout; ``values`` is in its column order. */
+            header: components["schemas"]["PmuHeader"];
             /**
              * Mrid
-             * @description Identity of the stream; matches its header.
+             * @description Identity of the stream (a PDC, a recording).
              */
             mRID: string;
             /**
@@ -1190,7 +1187,8 @@ export interface components {
          *
          *     The three label rows are exactly the ones p-SWAMP's ``Indexer`` queries
          *     (``get_col_idx(measurement="f")``), so an application selects its inputs the
-         *     same way over a wire header as over a decoded config frame.
+         *     same way over a wire frame as over a decoded config frame. It travels
+         *     inside every ``PmuFrame``.
          */
         PmuHeader: {
             /**
@@ -1212,14 +1210,9 @@ export interface components {
             freq_encoding: "absolute_hz";
             /**
              * Header Id
-             * @description Content hash of the label rows; frames carry it.
+             * @description Content hash of the layout; equal layouts share it.
              */
-            header_id: string;
-            /**
-             * Mrid
-             * @description Identity of the stream (a PDC, a recording).
-             */
-            mRID: string;
+            readonly header_id: string;
             /**
              * Measurement
              * @description Per column: "f", "df", "<name>_Magnitude" or "<name>_Angle".
@@ -1231,22 +1224,10 @@ export interface components {
              */
             station: string[];
             /**
-             * Timestamp
-             * Format: date-time
-             * @description When this layout became valid.
-             */
-            timestamp: string;
-            /**
              * Units
              * @description Per column: the unit the value is in.
              */
             units: string[];
-            /**
-             * Version
-             * @default v1
-             * @constant
-             */
-            version: "v1";
         };
         /** PmuSite */
         PmuSite: {
@@ -1264,11 +1245,13 @@ export interface components {
          *     A declared model, because this IS the downstream half of the published
          *     contract: api_contract.py collects it via this package's WS_MESSAGE export.
          *     Its parts are core messages carried as they are -- the browser's types for
-         *     ``PmuHeader``, ``PmuFrame``, ``PlayerStatus`` and ``FrameStatsResult`` are
-         *     generated from these very classes, and nothing renames a field on the way.
+         *     ``PmuFrame`` (and the ``PmuHeader`` inside it), ``PlayerStatus`` and
+         *     ``FrameStatsResult`` are generated from these very classes, and nothing
+         *     renames a field on the way. The channel layout comes with every frame, as
+         *     ``frame.header``; there is no separate header message.
          */
         PmuStreamState: {
-            /** @description The frame at the cursor, once one has played. */
+            /** @description The frame at the cursor, with its channel layout, once one has played. */
             frame: components["schemas"]["PmuFrame"] | null;
             /**
              * Frame Count
@@ -1280,8 +1263,6 @@ export interface components {
              * @description 0-based position of the cursor in the recording.
              */
             frame_index: number | null;
-            /** @description The channel layout. Sent on the first message only; null afterwards. */
-            header: components["schemas"]["PmuHeader"] | null;
             /** @description Where the replay is and which controls apply. */
             player: components["schemas"]["PlayerStatus"];
             /** @description The stats module's latest result. */
@@ -1446,8 +1427,8 @@ export interface components {
          * @description The one message pushed on connect and on every change.
          *
          *     Its parts are core messages carried as they are: the browser's types for
-         *     ``PmuHeader``, ``PmuFrame``, ``PlayerStatus`` and ``RowCountResult`` are
-         *     generated from these very classes. Errors are inside them --
+         *     ``PmuFrame`` (with its ``PmuHeader`` inside), ``PlayerStatus`` and
+         *     ``RowCountResult`` are generated from these very classes. Errors are inside them --
          *     ``player.error`` and ``count.result.error`` -- because they are *state*: why
          *     the replay is stopped, why the count is short. The error *event* goes to
          *     the layout's tray, not here.
@@ -1455,10 +1436,8 @@ export interface components {
         TimeSeriesExplorerState: {
             /** @description The row-count module's latest result; null until the first count. */
             count: components["schemas"]["RowCountResult"] | null;
-            /** @description The frame at the cursor, once one has played. */
+            /** @description The frame at the cursor, with its channel layout, once one has played. */
             frame: components["schemas"]["PmuFrame"] | null;
-            /** @description The channel layout. Sent on the first message only; null afterwards. */
-            header: components["schemas"]["PmuHeader"] | null;
             /** @description Where the replay is, its coverage, its bounded range and any error. */
             player: components["schemas"]["PlayerStatus"];
             /**

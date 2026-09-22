@@ -7,11 +7,9 @@ One topic per message class -- ``pmu.frame``, ``frame.stats.result`` -- under an
 optional namespace prefix that is configuration and never a message field
 (STEP 3 ADR-005); the pipeline key is the **record key**. So a deployment with
 eight per-client pipelines has three topics, not twenty-four, and a worker
-consumes each topic once and tells the pipelines apart by key. A retained
-class (``publish(..., retained=True)``) goes to a topic created with
-``cleanup.policy=compact``, which is Kafka's own "keep the newest per key", and
-a retained subscription reads that topic from its start; a streamed class is
-read from its end, so a subscriber sees only what is said after it arrives.
+consumes each topic once and tells the pipelines apart by key. Every topic is
+read from its end, so a subscriber sees only what is said after it arrives;
+a frame carries its own layout, so that is all a late worker needs.
 
 The record value is the message's JSON (``model_dump_json``), decoded with
 ``model_validate_json`` on the way in; anything that does not validate is
@@ -108,11 +106,11 @@ class KafkaTransport(Transport):
         """The topic carrying ``model``: its descriptor under the prefix, if any."""
         return f"{self.topic_prefix}.{model.topic}" if self.topic_prefix else model.topic
 
-    async def ensure_topic(self, model: type[DataModel], *, retained: bool) -> str:
+    async def ensure_topic(self, model: type[DataModel]) -> str:
         """Create ``model``'s topic if the broker lacks it; returns its name.
 
-        Compacted for a retained class. "Already exists" is fine; any other
-        failure is logged and left to the produce or consume that follows.
+        "Already exists" is fine; any other failure is logged and left to the
+        produce or consume that follows.
         """
         topic = self.topic_for(model)
         if topic in self._known_topics:
@@ -122,12 +120,10 @@ class KafkaTransport(Transport):
         if self._admin is None:
             self._admin = AIOKafkaAdminClient(bootstrap_servers=self.bootstrap_servers)
             await self._admin.start()
-        configs = {"cleanup.policy": "compact"} if retained else None
         if await create_topic(
             self._admin,
             topic,
             replication_factor=self.replication_factor,
-            configs=configs,
             who=self.name,
         ):
             self._known_topics.add(topic)
@@ -158,29 +154,27 @@ class KafkaTransport(Transport):
 
     # --- the contract -------------------------------------------------------------------
 
-    async def publish(self, message: DataModel, key: str, *, retained: bool = False) -> None:
+    async def publish(self, message: DataModel, key: str) -> None:
         if self._producer is None:
             await self.open()
-        topic = await self.ensure_topic(type(message), retained=retained)
+        topic = await self.ensure_topic(type(message))
         await self._producer.send_and_wait(
             topic, value=message.model_dump_json().encode(), key=key.encode()
         )
         self.published += 1
 
     async def _feed(
-        self, model: type[DataModel], retained: bool, ready: asyncio.Event
+        self, model: type[DataModel], ready: asyncio.Event
     ) -> AsyncIterator[tuple[str, DataModel]]:
         from aiokafka import AIOKafkaConsumer
 
-        topic = await self.ensure_topic(model, retained=retained)
+        topic = await self.ensure_topic(model)
         consumer = AIOKafkaConsumer(
             topic,
             bootstrap_servers=self.bootstrap_servers,
             group_id=None,
             enable_auto_commit=False,
-            # A retained (compacted) topic is read from its start, so the newest
-            # record per key is seen; a stream is joined at its end.
-            auto_offset_reset="earliest" if retained else "latest",
+            auto_offset_reset="latest",  # a stream is joined at its end
         )
         await consumer.start()
         try:

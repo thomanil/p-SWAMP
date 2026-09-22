@@ -31,9 +31,7 @@ from pswamp_core.util.time import utcnow
 
 httpx = pytest.importorskip("httpx")
 
-HEADER = PmuHeader.build(
-    timestamp=at(0),
-    mRID="s",
+HEADER = PmuHeader(
     station=["A", "A"],
     channel=["V", "V"],
     measurement=["V_Magnitude", "f"],
@@ -41,7 +39,7 @@ HEADER = PmuHeader.build(
     data_rate=1.0,
 )
 FRAMES = [
-    PmuFrame(timestamp=at(i), mRID="s", header_id=HEADER.header_id, values=[400.0 + i, 50.0])
+    PmuFrame(timestamp=at(i), mRID="s", header=HEADER, values=[400.0 + i, 50.0])
     for i in range(10)
 ]
 
@@ -63,7 +61,7 @@ class FakeService:
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.calls.append((request.method, request.url.path))
         if request.url.path == "/v1/coverage":
-            if not self.coverage or request.url.params["model"] not in ("pmu.frame", "pmu.header"):
+            if not self.coverage or request.url.params["model"] != "pmu.frame":
                 return httpx.Response(200, json={"start": None, "end": None, "live": False})
             last = self.frames[-1].timestamp + timedelta(microseconds=1)
             return httpx.Response(
@@ -88,7 +86,7 @@ class FakeService:
         if self.mode == "fail":
             self.feed.dispatch(TimeSeriesResult.failed(qid, 0, "disk on fire", timestamp=stamp))
             return
-        records = [HEADER] if body["model"] == "pmu.header" else self.frames
+        records = self.frames if body["model"] == "pmu.frame" else []
         start = body["start"] and TimeRange(_iso(body["start"]), None).start
         end = body["end"] and TimeRange(None, _iso(body["end"])).end
         for record in records:
@@ -119,7 +117,7 @@ def test_constructing_imports_neither_httpx_nor_aiokafka_and_checks_its_inputs()
     client = TimeSeriesDatabaseClient("tsdb", url="http://x", bootstrap_servers="k:9092")
     assert client.name == "tsdb" and ("aiokafka" in sys.modules) == before
     assert client.capabilities == Capability.HISTORY_CONSUME
-    assert client.supports(PmuFrame) and client.supports(PmuHeader)
+    assert client.supports(PmuFrame)
     with pytest.raises(ValueError):
         TimeSeriesDatabaseClient("tsdb", bootstrap_servers="k:9092")  # no URL
     with pytest.raises(ValueError):
@@ -167,8 +165,7 @@ async def test_consume_subscribes_before_posting_and_yields_the_range_until_end(
     assert service.queue_existed_at_post == [True]
     assert [m for m, _ in service.calls] == ["POST"]  # no cancel: the query ended
     assert service.feed._queues == {}  # the queue was unregistered on exit
-    header = [r async for r in client.consume(PmuHeader, TimeRange(None, None))]
-    assert header == [HEADER]
+    assert all(r.header == HEADER for r in got)  # the layout came inside each record
     await client.close()
 
 

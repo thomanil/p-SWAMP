@@ -25,8 +25,10 @@ function cell(frame: PmuFrame | null, index: number, digits: number): string {
 
 /**
  * One frame of the recording as a table: a row per station, the three
- * measurements the sample carries as columns. Renders the header's layout with
- * dashes until the first frame has played, so the block never changes size.
+ * measurements the sample carries as columns. `header` is the layout of the
+ * last frame seen (every frame carries its own); with no frame at the cursor
+ * -- a replay paused at its start after a stream switch -- the rows show
+ * dashes, so the block never changes size.
  */
 export function FrameTable({ header, frame }: { header: PmuHeader; frame: PmuFrame | null }) {
   const stations = Array.from(new Set(header.station))

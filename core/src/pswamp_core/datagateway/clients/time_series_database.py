@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
 from ...log import get_logger
-from ...messages.pmu import PmuFrame, PmuHeader
+from ...messages.pmu import PmuFrame
 from ...messages.time_series import TimeSeriesQuery, TimeSeriesResult
 from ...util.time import ensure_utc
 from ..config import EnvSetting
@@ -250,8 +250,8 @@ class TimeSeriesDatabaseClient(DataClient):
     no code in this repo changed: name the client in ``PSWAMP_DATA_CLIENTS`` (or
     an app's own ``*_DATA_CLIENTS`` variable) and set its variables.
 
-    **Capabilities.** ``HISTORY_CONSUME`` only, for ``PmuHeader`` and
-    ``PmuFrame``. It never tails: a store answers about the past. Pair it with
+    **Capabilities.** ``HISTORY_CONSUME`` only, for ``PmuFrame``. It never
+    tails: a store answers about the past. Pair it with
     a live provider in the same gateway for a replay that hands over to live.
 
     **Configuration** -- the ``{NAME}_`` block, ``NAME`` being the client's name
@@ -269,7 +269,7 @@ class TimeSeriesDatabaseClient(DataClient):
 
     ``GET /v1/coverage?model=<topic>``
         What the store holds for the message class named by its topic string
-        (``pmu.frame``, ``pmu.header``). Answer ``200`` with
+        (``pmu.frame``). Answer ``200`` with
         ``{"start": <ISO 8601>, "end": <ISO 8601>, "live": false}``. ``end`` is
         *exclusive* and must lie past the last record's timestamp (pad it by a
         microsecond), because the player bounds every replay to it and the
@@ -379,7 +379,7 @@ class TimeSeriesDatabaseClient(DataClient):
             raise ValueError(f"{name}: BOOTSTRAP_SERVERS is required (or a feed to use instead)")
         self.name = name
         self.capabilities = Capability.HISTORY_CONSUME
-        self.supported_models = {PmuHeader, PmuFrame}
+        self.supported_models = {PmuFrame}
         self.priority = priority
         self.url = (url or "").rstrip("/")
         self.topic = topic

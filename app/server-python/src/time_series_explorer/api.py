@@ -65,7 +65,7 @@ from shared import (
 
 from pswamp_core.bus import InProcessBus, Overflow, Subscription
 from pswamp_core.datagateway import DataGateway, Player, gateway_from_env
-from pswamp_core.messages import Command, PlayerStatus, PmuFrame, PmuHeader, StreamChanged
+from pswamp_core.messages import Command, PlayerStatus, PmuFrame, StreamChanged
 from pswamp_core.pipeline import CapacityError, Pipeline, PipelineRegistry
 from pswamp_core.util.time import ensure_utc
 
@@ -124,43 +124,33 @@ class TimeSeriesExplorerState(BaseModel):
     """The one message pushed on connect and on every change.
 
     Its parts are core messages carried as they are: the browser's types for
-    ``PmuHeader``, ``PmuFrame``, ``PlayerStatus`` and ``RowCountResult`` are
-    generated from these very classes. Errors are inside them --
+    ``PmuFrame`` (with its ``PmuHeader`` inside), ``PlayerStatus`` and
+    ``RowCountResult`` are generated from these very classes. Errors are inside them --
     ``player.error`` and ``count.result.error`` -- because they are *state*: why
     the replay is stopped, why the count is short. The error *event* goes to
     the layout's tray, not here.
     """
 
     type: Literal["state"] = "state"
-    header: PmuHeader | None = Field(
-        description="The channel layout. Sent on the first message only; null afterwards."
-    )
     player: PlayerStatus = Field(
         description="Where the replay is, its coverage, its bounded range and any error."
     )
-    frame: PmuFrame | None = Field(description="The frame at the cursor, once one has played.")
+    frame: PmuFrame | None = Field(
+        description="The frame at the cursor, with its channel layout, once one has played."
+    )
     count: RowCountResult | None = Field(
         description="The row-count module's latest result; null until the first count."
     )
 
 
-def state_message(pipeline: Pipeline, header: PmuHeader | None, *, first: bool) -> TimeSeriesExplorerState:
+def state_message(pipeline: Pipeline) -> TimeSeriesExplorerState:
     latest = pipeline.latest
     frame = pipeline.player.last_frame
     return TimeSeriesExplorerState(
-        header=header if first else None,
         player=pipeline.player.status(),
         frame=frame if isinstance(frame, PmuFrame) else None,
         count=latest.get(RowCountResult) if latest else None,
     )
-
-
-async def stream_header(gateway: DataGateway) -> PmuHeader | None:
-    """The stream's layout, asked of the gateway like any other range query."""
-    header: PmuHeader | None = None
-    async for message in gateway.consume(PmuHeader):
-        header = message  # the newest wins
-    return header
 
 
 # --- REST commands ----------------------------------------------------------------
@@ -306,7 +296,7 @@ def subscribe_updates(pipeline: Pipeline) -> Subscription:
 
 
 async def serve_stream(
-    ws: WebSocket, pipeline: Pipeline, header: PmuHeader | None, updates: Subscription
+    ws: WebSocket, pipeline: Pipeline, updates: Subscription
 ) -> None:
     """Push the state on every change until the client disconnects, coalescing
     a backlog into one message built from the latest state."""
@@ -315,7 +305,7 @@ async def serve_stream(
         async for _ in updates:
             while updates.get_nowait() is not None:
                 pass
-            await send_state(ws, state_message(pipeline, header, first=False))
+            await send_state(ws, state_message(pipeline))
 
     pusher = asyncio.create_task(push())
     try:
@@ -333,7 +323,6 @@ async def ws_endpoint(ws: WebSocket) -> None:
             return
         logger.info("client %s: connected (%s live)", pipeline.key, len(REGISTRY.keys()))
         with subscribe_updates(pipeline) as updates:
-            header = await stream_header(pipeline.gateway)
-            await send_state(ws, state_message(pipeline, header, first=True))
-            await serve_stream(ws, pipeline, header, updates)
+            await send_state(ws, state_message(pipeline))
+            await serve_stream(ws, pipeline, updates)
         logger.info("client %s: disconnected", pipeline.key)

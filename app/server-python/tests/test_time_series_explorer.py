@@ -23,7 +23,7 @@ from pswamp_core.datagateway.clients.time_series_database import (
     InMemoryResultFeed,
     TimeSeriesDatabaseClient,
 )
-from pswamp_core.messages import Command, ErrorEvent, PlayerStatus, PmuFrame, PmuHeader
+from pswamp_core.messages import Command, ErrorEvent, PlayerStatus, PmuFrame
 from time_series_explorer import api
 from time_series_explorer.row_count_module import RowCountModule, RowCountResult
 from time_series_stub.app import create_app
@@ -39,7 +39,7 @@ class FailsAfterTwo(InMemoryClient):
     def __init__(self, name: str = "flaky") -> None:
         recording = load_sample()
         super().__init__(
-            name, [PmuHeader, PmuFrame], [recording.header, *recording.frames],
+            name, [PmuFrame], list(recording.frames),
             capabilities=Capability.HISTORY_CONSUME,
         )
 
@@ -118,9 +118,8 @@ async def test_pipeline_counts_a_range_and_plays_a_bounded_range(monkeypatch):
     assert [m.name for m in pipeline.modules] == ["row-count", "error-forwarder"]
     await pipeline.start()
     try:
-        header = await api.stream_header(pipeline.gateway)
-        opening = api.state_message(pipeline, header, first=True)
-        assert opening.header is not None and opening.frame is None and opening.count is None
+        opening = api.state_message(pipeline)
+        assert opening.frame is None and opening.count is None
         assert opening.player.mode == "replay" and opening.player.paused and opening.player.loop is False
         t0 = opening.player.coverage_start
         assert t0 is not None and opening.player.coverage_end == t0 + timedelta(seconds=3.0)
@@ -134,8 +133,8 @@ async def test_pipeline_counts_a_range_and_plays_a_bounded_range(monkeypatch):
             pipeline.bus.publish(command)
             result = await asyncio.wait_for(results.get(), 2)
             assert result.result.count == 20 and result.request_id == command.request_id
-            message = api.state_message(pipeline, header, first=False)
-            assert message.header is None and message.count is not None and message.count.result.count == 20
+            message = api.state_message(pipeline)
+            assert message.count is not None and message.count.result.count == 20
             assert message.frame is None  # a count plays nothing
 
             pipeline.bus.publish(Command(client_id="21", verb="replay", args={
@@ -145,8 +144,9 @@ async def test_pipeline_counts_a_range_and_plays_a_bounded_range(monkeypatch):
             ended = await _wait_status(statuses, lambda s: s.ended)
             assert [f.timestamp for f in got] == [t0 + timedelta(seconds=1.0 + 0.05 * i) for i in range(5)]
             assert ended.paused and ended.range_end == t0 + timedelta(seconds=1.25) and ended.error is None
-            message = api.state_message(pipeline, header, first=False)
+            message = api.state_message(pipeline)
             assert message.frame is not None and message.frame.timestamp == got[-1].timestamp
+            assert message.frame.header == load_sample().header  # the layout rides with the frame
             assert message.count is not None  # the last count is kept alongside
     finally:
         await pipeline.stop()
@@ -242,7 +242,7 @@ async def test_an_unreachable_store_reaches_the_error_tray_and_the_page_still_co
         assert notice.app == "time-series-explorer" and notice.source == "tsdb"
         assert notice.message == "the provider cannot be reached"
         assert "cannot reach http://tsdb:8100" in (notice.detail or "")
-        message = api.state_message(pipeline, None, first=True)
+        message = api.state_message(pipeline)
         assert message.player.error == notice.detail and message.player.coverage_start is None
         t0 = load_sample().frames[0].timestamp
         with pytest.raises(HTTPException) as refused:
@@ -273,8 +273,6 @@ async def test_provider_is_swapped_by_environment_alone(monkeypatch):
         assert result.result.count == 20 and result.result.error is None
         service = HermeticTsdbClient.services[-1]
         assert service.completed == 1  # the count crossed REST and the envelope
-        header = await api.stream_header(pipeline.gateway)
-        assert header is not None and service.completed == 2  # and so did the header query
         assert HUB.recent("24") == []
     finally:
         await pipeline.stop()

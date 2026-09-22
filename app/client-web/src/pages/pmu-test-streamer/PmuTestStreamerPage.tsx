@@ -143,7 +143,11 @@ export function PmuTestStreamerPage() {
               className="w-auto"
             >
               <AlertTitle>
-                {status.kind === 'online' ? 'Waiting for state…' : status.label}
+                {status.kind === 'online'
+                  ? state
+                    ? 'No frame yet — press Play to see the stream'
+                    : 'Waiting for state…'
+                  : status.label}
               </AlertTitle>
             </Alert>
           </div>

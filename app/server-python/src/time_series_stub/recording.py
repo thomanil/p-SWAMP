@@ -15,18 +15,14 @@ from pswamp_core.messages import DataModel, PmuFrame, PmuHeader
 
 __all__ = ["TiledRecording"]
 
-#: A header is a point-in-time record: its coverage is one microsecond wide.
-_HEADER_WIDTH = timedelta(microseconds=1)
-
 
 @dataclass(frozen=True)
 class TiledRecording:
-    """The sample file's header once, and its frames repeated ``repeat`` times
-    back to back, each copy shifted by the recording's span so the timeline is
-    continuous at the recording's own rate.
+    """The sample file's frames repeated ``repeat`` times back to back, each
+    copy shifted by the recording's span so the timeline is continuous at the
+    recording's own rate. Every frame carries the recording's layout.
 
-    Serves two models by topic string: ``pmu.header`` (the one header) and
-    ``pmu.frame`` (the frames). Anything else is unknown.
+    Serves one model by topic string: ``pmu.frame``. Anything else is unknown.
     """
 
     header: PmuHeader
@@ -51,12 +47,10 @@ class TiledRecording:
         return timedelta(seconds=1.0 / self.header.data_rate)
 
     def knows(self, topic: str) -> bool:
-        return topic in (PmuHeader.topic, PmuFrame.topic)
+        return topic == PmuFrame.topic
 
     def coverage(self, topic: str) -> tuple[datetime, datetime] | None:
         """``(start, exclusive end)`` of what is held for ``topic``; ``None`` if unknown."""
-        if topic == PmuHeader.topic:
-            return self.header.timestamp, self.header.timestamp + _HEADER_WIDTH
         if topic == PmuFrame.topic:
             return self.frames[0].timestamp, self.frames[-1].timestamp + self.frame_interval
         return None
@@ -70,9 +64,7 @@ class TiledRecording:
     ) -> list[DataModel]:
         """The records of ``topic`` in ``[start, end)``, in time order."""
         records: Sequence[DataModel]
-        if topic == PmuHeader.topic:
-            records = (self.header,)
-        elif topic == PmuFrame.topic:
+        if topic == PmuFrame.topic:
             records = self.frames
         else:
             raise KeyError(topic)

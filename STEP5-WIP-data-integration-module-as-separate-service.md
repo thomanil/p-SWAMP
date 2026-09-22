@@ -114,6 +114,15 @@ attribute.
 stream, and it would hide the gap. *Rejected:* re-publishing the header on a timer:
 compaction does the job without a heartbeat.
 
+> **Superseded 2026-09-22.** None of §2.3 exists any more. `PmuFrame` now
+> carries its `PmuHeader` inside it, so nothing has to travel ahead of the
+> input: `Module.setup_models`, `publish(..., retained=True)`, the compacted
+> topics, the host's per-key context cache and the stats module's bus listener
+> were all deleted, and a worker that starts late is primed by the first frame
+> it sees. The two rejections above were rejections of ways to get the header
+> to the worker *separately*; embedding it made the question moot. See STEP 4
+> §8.1 #5's resolution note and `messages/pmu.py`.
+
 **2.4 The switch.** One variable per app, `PMU_TEST_STREAMER_MODULE_TRANSPORT`,
 a `name:module.path:ClassName` spec with a `{NAME}_{SETTING}` block -- the provider
 scheme reused (`transport_from_env`). The server's `build_pipeline` and the
@@ -223,7 +232,8 @@ one-frame grace in `state_message`, §7 #7). The rest:
    own `idle_seconds` of silence. They agree by convention (both 300 s), not by a
    message.
 5. **The retained topic grows until compaction runs, and never forgets a key.**
-   A worker that starts late reads every header ever published, for every
+   > *Gone 2026-09-22:* there is no retained topic; see §2.3's note. The original
+   > follows. A worker that starts late reads every header ever published, for every
    client that ever connected, until the log cleaner has compacted; it only
    *remembers* them (a module is built on input, not on a header), so the cost
    is a dict entry per key, but it is unbounded on a busy deployment without a

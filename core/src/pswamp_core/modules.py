@@ -52,18 +52,16 @@ class Module(ABC):
     * ``overflow`` -- what to do when this module falls behind its input;
       ``DROP_OLDEST`` by default, since a module reading a live-rate stream
       should analyse the newest frame rather than an ever-older backlog.
-    * ``setup_models`` -- the message classes ``setup`` reads from the gateway
-      (a ``PmuHeader``, for a module that needs the stream's layout). Empty for
-      a module whose ``setup`` reads nothing. Declared, rather than left implicit
-      in the body of ``setup``, so that a host running the module in *another
-      process* (:mod:`pswamp_core.remote`) knows what to carry across before the
-      first input and can hand ``setup`` a gateway holding exactly that.
+
+    A module that derives something from the stream's layout reads it off the
+    frame in ``process`` (``frame.header``) and re-derives it when the
+    ``header_id`` changes. Its input is all it needs, which is what lets the
+    same module run in another process (:mod:`pswamp_core.remote`).
     """
 
     name: ClassVar[str] = "module"
     input_model: ClassVar[type[DataModel]]
     output_model: ClassVar[type[ResultEnvelope]]
-    setup_models: ClassVar[tuple[type[DataModel], ...]] = ()
     overflow: ClassVar[Overflow] = Overflow.DROP_OLDEST
     maxsize: ClassVar[int] = 64
 
@@ -74,7 +72,7 @@ class Module(ABC):
         self.last_result: ResultEnvelope | None = None
 
     async def setup(self, gateway: DataGateway, bus: Bus) -> None:
-        """Called once before ``run``: read a header, prime a window, and so on."""
+        """Called once before ``run``: keep the gateway, prime a window, and so on."""
         return
 
     @abstractmethod

@@ -335,7 +335,24 @@ is fixed on this branch.
    the first frame that follows them; that is also what lets a live source describe
    itself.
 
-6. **Frame width is never checked against the header.** *Low.* `PmuHeader` validates
+   > **Resolved 2026-09-22, by removing the problem rather than solving it.** The
+   > header is no longer a message: `PmuFrame` carries its `PmuHeader` inside it
+   > (`messages/pmu.py`), so there is no "before the first frame" to arrange, no
+   > separate topic, and no re-send on a layout change -- a changed layout is the
+   > next frame's header, and a module re-derives its column indexes when a
+   > frame's `header_id` (now a computed, cached content hash) differs. The live
+   > provider therefore describes itself, and `stats_module.py` has no `setup`.
+   > STEP 5's retained-header machinery (`setup_models`, `retained=True`,
+   > compacted topics, the host's per-key context) went with it. Measured cost
+   > for the sample: 3.3x the bare frame size before compression and ~1.2x
+   > after, since a broker's batch compression collapses the repeated layout;
+   > the trade-off is written up in the `messages/pmu.py` docstring and in
+   > `doc/server-data-architecture.md`.
+
+6. **Frame width is never checked against the header.** *Low.* > *Resolved
+   2026-09-22:* with the header inside the frame, `PmuFrame` validates that
+   `values` (and `quality`, if given) has one entry per header column. The
+   original note follows. `PmuHeader` validates
    that its four rows align; nothing validates that `PmuFrame.values` has
    `header.n_columns` entries. A short frame raises `IndexError` inside `process`,
    which `Module.run` catches, logs and marks `UNDEFINED`; a long frame is silently

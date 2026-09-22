@@ -14,18 +14,10 @@ without infrastructure.
 What it emits: the sample recording's sixty frames, taken round-robin and
 re-stamped with the current time, at the recording's own ``data_rate`` (20 Hz).
 The line trip therefore comes round every three seconds, which reads
-unmistakably as "not the replay". Every frame carries the recording's
-``header_id``, so the header the sample client serves describes these frames
-exactly, and the stats module and the frame table work on them unchanged.
-
-**It serves no header.** A ``PmuHeader`` is a point-in-time record, and a
-client that can only tail is never asked for a stretch of the past -- the
-planner offers it only from the live hand-off margin on -- so a header it held
-would either be clipped away or tailed for ever. A deployment that names *only*
-this client gets frames without a layout and renders no table; a live source
-describing its own layout is the "headers as bus events" question, still open
-(STEP 4 §8). The composed default in ``api.py`` pairs it with the recording,
-which provides the header.
+unmistakably as "not the replay". Every frame carries the recording's layout
+inside it, as every ``PmuFrame`` does, so this source describes itself: a
+deployment that names *only* this client gets frames with their layout, and
+the stats module and the frame table work on them unchanged.
 
 Imports only ``pswamp_core.datagateway``, ``pswamp_core.messages`` and
 ``pswamp_core.util.time``, plus the sibling ``sample_client`` for the rows.
@@ -130,7 +122,7 @@ class LiveSyntheticClient(DataClient):
                 frame = PmuFrame(
                     timestamp=utcnow(),
                     mRID=LIVE_STREAM_ID,
-                    header_id=source.header_id,
+                    header=source.header,
                     values=list(source.values),
                 )
                 for queue in self._tails:

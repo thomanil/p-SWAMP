@@ -18,27 +18,16 @@ carries the topics between them::
 ``name``, ``input_model`` and ``output_model`` as the class it stands in for, so
 the pipeline's module list reads ``[RemoteModule(FrameStatsModule, transport,
 key)]`` where it read ``[FrameStatsModule()]``, and the socket endpoint that
-subscribes to the result class notices nothing. Its ``setup`` publishes what the
-module's own ``setup`` would have read from the gateway (``setup_models``),
-retained under the pipeline key, so the worker can hand the real ``setup`` the
-same records; its ``run`` drains the input off the local bus onto the topic and
-puts results from the topic back on the bus.
+subscribes to the result class notices nothing. Its ``run`` drains the input
+off the local bus onto the topic and puts results from the topic back on the
+bus. The input is all the worker needs: a ``PmuFrame`` carries its layout.
 
 **``ModuleHost`` runs one module instance per key it sees.** It subscribes to
-the module's input topic across every key and to each ``setup_models`` topic
-(retained, so a worker that starts late still gets the newest header per key).
-The first *input* for a key builds that key's bus, module and forwarder (a
-retained setup record alone is remembered, not acted on: the header topic
-replays every key ever seen); a key that goes quiet for ``idle_seconds`` is
-evicted and rebuilt on its next input. A pipeline keyed per client therefore costs one module instance per
-client on the worker, exactly as it does in-process; a pipeline keyed per
-stream costs one.
-
-Setup records that arrive after ``setup`` ran -- a header a late worker reads
-after its first frame, or a changed layout -- are published on the key's local
-bus, so a module that also listens for them there re-primes itself; that is
-the one thing a module does to be host-independent, and ``FrameStatsModule``
-in the streamer is the example.
+the module's input topic across every key. The first input for a key builds
+that key's bus, module and forwarder; a key that goes quiet for
+``idle_seconds`` is evicted and rebuilt on its next input. A pipeline keyed
+per client therefore costs one module instance per client on the worker,
+exactly as it does in-process; a pipeline keyed per stream costs one.
 
 ``main`` is the body of a worker entrypoint: ``python -m <app>.worker`` reads
 the same transport variable the server reads, serves until SIGINT/SIGTERM, and
@@ -58,7 +47,6 @@ from typing import TYPE_CHECKING, ClassVar
 
 from .bus import InProcessBus, Overflow
 from .datagateway import DataGateway
-from .datagateway.clients import InMemoryClient
 from .log import get_logger
 from .messages import DataModel, ResultEnvelope
 from .modules import Module
@@ -83,7 +71,7 @@ class RemoteModule(Module):
 
     Args:
         module_cls: The module class this stands in for; its ``name``,
-            ``input_model``, ``output_model`` and ``setup_models`` are read.
+            ``input_model`` and ``output_model`` are read.
         transport: The process's shared transport; opened here (idempotently).
         key: The pipeline key every record is published and filtered under.
         overflow, maxsize: The outbox's policy, as for any module.
@@ -104,7 +92,6 @@ class RemoteModule(Module):
         self.name = module_cls.name
         self.input_model = module_cls.input_model  # type: ignore[misc]
         self.output_model = module_cls.output_model  # type: ignore[misc]
-        self.setup_models = module_cls.setup_models  # type: ignore[misc]
         self.overflow = overflow  # type: ignore[misc]
         self.maxsize = maxsize  # type: ignore[misc]
         super().__init__()
@@ -122,15 +109,11 @@ class RemoteModule(Module):
         }
 
     async def setup(self, gateway: DataGateway, bus: Bus) -> None:
-        """Open the transport and send ahead what the module's ``setup`` reads."""
+        """Open the transport."""
         await self.transport.open()
-        for cls in self.setup_models:
-            async for record in gateway.consume(cls):
-                await self.transport.publish(record, self.key, retained=True)
         logger.info(
-            "%s@%s: input %s and %s out, %s back, over %s",
-            self.name, self.key, self.input_model.topic,
-            [cls.topic for cls in self.setup_models], self.output_model.topic, self.transport.name,
+            "%s@%s: %s out, %s back, over %s",
+            self.name, self.key, self.input_model.topic, self.output_model.topic, self.transport.name,
         )
 
     async def process(self, message: DataModel) -> None:
@@ -180,7 +163,6 @@ class _Slot:
         self.key = key
         self.bus = InProcessBus()
         self.module: Module | None = None
-        self.context: dict[type[DataModel], DataModel] = {}
         self.tasks: list[asyncio.Task] = []
         self.seen = time.monotonic()
         self.started = False
@@ -220,12 +202,7 @@ class ModuleHost:
         self.name = template.name
         self.input_model = template.input_model
         self.output_model = template.output_model
-        self.setup_models = tuple(template.setup_models)
         self._slots: dict[str, _Slot] = {}
-        # Setup records per key, kept whether or not that key has a module: a
-        # retained topic replays every key ever seen, and a header alone is no
-        # reason to build a module -- the first input is.
-        self._contexts: dict[str, dict[type[DataModel], DataModel]] = {}
         self.forwarded = 0
 
     def keys(self) -> list[str]:
@@ -235,14 +212,13 @@ class ModuleHost:
     async def serve(self) -> None:
         """Consume the topics and run modules until cancelled."""
         await self.transport.open()
-        tasks = [asyncio.create_task(self._inputs(), name=f"{self.name}.host.inputs")]
-        for cls in self.setup_models:
-            tasks.append(asyncio.create_task(self._context(cls), name=f"{self.name}.host.{cls.topic}"))
-        tasks.append(asyncio.create_task(self._sweep(), name=f"{self.name}.host.sweep"))
+        tasks = [
+            asyncio.create_task(self._inputs(), name=f"{self.name}.host.inputs"),
+            asyncio.create_task(self._sweep(), name=f"{self.name}.host.sweep"),
+        ]
         logger.info(
-            "hosting %s: %s in, %s out, setup from %s, over %s",
-            self.name, self.input_model.topic, self.output_model.topic,
-            [cls.topic for cls in self.setup_models], self.transport.name,
+            "hosting %s: %s in, %s out, over %s",
+            self.name, self.input_model.topic, self.output_model.topic, self.transport.name,
         )
         try:
             await asyncio.gather(*tasks)
@@ -264,34 +240,21 @@ class ModuleHost:
                 slot.seen = time.monotonic()
                 slot.publish(message)
 
-    async def _context(self, cls: type[DataModel]) -> None:
-        with self.transport.subscribe(cls, retained=True) as records:
-            async for key, record in records:
-                self._contexts.setdefault(key, {})[type(record)] = record
-                slot = self._slots.get(key)
-                if slot is not None:
-                    slot.context[type(record)] = record
-                    if slot.started:
-                        slot.bus.publish(record)
-
     def _slot(self, key: str) -> _Slot:
         """This key's module, built on its first input."""
         slot = self._slots.get(key)
         if slot is None:
             slot = _Slot(key)
-            slot.context.update(self._contexts.get(key, {}))
             self._slots[key] = slot
             slot.tasks.append(asyncio.create_task(self._start(slot), name=f"{self.name}@{key}.start"))
         return slot
 
     async def _start(self, slot: _Slot) -> None:
         module = self._factory()
-        # What the module's setup reads: the records carried across so far.
-        client = InMemoryClient(
-            "context", self.setup_models or [DataModel], records=list(slot.context.values())
-        )
         slot.bus.bind(asyncio.get_running_loop())
-        await module.setup(DataGateway([client]), slot.bus)
+        # An empty gateway: a hosted module has no providers of its own; its
+        # input carries what it works on.
+        await module.setup(DataGateway([]), slot.bus)
         slot.module = module
         slot.tasks += [
             asyncio.create_task(module.run(slot.bus), name=f"{self.name}@{slot.key}.run"),
@@ -301,11 +264,7 @@ class ModuleHost:
         # subscriptions before anything is published to them.
         await asyncio.sleep(0)
         slot.started = True
-        # Anything that arrived while setup ran goes on the bus: the setup
-        # records first, so a module that listens for them applies the newest,
-        # then the input that was waiting.
-        for record in slot.context.values():
-            slot.bus.publish(record)
+        # Anything that arrived while setup ran goes on the bus now.
         while slot.pending:
             slot.bus.publish(slot.pending.popleft())
         logger.info("%s: module started for key %s (%d live)", self.name, slot.key, len(self._slots))

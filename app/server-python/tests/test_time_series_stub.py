@@ -12,8 +12,8 @@ from datetime import timedelta
 import httpx
 import pytest
 
-from pmu_test_streamer.sample_client import EPOCH, STREAM_ID, load_sample
-from pswamp_core.messages import PmuFrame, PmuHeader, TimeSeriesQuery, TimeSeriesResult
+from pmu_test_streamer.sample_client import STREAM_ID, load_sample
+from pswamp_core.messages import PmuFrame, TimeSeriesQuery, TimeSeriesResult
 from time_series_stub.app import create_app
 from time_series_stub.recording import TiledRecording
 from time_series_stub.service import QueryService
@@ -41,7 +41,7 @@ def test_tiling_repeats_the_sample_back_to_back():
     stamps = [f.timestamp for f in tiled.frames]
     assert stamps == sorted(stamps) and len(set(stamps)) == 180
     assert tiled.frames[60].timestamp == sample.frames[0].timestamp + timedelta(seconds=3.0)
-    assert tiled.coverage(PmuHeader.topic) == (EPOCH, EPOCH + timedelta(microseconds=1))
+    assert tiled.coverage("pmu.header") is None  # no separate header: it rides in every frame
     assert tiled.coverage("nope") is None
     with pytest.raises(ValueError):
         TiledRecording.load(repeat=0)
@@ -54,7 +54,7 @@ def test_select_is_half_open_and_filters_by_mrid():
     assert len(rows) == 20 and all(t0 + timedelta(seconds=1) <= r.timestamp < t0 + timedelta(seconds=2) for r in rows)
     assert tiled.select(PmuFrame.topic, None, None, mrid=["someone-else"]) == []
     assert len(tiled.select(PmuFrame.topic, None, None, mrid=[STREAM_ID])) == 120
-    assert tiled.select(PmuHeader.topic, None, None) == [tiled.header]
+    assert all(row.header == tiled.header for row in rows)
     with pytest.raises(KeyError):
         tiled.select("nope", None, None)
 

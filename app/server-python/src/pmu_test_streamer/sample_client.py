@@ -7,8 +7,8 @@ This is a **provider written outside the core** on purpose. It imports
 ``pswamp_core.datagateway`` and ``pswamp_core.messages`` and nothing else, which
 is exactly what a TSO's own provider would do (STEP 1 A8): implement
 ``DataClient``, declare what it can do (``HISTORY_CONSUME`` -- a file cannot
-tail live data), answer ``coverage`` exactly, and stream ``PmuHeader`` and
-``PmuFrame`` for any time window. The conformance suite in
+tail live data), answer ``coverage`` exactly, and stream ``PmuFrame`` for any
+time window. The conformance suite in
 ``tests/test_pmu_test_streamer.py`` is what proves it.
 
 ``sample_data.txt`` is a one-off sample committed for testing: 300 lines of
@@ -19,8 +19,8 @@ stations at 20 Hz, one line per station per instant::
 
 Where the old streamer replayed the *lines* verbatim, this parses them once into
 the core's wire shape: one ``PmuHeader`` (five stations × three columns:
-``V_Magnitude`` in kV, ``V_Angle`` in degrees, ``f`` in Hz) and sixty
-``PmuFrame``s, each one instant of all fifteen values. Timestamps are the file's
+``V_Magnitude`` in kV, ``V_Angle`` in degrees, ``f`` in Hz), carried inside each
+of sixty ``PmuFrame``s, one instant of all fifteen values. Timestamps are the file's
 relative ``t`` anchored at a fixed UTC epoch, so the recording sits at a known
 place on the time axis and every replay of it is addressable by time.
 
@@ -57,7 +57,7 @@ DEFAULT_PATH = Path(__file__).parent / "sample_data.txt"
 #: Where the recording's ``t = 0`` sits on the time axis.
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
-#: The stream identity every header and frame carries as ``mRID``.
+#: The stream identity every frame carries as ``mRID``.
 STREAM_ID = "n44-sample"
 
 _LINE = re.compile(
@@ -72,7 +72,7 @@ _UNITS = ("kV", "deg", "Hz")
 
 @dataclass(frozen=True)
 class SampleRecording:
-    """The parsed file: one header and its frames, in time order."""
+    """The parsed file: its frames in time order, and the layout they share."""
 
     path: Path
     header: PmuHeader
@@ -115,9 +115,7 @@ def load_sample(path: Path = DEFAULT_PATH) -> SampleRecording:
     data_rate = 1.0 / statistics.median(deltas) if deltas else 1.0
 
     names = list(stations)
-    header = PmuHeader.build(
-        timestamp=EPOCH,
-        mRID=STREAM_ID,
+    header = PmuHeader(
         station=[name for name in names for _ in _MEASUREMENTS],
         channel=[channel for _ in names for channel in _CHANNELS],
         measurement=[m for _ in names for m in _MEASUREMENTS],
@@ -135,7 +133,7 @@ def load_sample(path: Path = DEFAULT_PATH) -> SampleRecording:
             PmuFrame(
                 timestamp=EPOCH + timedelta(seconds=t),
                 mRID=STREAM_ID,
-                header_id=header.header_id,
+                header=header,
                 values=values,
             )
         )
@@ -164,7 +162,7 @@ class SampleRecordingClient(DataClient):
     def __init__(self, name: str = "sample", path: Path | str = DEFAULT_PATH, *, priority: int = 0):
         self.name = name
         self.capabilities = Capability.HISTORY_CONSUME
-        self.supported_models = {PmuHeader, PmuFrame}
+        self.supported_models = {PmuFrame}
         self.priority = priority
         self.recording = load_sample(Path(path))
 
@@ -179,9 +177,6 @@ class SampleRecordingClient(DataClient):
     async def coverage(self, model: type[DataModel], mRID: MRIDFilter = None) -> Coverage | None:
         if not self.supports(model) or not self._wanted(mRID):
             return None
-        if issubclass(model, PmuHeader):
-            header = self.recording.header
-            return Coverage(TimeRange(header.timestamp, header.timestamp + timedelta(microseconds=1)))
         return Coverage(self.recording.coverage)
 
     async def consume(
@@ -190,16 +185,9 @@ class SampleRecordingClient(DataClient):
         time_range: TimeRange,
         mRID: MRIDFilter = None,
     ) -> AsyncIterator[DataModel]:
-        if not self._wanted(mRID):
+        if not issubclass(model, PmuFrame) or not self._wanted(mRID):
             return
-        records: tuple[DataModel, ...]
-        if issubclass(model, PmuHeader):
-            records = (self.recording.header,)
-        elif issubclass(model, PmuFrame):
-            records = self.recording.frames
-        else:
-            return
-        for record in records:
+        for record in self.recording.frames:
             if time_range.end is not None and record.timestamp >= time_range.end:
                 return
             if time_range.contains(record.timestamp):
