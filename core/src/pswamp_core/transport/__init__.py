@@ -54,6 +54,7 @@ import asyncio
 import contextlib
 import importlib
 import os
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -61,6 +62,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ..bus import Overflow, Subscription
 from ..datagateway.config import EnvSetting, MissingSettingError, format_settings, read_setting
 from ..log import get_logger
+from ..messages.data_model import stamp_sent_at
 
 if TYPE_CHECKING:
     from ..messages.data_model import DataModel
@@ -278,6 +280,7 @@ class InMemoryTransport(Transport):
 
     async def publish(self, message: DataModel, key: str) -> None:
         self.published += 1
+        stamp_sent_at(message, time.time())
         self._deliver(key, message)
 
     def _ensure_feed(self, model: type[DataModel]) -> None:

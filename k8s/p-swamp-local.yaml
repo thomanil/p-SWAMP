@@ -13,8 +13,9 @@
 # The volumes below are a read-only ConfigMap (configuration, not storage) and
 # the broker's emptyDir (scratch that dies with its pod, on purpose).
 #
-# Four Deployments: the server; the PMU test streamer's stats module as its
+# Five Deployments: the server; the PMU test streamer's stats module as its
 # own pod (p-swamp-stats-worker, the same image with a different command); the
+# Islanding stream's module likewise (p-swamp-islanding-worker); the
 # dummy remote data service the Time Series Explorer queries
 # (p-swamp-remote-data-stub, the same image again, with a Service since the
 # server calls it over HTTP);
@@ -100,6 +101,17 @@ spec:
               value: kafka:pswamp_core.transport.kafka:KafkaTransport
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: p-swamp-kafka:9092
+            # The Islanding stream's module runs in the
+            # p-swamp-islanding-worker pod, over a transport of its own name
+            # whose topics carry a prefix (islanding-stream.pmu.frame, ...):
+            # otherwise it and the stats-worker would both tail pmu.frame,
+            # keyed by the same client ids, and run over each other's frames.
+            - name: ISLANDING_STREAM_MODULE_TRANSPORT
+              value: islanding:pswamp_core.transport.kafka:KafkaTransport
+            - name: ISLANDING_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
+            - name: ISLANDING_TOPIC_PREFIX
+              value: islanding-stream
             # The Time Series Explorer's provider is the Remote Data Client:
             # it POSTs range queries to REMOTE_DATA_URL (the
             # p-swamp-remote-data-stub Service below) and reads the answers off
@@ -237,6 +249,58 @@ spec:
               cpu: "1"
               # The same import graph as the server but no replay pipeline:
               # one module per client key, one consumer per topic.
+              memory: "512Mi"
+---
+# The islanding module as its own pod (src/islanding_stream/worker.py): the
+# stats-worker's twin for the Islanding stream page, with its own transport
+# name and topic prefix (see the server's env). It runs p-SWAMP's islanding
+# detector once per client key over the N44 recording's 700-channel frames;
+# the page's speed control is what loads it, and when it cannot keep up it
+# says so on error.event, which reaches that client's error tray. One replica
+# for the same reason as the stats-worker.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp-islanding-worker
+  labels:
+    app: p-swamp-islanding-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp-islanding-worker
+  template:
+    metadata:
+      labels:
+        app: p-swamp-islanding-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: islanding-worker
+          image: p-swamp:latest
+          imagePullPolicy: Never
+          command: ["python", "-m", "islanding_stream.worker"]
+          env:
+            - name: ISLANDING_STREAM_MODULE_TRANSPORT
+              value: islanding:pswamp_core.transport.kafka:KafkaTransport
+            - name: ISLANDING_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
+            - name: ISLANDING_TOPIC_PREFIX
+              value: islanding-stream
+          # No probes, as for the stats-worker.
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              # Decoding 700-column frames at speed is the load this pod is
+              # here to show; a full core lets it find its own ceiling.
+              cpu: "1"
+              # One 10 s window of 44 frequencies per client key: small.
               memory: "512Mi"
 ---
 # The dummy remote data service the explorer queries: the same image with a
@@ -386,6 +450,12 @@ spec:
               value: "false"
             - name: KAFKA_LOG_DIRS
               value: /var/lib/kafka/data
+            # Retention is set per topic by the transport (a minute), but the
+            # broker enforces it only on this interval -- five minutes by
+            # default, long enough for a fast replay to fill the node's disk
+            # through the emptyDir. See the same setting in docker-compose.yml.
+            - name: KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS
+              value: "10000"
             - name: KAFKA_HEAP_OPTS
               value: -Xmx512m -Xms256m
           ports:

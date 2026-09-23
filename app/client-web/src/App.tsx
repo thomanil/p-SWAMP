@@ -12,6 +12,7 @@ import { PmuTestStreamerPage } from '@/pages/pmu-test-streamer/PmuTestStreamerPa
 import { ReferenceSubappPage } from '@/pages/reference-subapp/ReferenceSubappPage'
 import { FrequencyPeekPage } from '@/pages/frequency-peek/FrequencyPeekPage'
 import { TimeSeriesExplorerPage } from '@/pages/time-series-explorer/TimeSeriesExplorerPage'
+import { IslandingStreamPage } from '@/pages/islanding-stream/IslandingStreamPage'
 
 /**
  * The route table — the one place that knows which apps this client hosts.
@@ -62,6 +63,7 @@ function App() {
           <Route path="reference-subapp" element={<ReferenceSubappPage />} />
           <Route path="frequency-peek" element={<FrequencyPeekPage />} />
           <Route path="time-series-explorer" element={<TimeSeriesExplorerPage />} />
+          <Route path="islanding-stream" element={<IslandingStreamPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

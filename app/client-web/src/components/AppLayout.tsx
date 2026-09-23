@@ -25,6 +25,7 @@ const NAV_ITEMS = [
   { to: '/reference-subapp', label: 'Reference example', end: false },
   { to: '/frequency-peek', label: 'Frequency peek', end: false },
   { to: '/time-series-explorer', label: 'Timeseries Db Explorer', end: false },
+  { to: '/islanding-stream', label: 'Islanding stream', end: false },
 ]
 
 function isLocalhost(): boolean {

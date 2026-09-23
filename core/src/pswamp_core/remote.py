@@ -29,6 +29,16 @@ that key's bus, module and forwarder; a key that goes quiet for
 per client therefore costs one module instance per client on the worker,
 exactly as it does in-process; a pipeline keyed per stream costs one.
 
+**Errors cross back too.** Whatever the hosted module publishes as an
+``ErrorEvent`` -- a ``process`` that raised, a keep-up report
+(:class:`~pswamp_core.modules.KeepUpMonitor`) -- the host sends on the error
+topic under the slot's key, and the ``RemoteModule`` for that key and module
+puts it on its pipeline's bus, where the page's error tray picks it up exactly
+as it would from a module running in-process. Both sides also watch their own
+queues: the ``RemoteModule`` reports when it cannot publish its input as fast
+as the pipeline produces it, and the host when its one shared input feed drops
+records before any module has seen them.
+
 ``main`` is the body of a worker entrypoint: ``python -m <app>.worker`` reads
 the same transport variable the server reads, serves until SIGINT/SIGTERM, and
 exits 2 with a usage message when the variable is unset.
@@ -48,8 +58,8 @@ from typing import TYPE_CHECKING, ClassVar
 from .bus import InProcessBus, Overflow
 from .datagateway import DataGateway
 from .log import get_logger
-from .messages import DataModel, ResultEnvelope
-from .modules import Module
+from .messages import DataModel, ErrorEvent, ResultEnvelope
+from .modules import KeepUp, KeepUpMonitor, Module
 from .transport import Transport, transport_from_env
 
 if TYPE_CHECKING:
@@ -107,6 +117,15 @@ class RemoteModule(Module):
             "input": self.input_model.topic,
             "output": self.output_model.topic,
         }
+        # This side's own falling behind: frames the pipeline produces faster
+        # than they can be published. Reported under the module's name.
+        self.monitor = KeepUpMonitor(
+            self.name,
+            f"cannot publish {self.input_model.topic} as fast as the pipeline produces it",
+            module_cls.keep_up,
+            label=f"the server-side publisher for {self.name}",
+        )
+        self.errors_received = 0
 
     async def setup(self, gateway: DataGateway, bus: Bus) -> None:
         """Open the transport."""
@@ -123,6 +142,7 @@ class RemoteModule(Module):
         tasks = [
             asyncio.create_task(self._outbox(bus), name=f"{self.name}@{self.key}.out"),
             asyncio.create_task(self._inbox(bus), name=f"{self.name}@{self.key}.in"),
+            asyncio.create_task(self._errors(bus), name=f"{self.name}@{self.key}.errors"),
         ]
         try:
             await asyncio.gather(*tasks)
@@ -136,6 +156,7 @@ class RemoteModule(Module):
     async def _outbox(self, bus: Bus) -> None:
         with bus.subscribe(self.input_model, overflow=self.overflow, maxsize=self.maxsize) as inputs:
             async for message in inputs:
+                self.monitor.observe(inputs, message, bus)
                 try:
                     await self.transport.publish(message, self.key)
                 except Exception as exc:
@@ -154,6 +175,20 @@ class RemoteModule(Module):
                 self.received += 1
                 self.last_result = result  # type: ignore[assignment]
                 bus.publish(result)
+
+    async def _errors(self, bus: Bus) -> None:
+        """The hosted module's ``ErrorEvent``s for this key, onto the pipeline's bus.
+
+        Filtered on ``source``: the error topic is shared by every hosted
+        module, and a pipeline with two remote modules must not hear each
+        other's errors twice.
+        """
+        with self.transport.subscribe(ErrorEvent, self.key) as errors:
+            async for _key, error in errors:
+                if error.source != self.name:
+                    continue
+                self.errors_received += 1
+                bus.publish(error)
 
 
 class _Slot:
@@ -176,6 +211,17 @@ class _Slot:
             self.bus.publish(message)
         else:
             self.pending.append(message)
+
+
+class _EverySlot:
+    """A bus-shaped fan-out to every live slot, for a report that belongs to all."""
+
+    def __init__(self, slots: dict[str, _Slot]) -> None:
+        self._slots = slots
+
+    def publish(self, message: DataModel) -> None:
+        for slot in list(self._slots.values()):
+            slot.publish(message)
 
 
 class ModuleHost:
@@ -202,6 +248,7 @@ class ModuleHost:
         self.name = template.name
         self.input_model = template.input_model
         self.output_model = template.output_model
+        self._template_keep_up = template.keep_up
         self._slots: dict[str, _Slot] = {}
         self.forwarded = 0
 
@@ -234,11 +281,23 @@ class ModuleHost:
     # --- the topics ----------------------------------------------------------------
 
     async def _inputs(self) -> None:
+        # The shared feed can drop records before any slot sees them (every key
+        # comes through this one queue). Which key lost them is unknown, so a
+        # report goes to every live one. Age is each module's own to judge.
+        policy = self._template_keep_up
+        monitor = KeepUpMonitor(
+            self.name,
+            f"is not keeping up with {self.input_model.topic}: its shared input feed is dropping records",
+            None if policy is None else KeepUp(max_input_age_s=float("inf"), report_every_s=policy.report_every_s),
+            label=f"the {self.name} worker",
+        )
+        every_slot = _EverySlot(self._slots)
         with self.transport.subscribe(self.input_model) as inputs:
             async for key, message in inputs:
                 slot = self._slot(key)
                 slot.seen = time.monotonic()
                 slot.publish(message)
+                monitor.observe(inputs, message, every_slot)  # type: ignore[arg-type]
 
     def _slot(self, key: str) -> _Slot:
         """This key's module, built on its first input."""
@@ -270,7 +329,10 @@ class ModuleHost:
         logger.info("%s: module started for key %s (%d live)", self.name, slot.key, len(self._slots))
 
     async def _forward(self, slot: _Slot) -> None:
-        with slot.bus.subscribe(self.output_model, overflow=Overflow.DROP_OLDEST, maxsize=64) as results:
+        # Results, and the module's ErrorEvents: both go back under the key.
+        with slot.bus.subscribe(
+            self.output_model, ErrorEvent, overflow=Overflow.DROP_OLDEST, maxsize=64
+        ) as results:
             async for result in results:
                 try:
                     await self.transport.publish(result, slot.key)

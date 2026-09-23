@@ -957,6 +957,209 @@
         "title": "IslandingState",
         "type": "object"
       },
+      "IslandingStreamResult": {
+        "description": "The module's envelope; its class name is its topic: ``islanding.stream.result``.",
+        "properties": {
+          "app": {
+            "$ref": "#/components/schemas/AppIdentity"
+          },
+          "mRID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mrid"
+          },
+          "parameters": {
+            "additionalProperties": true,
+            "description": "The module's settings, for the record.",
+            "title": "Parameters",
+            "type": "object"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Set when this result answers a Command.",
+            "title": "Request Id"
+          },
+          "result": {
+            "$ref": "#/components/schemas/Islands"
+          },
+          "timestamp": {
+            "description": "The instant the result is about.",
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "version": {
+            "const": "v1",
+            "default": "v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "app",
+          "result"
+        ],
+        "title": "IslandingStreamResult",
+        "type": "object"
+      },
+      "IslandingStreamState": {
+        "description": "The one message pushed on connect, on every result or player change, and\non a slow tick for the throughput readings.\n\nA declared model, because this IS the downstream half of the published\ncontract: api_contract.py collects it via this package's WS_MESSAGE export.",
+        "properties": {
+          "duration_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How long the recording is.",
+            "title": "Duration S"
+          },
+          "offset_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Seconds into the recording at the cursor.",
+            "title": "Offset S"
+          },
+          "player": {
+            "$ref": "#/components/schemas/PlayerStatus",
+            "description": "Where the replay is, and how fast it is asked to go."
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IslandingStreamResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The islanding module's latest result; null until the first 10 s window fills."
+          },
+          "throughput": {
+            "$ref": "#/components/schemas/Throughput"
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "player",
+          "offset_s",
+          "duration_s",
+          "result",
+          "throughput"
+        ],
+        "title": "IslandingStreamState",
+        "type": "object"
+      },
+      "Islands": {
+        "description": "What one evaluation found, and how the module was keeping up when it did.",
+        "properties": {
+          "detect_ms": {
+            "description": "Wall-clock milliseconds this evaluation took.",
+            "title": "Detect Ms",
+            "type": "number"
+          },
+          "frames_in": {
+            "description": "Frames processed since the previous result.",
+            "title": "Frames In",
+            "type": "integer"
+          },
+          "input_age_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How long the last input had been in flight when it was read; null in-process.",
+            "title": "Input Age S"
+          },
+          "input_dropped": {
+            "description": "Input dropped by this module's queue so far.",
+            "title": "Input Dropped",
+            "type": "integer"
+          },
+          "islands": {
+            "description": "Each separated group's stations, largest first; the main system is not listed.",
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": "Islands",
+            "type": "array"
+          },
+          "main_system": {
+            "description": "How many stations are still in the main system.",
+            "title": "Main System",
+            "type": "integer"
+          },
+          "stations": {
+            "description": "How many stations the window holds a frequency for.",
+            "title": "Stations",
+            "type": "integer"
+          },
+          "status": {
+            "description": "Emergency while any group of stations has separated from the main system.",
+            "enum": [
+              "OK",
+              "Emergency"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "window_s": {
+            "description": "Seconds of frequency history the detector looked at.",
+            "title": "Window S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "status",
+          "islands",
+          "main_system",
+          "stations",
+          "window_s",
+          "frames_in",
+          "detect_ms",
+          "input_age_s",
+          "input_dropped"
+        ],
+        "title": "Islands",
+        "type": "object"
+      },
       "LineOutageEvent": {
         "description": "One branch changing connection state, as the detector reports it.\n\n``stations`` and ``measurements`` come straight from the time window's\nheader for the channels that flipped, so a single physical line trip\nnormally appears with the station at each end -- the current on that branch\ngoes to zero as seen from both.",
         "properties": {
@@ -1763,20 +1966,74 @@
         "title": "SeekBody",
         "type": "object"
       },
-      "SpeedBody": {
+      "Throughput": {
+        "description": "How the pipeline is coping, from this server's side of the hop.",
         "properties": {
-          "speed": {
-            "description": "Replay speed multiplier; 1 is real time.",
-            "exclusiveMinimum": 0.0,
-            "maximum": 10.0,
-            "title": "Speed",
+          "effective_speed": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Seconds of recording replayed per wall-clock second, recently; null while paused.",
+            "title": "Effective Speed"
+          },
+          "frames_per_s": {
+            "description": "Frames the player emitted per wall-clock second, recently.",
+            "title": "Frames Per S",
             "type": "number"
+          },
+          "module_runs": {
+            "description": "Where the islanding module runs.",
+            "enum": [
+              "in-process",
+              "worker"
+            ],
+            "title": "Module Runs",
+            "type": "string"
+          },
+          "publish_failed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Frames the transport refused to publish (broker down, timeout); null in-process.",
+            "title": "Publish Failed"
+          },
+          "published": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Frames published to the module's topic; null in-process.",
+            "title": "Published"
+          },
+          "queue_dropped": {
+            "description": "Frames this server dropped for falling behind: from the module's queue in-process, from the queue in front of the publisher when the module runs in the worker. The worker's own drops are in the result's input_dropped.",
+            "title": "Queue Dropped",
+            "type": "integer"
           }
         },
         "required": [
-          "speed"
+          "module_runs",
+          "frames_per_s",
+          "effective_speed",
+          "published",
+          "publish_failed",
+          "queue_dropped"
         ],
-        "title": "SpeedBody",
+        "title": "Throughput",
         "type": "object"
       },
       "TimeSeriesExplorerState": {
@@ -1963,6 +2220,38 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "islanding_stream__api__SpeedBody": {
+        "properties": {
+          "speed": {
+            "description": "Replay speed multiplier; 1 is real time (50 frames/s).",
+            "exclusiveMinimum": 0.0,
+            "maximum": 50.0,
+            "title": "Speed",
+            "type": "number"
+          }
+        },
+        "required": [
+          "speed"
+        ],
+        "title": "SpeedBody",
+        "type": "object"
+      },
+      "pmu_test_streamer__api__SpeedBody": {
+        "properties": {
+          "speed": {
+            "description": "Replay speed multiplier; 1 is real time.",
+            "exclusiveMinimum": 0.0,
+            "maximum": 10.0,
+            "title": "Speed",
+            "type": "number"
+          }
+        },
+        "required": [
+          "speed"
+        ],
+        "title": "SpeedBody",
+        "type": "object"
       }
     }
   },
@@ -1992,6 +2281,154 @@
         "summary": "Grid Model",
         "tags": [
           "grid"
+        ]
+      }
+    },
+    "/api/islanding-stream/playback/play": {
+      "post": {
+        "description": "Resume this client's replay.",
+        "operationId": "islanding_stream_play",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Play",
+        "tags": [
+          "islanding-stream"
+        ]
+      }
+    },
+    "/api/islanding-stream/playback/speed": {
+      "post": {
+        "description": "Change the replay speed: the load on the module and its topic.",
+        "operationId": "islanding_stream_speed",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/islanding_stream__api__SpeedBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Speed",
+        "tags": [
+          "islanding-stream"
+        ]
+      }
+    },
+    "/api/islanding-stream/playback/stop": {
+      "post": {
+        "description": "Pause this client's replay where it is.",
+        "operationId": "islanding_stream_stop",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop",
+        "tags": [
+          "islanding-stream"
         ]
       }
     },
@@ -2496,7 +2933,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/SpeedBody"
+                "$ref": "#/components/schemas/pmu_test_streamer__api__SpeedBody"
               }
             }
           },
@@ -3075,6 +3512,10 @@
     {
       "description": "Operational errors from any of a client's pipelines, for the layout's error tray.",
       "name": "errors"
+    },
+    {
+      "description": "p-SWAMP's islanding detector as a module over the N44 recording, under load; in-process or as a worker.",
+      "name": "islanding-stream"
     }
   ],
   "x-websocket-channels": [
@@ -3157,6 +3598,14 @@
         "$ref": "#/components/schemas/ErrorNotice"
       },
       "path": "/api/errors/ws"
+    },
+    {
+      "app": "islanding-stream",
+      "direction": "server-to-client",
+      "message": {
+        "$ref": "#/components/schemas/IslandingStreamState"
+      },
+      "path": "/api/islanding-stream/ws"
     }
   ]
 }

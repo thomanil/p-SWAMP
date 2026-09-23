@@ -908,6 +908,45 @@ alarm: grid alarms are a correctly running application's result.
 `modules.py`; `app/server-python/src/errors/`; `hooks/useErrorFeed.ts`,
 `components/ErrorTray.tsx`.
 
+## Keeping up with a topic
+
+*What.* A module that falls behind its input says so on the error topic.
+`Module.run` watches its own input queue with a `KeepUpMonitor`: input the
+`DROP_OLDEST` queue discarded, and, for input that crossed a transport, how
+long it had been in flight when read (the transport stamps each message with
+the broker record's send time, `messages.sent_at()`; not a field, never on the
+wire). Past the module's `keep_up` policy -- by default any drop, or input older
+than 2 s -- it publishes an `ErrorEvent`: once on falling behind, at most every
+5 s while behind, once on catching up. The same check runs on the two queues
+either side of a worker hop: the `RemoteModule`'s outbox in the server ("the
+server-side publisher … cannot publish"), and the `ModuleHost`'s shared input
+feed in the worker. The host now forwards a hosted module's `ErrorEvent`s
+under the pipeline key, and the `RemoteModule` puts the ones for its key and
+module back on its pipeline's bus, so a failure in the worker reaches the same
+tray as one in-process.
+
+*Why.* Dropping stale frames is the right policy for a live stream, and it is
+silent. Under load that silence hides exactly the thing an operator needs to
+know: the results on screen are computed from a fraction of the data, or from
+data seconds old. `/islanding-stream` is where this is exercised: p-SWAMP's
+islanding detector as a module, over the N44 line-trip recording (700
+channels, 50 Hz), with the replay speed as the load knob. Measured there in
+compose, eight clients at real time take about a fifth of a core per side;
+the first limit is the server's one event loop, at ~2000–2400 published
+41 KB frames a second in total (building, serialising and producing each
+frame), while the worker never fell behind. Its topics carry their own prefix
+(`ISLANDING_TOPIC_PREFIX`): two apps with the same input class on one broker
+would otherwise read each other's frames under the same client key. And every
+topic the transport creates has about a minute's retention, enforced every
+10 s by the compose and k8s brokers: the broker's defaults let a fast replay
+fill the disk.
+
+*Where.* `modules.py` (`KeepUp`, `KeepUpMonitor`), `remote.py`,
+`messages/data_model.py` (`sent_at`), the two transports;
+`app/server-python/src/islanding_stream/`; `islanding-worker` in
+`docker-compose.yml` and `k8s/p-swamp-local.yaml`; `core/tests/test_keep_up.py`,
+`app/server-python/tests/test_islanding_stream.py`.
+
 ## What is deliberately not here yet
 
 Absent from this slice, on purpose:
@@ -920,9 +959,12 @@ Absent from this slice, on purpose:
 - `request_id` in the browser-facing acknowledgement; batch jobs beyond the
   explorer's row count;
 - the draft's CSV provider and a broker *as history* (a topic's retention as a
-  time-addressed source; the transport is not one), and the measurements the
-  out-of-process hosting was meant to wait for (frame-to-result latency and
-  broker throughput at the target rates);
+  time-addressed source; the transport is not one);
+- the fixes the first throughput measurements point at: cheaper frames on the
+  server (no re-validation of what a provider built, the header serialised
+  once per layout), producer batching and a pipelined `RemoteModule` outbox,
+  sub-millisecond pacing in the player, keyed partitions, and a per-app topic
+  prefix by default rather than by configuration;
 - paging and backpressure in the Remote Data Client, and models beyond
   `PmuFrame` in it; `Module.run` carrying a `Command` natively (the row-count
   module overrides it);

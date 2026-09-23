@@ -20,7 +20,11 @@ drop-oldest outbox instead of growing an unbounded batch in the producer.
 Topics are created on first use with one partition (the compose and k8s
 brokers have auto-creation off, so a topic exists with the config this
 transport chose and never with a default one; and one partition keeps a
-topic totally ordered, which is what a replay wants). A deployment that partitions a topic keeps ordering
+topic totally ordered, which is what a replay wants) and **bounded
+retention** (:data:`LIVE_TOPIC_CONFIGS`): every topic here is a live hop that
+nobody reads back, and the broker's default -- a week, no size cap -- let one
+client replaying the N44 recording at speed fill a laptop's Docker disk in
+minutes. A deployment that partitions a topic keeps ordering
 per key, which is all a per-key module needs. No consumer group and no
 committed offsets: a feed is a tail, and a process that restarts wants *now*,
 not its backlog.
@@ -38,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..datagateway.config import EnvSetting
 from ..log import get_logger
+from ..messages.data_model import stamp_sent_at
 from . import Transport
 
 if TYPE_CHECKING:
@@ -49,6 +54,25 @@ logger = get_logger("pswamp_core.transport.kafka")
 
 #: A produce to a broker that is down fails in seconds, not aiokafka's 40.
 _PRODUCER_OPTIONS: dict[str, Any] = {"request_timeout_ms": 10_000}
+
+#: What every topic this module creates is created with: a live hop, kept long
+#: enough for a slow or restarting consumer to catch up and no longer. Retention
+#: deletes whole closed segments, so the segment size and age are what make the
+#: two limits bite: at most ~a minute, or ~256 MB plus one 32 MB segment, per
+#: partition, and a deleted segment's files go after a second rather than a
+#: minute. (A 700-channel frame is ~41 KB: 50 Hz is ~2 MB/s per client.)
+#:
+#: The broker enforces all of this only every ``log.retention.check.interval.ms``
+#: -- five minutes by default, which is gigabytes at replay speed -- so the
+#: compose and k8s brokers set that to 10 s. A broker this does not configure
+#: needs the same.
+LIVE_TOPIC_CONFIGS: dict[str, str] = {
+    "retention.ms": "60000",
+    "retention.bytes": str(256 * 1024 * 1024),
+    "segment.ms": "10000",
+    "segment.bytes": str(32 * 1024 * 1024),
+    "file.delete.delay.ms": "1000",
+}
 
 #: Kafka's error code for a topic that already exists, in a CreateTopics response.
 _TOPIC_ALREADY_EXISTS = 36
@@ -187,6 +211,10 @@ class KafkaTransport(Transport):
                 except Exception as error:
                     logger.warning("%s: dropping undecodable record on %s: %s", self.name, topic, error)
                     continue
+                # The record's CreateTime, as the producer stamped it: how long a
+                # message has been in flight is what a lagging consumer reports.
+                if record.timestamp is not None and record.timestamp >= 0:
+                    stamp_sent_at(message, record.timestamp / 1000.0)
                 yield key, message
         finally:
             await _stop_consumer(consumer)
@@ -209,7 +237,8 @@ async def create_topic(
     configs: dict[str, str] | None = None,
     who: str = "kafka",
 ) -> bool:
-    """Create ``topic`` with one partition if the broker lacks it.
+    """Create ``topic`` with one partition, and ``configs`` (by default the
+    bounded :data:`LIVE_TOPIC_CONFIGS`), if the broker lacks it.
 
     ``True`` when the topic exists afterwards (created now, or already there);
     ``False`` when the broker refused, which is logged and left to the produce
@@ -219,6 +248,9 @@ async def create_topic(
     """
     from aiokafka.admin import NewTopic
     from aiokafka.errors import TopicAlreadyExistsError
+
+    if configs is None:
+        configs = LIVE_TOPIC_CONFIGS
 
     try:
         response = await admin.create_topics(
@@ -240,7 +272,7 @@ async def create_topic(
     # (name, error code, message); 0 is created, 36 is "already exists".
     for name, code, message in getattr(response, "topic_errors", []):
         if code == 0:
-            logger.info("%s: created topic %s%s", who, name, " (compacted)" if configs else "")
+            logger.info("%s: created topic %s (%s)", who, name, ", ".join(f"{k}={v}" for k, v in configs.items()))
         elif code != _TOPIC_ALREADY_EXISTS:
             logger.warning("%s: could not create topic %s: %s", who, name, message)
             return False

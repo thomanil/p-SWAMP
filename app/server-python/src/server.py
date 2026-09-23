@@ -38,6 +38,7 @@ import reference_subapp
 import frequency_peek
 import time_series_explorer
 import errors
+import islanding_stream
 import pswamp_web.app_status
 import pswamp_web.grid
 import pswamp_web.islanding
@@ -134,6 +135,11 @@ APPS = [
         "errors",
         errors,
         "Operational errors from any of a client's pipelines, for the layout's error tray.",
+    ),
+    AppEntry(
+        "islanding-stream",
+        islanding_stream,
+        "p-SWAMP's islanding detector as a module over the N44 recording, under load; in-process or as a worker.",
     ),
 ]
 

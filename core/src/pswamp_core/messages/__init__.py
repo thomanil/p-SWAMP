@@ -24,7 +24,7 @@ speaks: ``RemoteDataQuery`` (a range query going up over REST) and
 """
 
 from .control import Command, PlayerStatus, StreamChanged
-from .data_model import DataModel, topic_from_name
+from .data_model import DataModel, sent_at, stamp_sent_at, topic_from_name
 from .errors import ErrorEvent
 from .pmu import PmuFrame, PmuHeader
 from .remote_data import RemoteDataQuery, RemoteDataResult
@@ -44,5 +44,7 @@ __all__ = [
     "RemoteDataResult",
     "ResultEnvelope",
     "StreamChanged",
+    "sent_at",
+    "stamp_sent_at",
     "topic_from_name",
 ]

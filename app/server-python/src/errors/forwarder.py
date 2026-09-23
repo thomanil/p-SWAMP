@@ -26,6 +26,7 @@ class ErrorForwarderModule(Module):
     input_model = ErrorEvent
     output_model = ResultEnvelope  # never published: process returns None
     overflow = Overflow.GROW  # an error is never dropped for being late
+    keep_up = None  # its input is ErrorEvent: reporting itself would feed itself
 
     def __init__(self, client_id: str, app: str, hub: ErrorHub = HUB) -> None:
         super().__init__()

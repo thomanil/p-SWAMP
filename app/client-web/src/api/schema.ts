@@ -25,6 +25,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/islanding-stream/playback/play": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Play
+         * @description Resume this client's replay.
+         */
+        post: operations["islanding_stream_play"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/islanding-stream/playback/speed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Speed
+         * @description Change the replay speed: the load on the module and its topic.
+         */
+        post: operations["islanding_stream_speed"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/islanding-stream/playback/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stop
+         * @description Pause this client's replay where it is.
+         */
+        post: operations["islanding_stream_stop"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/islanding/alarms/{alarm_uuid}/acknowledge": {
         parameters: {
             query?: never;
@@ -962,6 +1022,127 @@ export interface components {
             type: "state";
         };
         /**
+         * IslandingStreamResult
+         * @description The module's envelope; its class name is its topic: ``islanding.stream.result``.
+         */
+        IslandingStreamResult: {
+            app: components["schemas"]["AppIdentity"];
+            /**
+             * Mrid
+             * @default null
+             */
+            mRID: string | null;
+            /**
+             * Parameters
+             * @description The module's settings, for the record.
+             */
+            parameters?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Request Id
+             * @description Set when this result answers a Command.
+             * @default null
+             */
+            request_id: string | null;
+            result: components["schemas"]["Islands"];
+            /**
+             * Timestamp
+             * Format: date-time
+             * @description The instant the result is about.
+             */
+            timestamp: string;
+            /**
+             * Version
+             * @default v1
+             * @constant
+             */
+            version: "v1";
+        };
+        /**
+         * IslandingStreamState
+         * @description The one message pushed on connect, on every result or player change, and
+         *     on a slow tick for the throughput readings.
+         *
+         *     A declared model, because this IS the downstream half of the published
+         *     contract: api_contract.py collects it via this package's WS_MESSAGE export.
+         */
+        IslandingStreamState: {
+            /**
+             * Duration S
+             * @description How long the recording is.
+             */
+            duration_s: number | null;
+            /**
+             * Offset S
+             * @description Seconds into the recording at the cursor.
+             */
+            offset_s: number | null;
+            /** @description Where the replay is, and how fast it is asked to go. */
+            player: components["schemas"]["PlayerStatus"];
+            /** @description The islanding module's latest result; null until the first 10 s window fills. */
+            result: components["schemas"]["IslandingStreamResult"] | null;
+            throughput: components["schemas"]["Throughput"];
+            /**
+             * Type
+             * @default state
+             * @constant
+             */
+            type: "state";
+        };
+        /**
+         * Islands
+         * @description What one evaluation found, and how the module was keeping up when it did.
+         */
+        Islands: {
+            /**
+             * Detect Ms
+             * @description Wall-clock milliseconds this evaluation took.
+             */
+            detect_ms: number;
+            /**
+             * Frames In
+             * @description Frames processed since the previous result.
+             */
+            frames_in: number;
+            /**
+             * Input Age S
+             * @description How long the last input had been in flight when it was read; null in-process.
+             */
+            input_age_s: number | null;
+            /**
+             * Input Dropped
+             * @description Input dropped by this module's queue so far.
+             */
+            input_dropped: number;
+            /**
+             * Islands
+             * @description Each separated group's stations, largest first; the main system is not listed.
+             */
+            islands: string[][];
+            /**
+             * Main System
+             * @description How many stations are still in the main system.
+             */
+            main_system: number;
+            /**
+             * Stations
+             * @description How many stations the window holds a frequency for.
+             */
+            stations: number;
+            /**
+             * Status
+             * @description Emergency while any group of stations has separated from the main system.
+             * @enum {string}
+             */
+            status: "OK" | "Emergency";
+            /**
+             * Window S
+             * @description Seconds of frequency history the detector looked at.
+             */
+            window_s: number;
+        };
+        /**
          * LineOutageEvent
          * @description One branch changing connection state, as the detector reports it.
          *
@@ -1414,13 +1595,42 @@ export interface components {
              */
             offset_s: number;
         };
-        /** SpeedBody */
-        SpeedBody: {
+        /**
+         * Throughput
+         * @description How the pipeline is coping, from this server's side of the hop.
+         */
+        Throughput: {
             /**
-             * Speed
-             * @description Replay speed multiplier; 1 is real time.
+             * Effective Speed
+             * @description Seconds of recording replayed per wall-clock second, recently; null while paused.
              */
-            speed: number;
+            effective_speed: number | null;
+            /**
+             * Frames Per S
+             * @description Frames the player emitted per wall-clock second, recently.
+             */
+            frames_per_s: number;
+            /**
+             * Module Runs
+             * @description Where the islanding module runs.
+             * @enum {string}
+             */
+            module_runs: "in-process" | "worker";
+            /**
+             * Publish Failed
+             * @description Frames the transport refused to publish (broker down, timeout); null in-process.
+             */
+            publish_failed: number | null;
+            /**
+             * Published
+             * @description Frames published to the module's topic; null in-process.
+             */
+            published: number | null;
+            /**
+             * Queue Dropped
+             * @description Frames this server dropped for falling behind: from the module's queue in-process, from the queue in front of the publisher when the module runs in the worker. The worker's own drops are in the result's input_dropped.
+             */
+            queue_dropped: number;
         };
         /**
          * TimeSeriesExplorerState
@@ -1509,6 +1719,22 @@ export interface components {
             /** Error Type */
             type: string;
         };
+        /** SpeedBody */
+        islanding_stream__api__SpeedBody: {
+            /**
+             * Speed
+             * @description Replay speed multiplier; 1 is real time (50 frames/s).
+             */
+            speed: number;
+        };
+        /** SpeedBody */
+        pmu_test_streamer__api__SpeedBody: {
+            /**
+             * Speed
+             * @description Replay speed multiplier; 1 is real time.
+             */
+            speed: number;
+        };
     };
     responses: never;
     parameters: never;
@@ -1534,6 +1760,106 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GridModel"];
+                };
+            };
+        };
+    };
+    islanding_stream_play: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    islanding_stream_speed: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["islanding_stream__api__SpeedBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    islanding_stream_stop: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -1894,7 +2220,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["SpeedBody"];
+                "application/json": components["schemas"]["pmu_test_streamer__api__SpeedBody"];
             };
         };
         responses: {

@@ -26,6 +26,12 @@ What a ``DataModel`` carries, and why:
   with the schema attached. A class may still override it with
   ``topic: ClassVar[str] = "..."``.
 
+And one thing it carries that is *not* a field: when a transport delivered it,
+the wall-clock time the record was sent (:func:`sent_at`). That is transport
+metadata -- it never serialises, never appears in the contract, and is ``None``
+on anything that did not cross a transport -- and it is what lets a module in
+another process tell how far behind its input topic it is running.
+
 Adapted from the draft: the per-message ``branch`` field and its splice into the
 topic name are dropped (STEP 3 §4.1: environments are deployed separately, and
 *whose* stream a topic belongs to is a configured namespace, not something an
@@ -39,11 +45,11 @@ import re
 from datetime import datetime
 from typing import ClassVar
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, PrivateAttr, field_validator
 
 from ..util.time import ensure_utc
 
-__all__ = ["DataModel", "TopicDescriptor", "topic_from_name"]
+__all__ = ["DataModel", "TopicDescriptor", "sent_at", "stamp_sent_at", "topic_from_name"]
 
 # Words of a CamelCase name: runs of capitals that end a word (an acronym),
 # capitalised words, and digit runs -- each becomes one dotted segment.
@@ -80,6 +86,10 @@ class DataModel(BaseModel):
     #: The topic this model is published on. Derived; override with a ``ClassVar[str]``.
     topic: ClassVar[TopicDescriptor] = TopicDescriptor()
 
+    #: When a transport's producer sent this message (epoch seconds), set on
+    #: receipt; ``None`` for a message that never crossed a transport.
+    _sent_at: float | None = PrivateAttr(default=None)
+
     @field_validator("timestamp")
     @classmethod
     def _normalise_timestamp(cls, value: datetime | None) -> datetime | None:
@@ -101,3 +111,19 @@ class DataModel(BaseModel):
             if isinstance(candidate, TopicDescriptor):
                 break
         return topic_from_name(cls.__name__)
+
+
+def sent_at(message: DataModel) -> float | None:
+    """When ``message`` was sent over a transport (epoch seconds), or ``None``.
+
+    Set by the transport that delivered it -- the broker record's own timestamp
+    for Kafka, the publish call for the in-memory transport -- so ``time.time()
+    - sent_at(message)`` is how long the message has been in flight and queued
+    by the time its consumer reads it. Not a field: it never serialises.
+    """
+    return message._sent_at
+
+
+def stamp_sent_at(message: DataModel, when: float) -> None:
+    """Record when ``message`` was sent; for transports, on receipt."""
+    message._sent_at = when

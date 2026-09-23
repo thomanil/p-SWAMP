@@ -93,6 +93,21 @@ which exist to keep the "adding a page" path honest:
   provider is the sample recording, so CI's bare `docker run` exercises the
   page too; compose and k8s switch it to the Remote Data Client with
   `TIME_SERIES_EXPLORER_DATA_CLIENTS` and the `REMOTE_DATA_*` block.
+- **`/islanding-stream` is the load test: a real module, driven hard.**
+  p-SWAMP's islanding detector (`detect_islands`, *copied* from
+  `src/pswamp/monitoring/islanding.py` into `islanding_module.py`) runs as a
+  core module over the grid monitor's N44 line-trip recording, served by its
+  own provider (`n44_client.py`: 44 stations, 700 channels, 50 Hz; every frame
+  ~41 KB). The page's replay speed (1x–50x) is the load knob; it shows the
+  islands (6500/6700/6701 from ~20 s) and a keep-up table, and when any stage
+  falls behind — the module's queue, the server-side publisher, the worker's
+  shared feed — the core's `KeepUpMonitor` reports it on the error tray. With
+  `ISLANDING_STREAM_MODULE_TRANSPORT` set (compose, k8s) the module runs in
+  `islanding-worker` (`python -m islanding_stream.worker`); its transport has
+  **its own name and topic prefix** (`ISLANDING_*`, `islanding-stream.pmu.frame`),
+  and must keep them: the stats-worker tails the unprefixed `pmu.frame` under
+  the same client ids. What broke first, with numbers, is in
+  `STEP7-WIP-data-integration-heavy-module-load-test.md`.
 
 Beside the pages, **the layout owns one socket of its own: the error tray.**
 `src/errors/` is the app package with no pipeline: every app that builds a core
@@ -109,8 +124,12 @@ an explicit ask. (The Nordic 44 grid model *is* a sqlite file, and the replayed
 PMU stream *is* a committed `.npz` — but both are read-only sample data the
 server opens, not storage it writes to. The Kafka broker in compose runs with
 no volume and in `k8s/` on an `emptyDir`, deliberately: everything on its topics
-is a live hop between the server and the stats-worker, and a restart empties it
-at no cost.)
+is a live hop between the server and a worker, and a restart empties it
+at no cost. Ephemeral is not bounded, though: the transport creates every topic
+with about a minute's retention (`LIVE_TOPIC_CONFIGS` in
+`core/src/pswamp_core/transport/kafka.py`) and both brokers set
+`KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS` to 10 s. Without the two, a 50x replay of
+the N44 recording (~80 MB/s) filled the Docker VM's disk in minutes; keep them.)
 
 ## Three Python projects in one repo
 
@@ -206,8 +225,10 @@ module only, a worker container from the same image and the Apache Kafka broker
 it is reached through (`docker-compose.yml`'s `stats-worker` and `kafka`; the
 matching Deployments in `k8s/`), and, for the Time Series Explorer only, the
 dummy remote data service from the same image (`remote-data-stub`) that the
-explorer's provider queries over REST and reads back over that same broker.
-None is a dependency of the server: unset one variable and the module runs
+explorer's provider queries over REST and reads back over that same broker,
+and, for the Islanding stream only, a second worker from the same image
+(`islanding-worker`) on its own prefixed topics.
+None is a dependency of the server: unset one variable and a module runs
 in-process, unset another and the explorer runs over the sample recording,
 which is what CI's e2e job runs.
 
@@ -845,7 +866,8 @@ underlying tech). Start the server first, then the client:
 ```
 ./scripts/start-local-hotloaded-pswamp-server.sh      # state server on 127.0.0.1:8000 (docker compose up --watch --build; streams logs, Ctrl-C stops it)
                                                      # also live-syncs root src/, so desktop-package edits hot-reload too
-                                                     # brings up four containers: kafka, the server, the streamer's stats-worker,
+                                                     # brings up five containers: kafka, the server, the streamer's stats-worker,
+                                                     # the islanding-worker (the Islanding stream's module),
                                                      # and the explorer's remote-data-stub (a dummy remote data service behind the REST + Kafka contract)
 ./scripts/start-local-hotloaded-pswamp-web-client.sh  # Vite/React web client w/ HMR on http://localhost:5173
 ```
@@ -1001,9 +1023,11 @@ automated:
 SMOKETEST_URL=http://host:port ./scripts/e2e-smoke-test.sh # test a server already running; manages no lifecycle
 ```
 
-`error_check.sh` never starts the app; this only starts it. Run both. It brings
-up the compose server (reusing one already running, and only tearing down what it
-started), checks the HTTP surface with curl — `/healthz`, the built client at `/`,
+`error_check.sh` never starts the app; this only starts it. Run both. Without
+`SMOKETEST_URL` it **removes every p-SWAMP container first** — including a
+`start-local-hotloaded-pswamp-server.sh` session you have running — rebuilds,
+and runs `docker compose down` at the end, so restart your dev stack afterwards
+(set `SMOKETEST_URL=http://127.0.0.1:8000` to test the running one instead). It checks the HTTP surface with curl — `/healthz`, the built client at `/`,
 the SPA deep-link fallback, a missing asset still 404ing, `/openapi.json` — and
 then runs the counter flow: connect a socket, POST bumps, assert the pushed
 counts, POST reset, assert zero, and assert a second client id starts at zero —
@@ -1338,12 +1362,13 @@ What has to hold in the `static-errorcheck` job:
   `latest` and the branch tag both move, and neither triggers a k8s rollout on
   its own (the pod spec doesn't change) — the sha tag does.
 - **k8s manifest:** `p-swamp-local.yaml` is local-only (`imagePullPolicy: Never`, image
-  built into minikube). It holds four Deployments — the server, the streamer's
-  `p-swamp-stats-worker` (same image, different command, no Service), the
+  built into minikube). It holds five Deployments — the server, the streamer's
+  `p-swamp-stats-worker` (same image, different command, no Service), its
+  twin `p-swamp-islanding-worker` for the Islanding stream, the
   explorer's `p-swamp-remote-data-stub` (same image again, with a ClusterIP
   Service and `/healthz` probes, since the server calls it over HTTP) and
   `p-swamp-kafka` (the one *pulled* image, so `IfNotPresent`, on an
-  `emptyDir`) — and the start script rolls the first three out after waiting
+  `emptyDir`) — and the start script rolls the first four out after waiting
   for the broker. It is also **the worked example of configuring the PMU
   data sources from outside the image**: its env block spells out
   `PSWAMP_DATA_CLIENTS` and points the live feed's `LIVE_PATH` at
