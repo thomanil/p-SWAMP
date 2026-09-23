@@ -584,11 +584,11 @@ async def test_a_player_over_an_unreachable_source_starts_stopped_with_its_error
     bus.bind(asyncio.get_running_loop())
     from support import measurements
 
-    client = InMemoryClient("tsdb", Measurement, measurements(10), capabilities=HISTORY)
+    client = InMemoryClient("remote_data", Measurement, measurements(10), capabilities=HISTORY)
     original = client.coverage
 
     async def unreachable(model, mRID=None):
-        raise ConnectionError("cannot reach http://tsdb:8100: ConnectError: refused")
+        raise ConnectionError("cannot reach http://remote-data:8100: ConnectError: refused")
 
     client.coverage = unreachable  # type: ignore[method-assign]
     gateway = DataGateway([client])
@@ -600,11 +600,11 @@ async def test_a_player_over_an_unreachable_source_starts_stopped_with_its_error
         try:
             (event,) = await take(errors, 1)
             status = player.status()
-            assert event.source == "tsdb" and event.message == "the provider cannot be reached"
-            assert event.detail == "tsdb: ConnectionError: cannot reach http://tsdb:8100: ConnectError: refused"
+            assert event.source == "remote_data" and event.message == "the provider cannot be reached"
+            assert event.detail == "remote_data: ConnectionError: cannot reach http://remote-data:8100: ConnectError: refused"
             assert status.error == event.detail and status.paused and status.ended
             assert status.coverage_start is None and status.mode == "replay" and not status.can_seek
-            assert gateway.coverage_failures == {"tsdb": "ConnectionError: cannot reach http://tsdb:8100: ConnectError: refused"}
+            assert gateway.coverage_failures == {"remote_data": "ConnectionError: cannot reach http://remote-data:8100: ConnectError: refused"}
             client.coverage = original  # type: ignore[method-assign]
             await player.refresh()
             assert player.status().error is None and player.status().coverage_start == at(0)

@@ -1,16 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""A remote time-series store as a provider: REST queries up, a Kafka topic down.
+"""The Remote Data Client: ask a deployment's own data service for a range, over
+REST up and a Kafka topic down.
 
-The class docstring of :class:`TimeSeriesDatabaseClient` is the contract a
+The class docstring of :class:`RemoteDataClient` is the contract a
 deployment implements against. This module docstring only says where it sits:
 it is the first provider in the core that talks to something *outside the
 process*, and the reference for the shape STEP 1 A5 called "query a chunk is
 request/response" -- the request is an HTTP ``POST``, the response is a run of
 records on a topic, and the two are tied by a ``query_id``.
 
-Requires the ``timeseries`` extra (``pswamp-core[timeseries]``: httpx and
+The name is about the *decoupling*, not the storage. What answers the queries
+is the deployment's business: a time-series database, a historian, an archive
+of files, a cache in front of any of those. p-SWAMP only fixes the handful of
+routes and the envelope on the topic, so a deployment can keep its store, and
+swap it, without a change in this repo.
+
+Requires the ``remote-data`` extra (``pswamp-core[remote-data]``: httpx and
 aiokafka). Both are imported inside the methods that need them, so importing
 this module -- and naming the class in a ``PSWAMP_DATA_CLIENTS`` spec -- costs
 nothing without them, and the two seams (``http_client``, ``feed``) let the
@@ -28,7 +35,7 @@ from uuid import uuid4
 
 from ...log import get_logger
 from ...messages.pmu import PmuFrame
-from ...messages.time_series import TimeSeriesQuery, TimeSeriesResult
+from ...messages.remote_data import RemoteDataQuery, RemoteDataResult
 from ...util.time import ensure_utc
 from ..config import EnvSetting
 from ..data_client_model import Capability, DataClient, MRIDFilter, normalise_mrid_filter
@@ -42,10 +49,10 @@ __all__ = [
     "KafkaResultFeed",
     "ResultFeed",
     "ResultSubscription",
-    "TimeSeriesDatabaseClient",
+    "RemoteDataClient",
 ]
 
-logger = get_logger("pswamp_core.datagateway.clients.time_series_database")
+logger = get_logger("pswamp_core.datagateway.clients.remote_data")
 
 #: How long one HTTP call to the service may take.
 _HTTP_TIMEOUT_S = 10.0
@@ -69,7 +76,7 @@ class ResultSubscription:
     def __init__(self, feed: _DemuxFeed, query_id: str) -> None:
         self.query_id = query_id
         self._feed = feed
-        self.queue: asyncio.Queue[TimeSeriesResult] = asyncio.Queue()
+        self.queue: asyncio.Queue[RemoteDataResult] = asyncio.Queue()
 
     async def __aenter__(self) -> ResultSubscription:
         self._feed._register(self.query_id, self.queue)
@@ -78,7 +85,7 @@ class ResultSubscription:
     async def __aexit__(self, *exc: object) -> None:
         self._feed._unregister(self.query_id)
 
-    async def next(self, timeout: float) -> TimeSeriesResult:
+    async def next(self, timeout: float) -> RemoteDataResult:
         """The next envelope, or ``TimeoutError`` after ``timeout`` seconds."""
         return await asyncio.wait_for(self.queue.get(), timeout)
 
@@ -104,7 +111,7 @@ class _DemuxFeed:
     """The demultiplexing every feed shares: a queue per query id."""
 
     def __init__(self) -> None:
-        self._queues: dict[str, asyncio.Queue[TimeSeriesResult]] = {}
+        self._queues: dict[str, asyncio.Queue[RemoteDataResult]] = {}
         #: Envelopes for a query nobody was waiting on (cancelled, or another
         #: process's), counted so a test can see the drop.
         self.dropped = 0
@@ -115,14 +122,14 @@ class _DemuxFeed:
     def has(self, query_id: str) -> bool:
         return query_id in self._queues
 
-    def dispatch(self, result: TimeSeriesResult) -> None:
+    def dispatch(self, result: RemoteDataResult) -> None:
         queue = self._queues.get(result.query_id)
         if queue is None:
             self.dropped += 1
             return
         queue.put_nowait(result)
 
-    def _register(self, query_id: str, queue: asyncio.Queue[TimeSeriesResult]) -> None:
+    def _register(self, query_id: str, queue: asyncio.Queue[RemoteDataResult]) -> None:
         self._queues[query_id] = queue
 
     def _unregister(self, query_id: str) -> None:
@@ -139,7 +146,7 @@ class InMemoryResultFeed(_DemuxFeed):
     """A feed fed by hand -- or by a service in the same process, which is why
     ``publish`` is a coroutine: it satisfies the stub service's sink protocol."""
 
-    async def publish(self, result: TimeSeriesResult) -> None:
+    async def publish(self, result: RemoteDataResult) -> None:
         self.dispatch(result)
 
 
@@ -161,7 +168,7 @@ class KafkaResultFeed(_DemuxFeed):
         topic: str,
         *,
         replication_factor: int = 1,
-        name: str = "tsdb",
+        name: str = "remote_data",
     ) -> None:
         super().__init__()
         self.bootstrap_servers = (
@@ -217,7 +224,7 @@ class KafkaResultFeed(_DemuxFeed):
         try:
             async for record in consumer:
                 try:
-                    result = TimeSeriesResult.model_validate_json(record.value)
+                    result = RemoteDataResult.model_validate_json(record.value)
                 except Exception as error:
                     logger.warning(
                         "%s: dropping undecodable record on %s: %s", self.name, self.topic, error
@@ -238,39 +245,46 @@ class KafkaResultFeed(_DemuxFeed):
 # --- the provider -----------------------------------------------------------------
 
 
-class TimeSeriesDatabaseClient(DataClient):
-    """A ``DataClient`` over a time-series database reached through a REST api,
-    whose answers arrive on a Kafka topic.
+class RemoteDataClient(DataClient):
+    """A ``DataClient`` over a remote data service: range queries go up as REST
+    calls, the answers come down on a Kafka topic.
 
-    **What it is for.** A deployment keeps its PMU history in some store -- a
-    time-series database, an archive service -- that this repo neither ships nor
-    knows. This client is the core's side of a small contract that store's owner
-    implements once, as an HTTP service beside the store, after which the whole
-    stack (replay, seek, range queries, batch modules) works over their data with
-    no code in this repo changed: name the client in ``PSWAMP_DATA_CLIENTS`` (or
-    an app's own ``*_DATA_CLIENTS`` variable) and set its variables.
+    **What it is for: decoupling.** A deployment keeps its PMU history
+    somewhere this repo neither ships nor knows -- a time-series database, a
+    historian, an archive service -- and must stay free to choose, and change,
+    that store. This client does not talk to any store. It talks to a small
+    service the deployment's owner implements once in front of whatever they
+    run, speaking the contract below. After that the whole stack (replay, seek,
+    range queries, batch modules) works over their data with no code in this
+    repo changed: name the client in ``PSWAMP_DATA_CLIENTS`` (or an app's own
+    ``*_DATA_CLIENTS`` variable) and set its variables. What sits behind the
+    service is an implementation detail on the deployment's side; the stub in
+    ``app/server-python/src/remote_data_stub/`` happens to serve a recording
+    as if it were a time series store.
 
     **Capabilities.** ``HISTORY_CONSUME`` only, for ``PmuFrame``. It never
-    tails: a store answers about the past. Pair it with
+    tails: the service answers about the past. Pair it with
     a live provider in the same gateway for a replay that hands over to live.
 
     **Configuration** -- the ``{NAME}_`` block, ``NAME`` being the client's name
-    in the spec (``tsdb:...:TimeSeriesDatabaseClient`` reads ``TSDB_*``)::
+    in the spec (``remote_data:...:RemoteDataClient`` reads ``REMOTE_DATA_*``)::
 
-        TSDB_URL                http://time-series-stub:8100   (required) base URL of the service
-        TSDB_BOOTSTRAP_SERVERS  kafka:9092                     (required) brokers of the results topic
-        TSDB_TOPIC              time.series.result             the results topic (this is the default)
-        TSDB_TIMEOUT            30                             seconds to wait for the next result
-        TSDB_PRIORITY           0                              preference against other clients
+        REMOTE_DATA_URL                http://remote-data-stub:8100   (required) base URL of the service
+        REMOTE_DATA_BOOTSTRAP_SERVERS  kafka:9092                     (required) brokers of the results topic
+        REMOTE_DATA_TOPIC              remote.data.result             the results topic (this is the default)
+        REMOTE_DATA_TIMEOUT            30                             seconds to wait for the next result
+        REMOTE_DATA_PRIORITY           0                              preference against other clients
 
-    ``show_config("tsdb")`` prints the same table.
+    ``show_config("remote_data")`` prints the same table.
 
     **The REST half** (what the service serves under ``URL``; JSON throughout):
 
     ``GET /v1/coverage?model=<topic>``
-        What the store holds for the message class named by its topic string
+        What the service holds for the message class named by its topic string
         (``pmu.frame``). Answer ``200`` with
-        ``{"start": <ISO 8601>, "end": <ISO 8601>, "live": false}``. ``end`` is
+        ``{"start": <ISO 8601>, "end": <ISO 8601>}``; any other field (a
+        ``model`` echo, say) is ignored. There is no liveness to report: the
+        client is history-only by its own declaration. ``end`` is
         *exclusive* and must lie past the last record's timestamp (pad it by a
         microsecond), because the player bounds every replay to it and the
         gateway drops a record at or after it. ``{"start": null, ...}`` means
@@ -278,7 +292,7 @@ class TimeSeriesDatabaseClient(DataClient):
         on every seek, at every segment boundary -- so keep it cheap.
 
     ``POST /v1/queries``
-        Body: a ``TimeSeriesQuery`` (``pswamp_core.messages.time_series``) --
+        Body: a ``RemoteDataQuery`` (``pswamp_core.messages.remote_data``) --
         ``{"version": "v1", "query_id": "...", "model": "pmu.frame", "start":
         <ISO|null>, "end": <ISO|null>, "mrid": [..]|null}``. The window is
         half-open, ``[start, end)``; a null bound is open. Answer ``202`` once
@@ -293,7 +307,7 @@ class TimeSeriesDatabaseClient(DataClient):
         the client ignores the reply.
 
     **The Kafka half** (what the service publishes; ``TOPIC`` on
-    ``BOOTSTRAP_SERVERS``): one ``TimeSeriesResult`` envelope per record, value
+    ``BOOTSTRAP_SERVERS``): one ``RemoteDataResult`` envelope per record, value
     ``model_dump_json()``, **record key = ``query_id``**. ``kind`` is
     ``"record"`` (``model`` the topic string, ``record`` the message as JSON)
     for each record in ascending timestamp order, then exactly one ``"end"``
@@ -338,7 +352,7 @@ class TimeSeriesDatabaseClient(DataClient):
     env_settings = (
         EnvSetting(
             "URL",
-            "Base URL of the REST api in front of the time-series store, e.g. http://tsdb:8100",
+            "Base URL of the remote data service's REST api, e.g. http://remote-data:8100",
             required=True,
         ),
         EnvSetting(
@@ -350,7 +364,7 @@ class TimeSeriesDatabaseClient(DataClient):
         EnvSetting(
             "TOPIC",
             "The Kafka topic the service publishes query results on",
-            default=TimeSeriesResult.topic,
+            default=RemoteDataResult.topic,
         ),
         EnvSetting(
             "TIMEOUT",
@@ -363,11 +377,11 @@ class TimeSeriesDatabaseClient(DataClient):
 
     def __init__(
         self,
-        name: str = "tsdb",
+        name: str = "remote_data",
         url: str | None = None,
         bootstrap_servers: str | Sequence[str] = (),
         *,
-        topic: str = TimeSeriesResult.topic,
+        topic: str = RemoteDataResult.topic,
         timeout: timedelta = timedelta(seconds=30),
         priority: int = 0,
         http_client: Any | None = None,
@@ -430,9 +444,11 @@ class TimeSeriesDatabaseClient(DataClient):
         if start is None:
             return None
         end = body.get("end")
+        # History-only by declaration, so liveness is the client's to state, not
+        # the service's: a "live" field in the answer is ignored.
         return Coverage(
             TimeRange(_parse_instant(start), None if end is None else _parse_instant(end)),
-            live=bool(body.get("live", False)),
+            live=False,
         )
 
     async def consume(
@@ -446,7 +462,7 @@ class TimeSeriesDatabaseClient(DataClient):
         http = self._ensure_http()
         await self.feed.start()
         wanted = normalise_mrid_filter(mRID)
-        query = TimeSeriesQuery(
+        query = RemoteDataQuery(
             query_id=uuid4().hex,
             model=model.topic,
             start=time_range.start,
@@ -507,7 +523,7 @@ class TimeSeriesDatabaseClient(DataClient):
                     await self._cancel(query.query_id)
 
     async def produce(self, data: DataModel) -> None:
-        raise TypeError(f"{self.name} is read-only: it queries a store, it does not write one")
+        raise TypeError(f"{self.name} is read-only: it queries a remote data service, it does not write to one")
 
     # -- internals -------------------------------------------------------------
 

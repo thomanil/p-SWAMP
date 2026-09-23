@@ -1,15 +1,15 @@
-# Time-series database integration contract
+# Remote data integration contract
 
 > **Status:** Preliminary contract implemented by the current branch and its
 > local stub. This is a starting specification for developing a deployment-side
-> time-series database integration in parallel with the rest of the p-SWAMP
-> architecture. The production questions under "Not settled yet" remain open.
+> remote data service in parallel with the rest of the p-SWAMP architecture.
+> The production questions under "Not settled yet" remain open.
 
 ## Summary
 
 This contract lets p-SWAMP query deployment-owned historical PMU data without
-depending on its database or storage schema. A facade accepts coverage, range,
-and cancellation requests over HTTP, then publishes ordered `pmu.header` and
+depending on how or where that data is stored. A remote data service accepts
+coverage, range, and cancellation requests over HTTP, then publishes ordered
 `pmu.frame` records plus a terminal result on Kafka, correlated by query ID.
 The implemented contract is suitable for parallel integration work, while
 production concerns such as security, backpressure, recovery, and schema
@@ -17,40 +17,53 @@ governance remain to be agreed.
 
 ## Purpose
 
-A deployment can keep historical PMU data in any database and schema. It exposes
-that data to p-SWAMP through a small facade service with two interfaces:
+The point of the contract is decoupling. p-SWAMP needs to ask for a range of
+history and get it back; it should not need to know which database holds that
+history, what its schema is, or whether the deployment changes either later.
+So p-SWAMP does not talk to a store at all. It talks to a small remote data
+service the deployment runs in front of its store, through two interfaces:
 
 1. HTTP accepts coverage requests, range queries, and cancellation.
 2. Kafka carries the records and terminal outcome of an accepted query.
 
-The facade is responsible for translating its database-native representation
-into the message shapes below. It does not need to know about p-SWAMP players,
-modules, pipelines, WebSockets, or frontend code.
+The store behind the service is an implementation detail on the deployment's
+side. A time-series database is the typical case, but a historian, an archive
+of files, or a cache in front of any of those serves equally well. The service
+is responsible for translating its store's native representation into the
+message shapes below. It does not need to know about p-SWAMP players, modules,
+pipelines, WebSockets, or frontend code.
 
 ```text
 p-SWAMP                         deployment environment
    |                                      |
    |  HTTP coverage/query/cancel          |
-   +------------------------------------->| TSDB facade ---> database
+   +------------------------------------->| remote data service ---> any store
    |                                      |
-   |  Kafka TimeSeriesResult envelopes    |
+   |  Kafka RemoteDataResult envelopes    |
    |<-------------------------------------+
 ```
 
 The current reference implementation is
-[`time_series_stub`](../app/server-python/src/time_series_stub/). The client is
-[`TimeSeriesDatabaseClient`](../core/src/pswamp_core/datagateway/clients/time_series_database.py),
+[`remote_data_stub`](../app/server-python/src/remote_data_stub/), which plays
+the part of a time-series store by serving a tiled sample recording. The
+client is
+[`RemoteDataClient`](../core/src/pswamp_core/datagateway/clients/remote_data.py),
 and the shared request/result models are in
-[`messages/time_series.py`](../core/src/pswamp_core/messages/time_series.py).
+[`messages/remote_data.py`](../core/src/pswamp_core/messages/remote_data.py).
+The web client's Time Series Explorer page is the worked example that queries
+through it.
 
 ## Supported data
 
-The preliminary client supports historical reads of two model names:
+The preliminary client supports historical reads of one model name:
 
-- `pmu.header`: a channel layout.
-- `pmu.frame`: one timestamped, aligned set of channel values.
+- `pmu.frame`: one timestamped, aligned set of channel values, carrying the
+  channel layout those values follow.
 
-The facade may use any internal database schema. The names and JSON shapes in
+There is no separate header model. Every frame is self-describing, so any
+single record is enough to interpret.
+
+The service may use any internal storage schema. The names and JSON shapes in
 this document are the integration boundary, not a required storage schema.
 
 All timestamps are ISO 8601 instants with a UTC offset. Examples use `Z`.
@@ -77,7 +90,7 @@ Content-Type: application/json
 ```
 
 The current stub reports process health only. Production readiness semantics
-for database and Kafka dependencies are not yet defined.
+for the store and Kafka dependencies are not yet defined.
 
 ### Coverage
 
@@ -98,7 +111,7 @@ Successful response:
 
 Rules:
 
-- `model` is `pmu.frame` or `pmu.header`.
+- `model` is `pmu.frame`.
 - `start` is the earliest available record timestamp.
 - `end` is exclusive and must be later than the final available timestamp.
 - `start: null` means that no records are available for the model.
@@ -138,13 +151,13 @@ Fields:
 |---|---|
 | `version` | Request schema version. Currently exactly `v1`. |
 | `query_id` | Opaque correlation identifier generated by the caller. |
-| `model` | Requested wire model: currently `pmu.frame` or `pmu.header`. |
+| `model` | Requested wire model: currently `pmu.frame`. |
 | `start` | Inclusive lower bound; `null` means earliest available. |
 | `end` | Exclusive upper bound; `null` means latest available. |
 | `mrid` | Optional list of stream identities; `null` means all. |
 
-The facade must validate the request, register the query, and return promptly.
-It must not wait for the database query or Kafka publication to finish.
+The service must validate the request, register the query, and return promptly.
+It must not wait for the store query or Kafka publication to finish.
 
 Accepted response:
 
@@ -184,19 +197,19 @@ page closure, and ignores the cancellation response.
 
 ## Kafka result stream
 
-The facade publishes every accepted query's output on a shared Kafka topic.
+The service publishes every accepted query's output on a shared Kafka topic.
 
 Current default configuration:
 
 | Setting | Default or rule |
 |---|---|
-| Topic | `time.series.result` |
+| Topic | `remote.data.result` |
 | Record key | UTF-8 encoded `query_id` |
-| Record value | UTF-8 JSON `TimeSeriesResult` |
+| Record value | UTF-8 JSON `RemoteDataResult` |
 | Partitions | One |
 | Ordering | All envelopes for a query in increasing `seq`; record timestamps ascending |
 
-The facade and p-SWAMP must use the same brokers and topic. Either side may
+The service and p-SWAMP must use the same brokers and topic. Either side may
 create a missing topic in the current implementation because startup order is
 not assumed. A managed deployment may provision it in advance.
 
@@ -225,7 +238,15 @@ uses the envelope's `query_id` to demultiplex results from concurrent queries.
     "version": "v1",
     "mRID": "nordic44",
     "timestamp": "2026-01-01T00:10:00Z",
-    "header_id": "abc123def456",
+    "header": {
+      "station": ["6500", "6500", "6500"],
+      "channel": ["V", "V", ""],
+      "measurement": ["V_Magnitude", "V_Angle", "f"],
+      "units": ["kV", "deg", "Hz"],
+      "data_rate": 50.0,
+      "freq_encoding": "absolute_hz",
+      "header_id": "fb4c60cd14cb"
+    },
     "values": [418.2, -3.4, 50.001],
     "quality": null
   },
@@ -269,67 +290,44 @@ is measurement time.
   "model": null,
   "record": null,
   "count": null,
-  "error": "DatabaseTimeout: query exceeded database timeout"
+  "error": "StoreTimeout: query exceeded the store's timeout"
 }
 ```
 
 The error text is currently free-form and intended for operational diagnosis.
 
-## PMU record schemas
-
-### `pmu.header`
-
-```json
-{
-  "version": "v1",
-  "mRID": "nordic44",
-  "timestamp": "2026-01-01T00:00:00Z",
-  "header_id": "abc123def456",
-  "station": ["6500", "6500", "6500"],
-  "channel": ["V", "V", ""],
-  "measurement": ["V_Magnitude", "V_Angle", "f"],
-  "units": ["kV", "deg", "Hz"],
-  "data_rate": 50.0,
-  "freq_encoding": "absolute_hz"
-}
-```
-
-Rules:
-
-- `mRID` identifies the stream or recording.
-- `timestamp` says when this layout became valid.
-- `station`, `channel`, `measurement`, and `units` have equal lengths and
-  describe columns by position.
-- `header_id` identifies this layout; frames using it must follow the same
-  column order.
-- `data_rate` is frames per second and is greater than zero.
-- Only `absolute_hz` frequency encoding is currently supported.
+## PMU record schema
 
 ### `pmu.frame`
 
-```json
-{
-  "version": "v1",
-  "mRID": "nordic44",
-  "timestamp": "2026-01-01T00:00:00.020Z",
-  "header_id": "abc123def456",
-  "values": [418.2, -3.4, 50.001],
-  "quality": null
-}
-```
+A frame is one instant of every channel in a stream, and it carries its own
+channel layout in `header`. The record in the envelope example above is a
+complete frame.
 
-Rules:
+Frame rules:
 
-- `mRID` matches the stream described by the header.
-- `header_id` names the applicable header.
-- `values` follow the header's column order.
+- `mRID` identifies the stream or recording.
+- `timestamp` is the measurement instant.
+- `values` has exactly one entry per header column, in the header's column
+  order. p-SWAMP rejects a frame whose width does not match its header.
 - Missing or non-finite values are represented as JSON `null`.
-- `quality`, when supplied, is currently a list of integers. Its detailed
-  C37.118 mapping remains provisional.
+- `quality`, when supplied, has one integer per column. Its detailed C37.118
+  mapping remains provisional.
 
-The current models do not enforce header/frame coherence across separate
-records. The facade must therefore preserve matching stream identity,
-`header_id`, and column count itself.
+Header rules:
+
+- `station`, `channel`, `measurement`, and `units` have equal lengths and
+  describe columns by position.
+- `measurement` entries are `f`, `df`, `<name>_Magnitude`, or `<name>_Angle`.
+- `data_rate` is frames per second and is greater than zero.
+- Only `absolute_hz` frequency encoding is currently supported.
+- `header_id` is a content hash p-SWAMP computes from the layout. The service
+  may send it or leave it out; p-SWAMP ignores it on read and recomputes it.
+
+The header repeats in every frame. That costs bytes on the topic, though Kafka's
+batch compression collapses most of the repetition. In return, a layout change
+is simply the next frame's header, and the service never has to correlate
+frames with a separately published layout.
 
 ## Client timing and failure behavior
 
@@ -346,7 +344,7 @@ The current client:
 - attempts a two-second best-effort cancellation on early exit.
 
 The intended contract requires Kafka key and `seq` consistency, but the current
-client does not strictly validate either. A facade should not rely on that
+client does not strictly validate either. A service should not rely on that
 tolerance.
 
 ## Configuration correspondence
@@ -354,33 +352,33 @@ tolerance.
 Current p-SWAMP client settings:
 
 ```text
-TSDB_URL=http://time-series-facade:8100
-TSDB_BOOTSTRAP_SERVERS=kafka:9092
-TSDB_TOPIC=time.series.result
-TSDB_TIMEOUT=30
+REMOTE_DATA_URL=http://remote-data-service:8100
+REMOTE_DATA_BOOTSTRAP_SERVERS=kafka:9092
+REMOTE_DATA_TOPIC=remote.data.result
+REMOTE_DATA_TIMEOUT=30
 ```
 
 Current stub settings:
 
 ```text
-TIME_SERIES_STUB_BOOTSTRAP_SERVERS=kafka:9092
-TIME_SERIES_STUB_TOPIC=time.series.result
-TIME_SERIES_STUB_PORT=8100
+REMOTE_DATA_STUB_BOOTSTRAP_SERVERS=kafka:9092
+REMOTE_DATA_STUB_TOPIC=remote.data.result
+REMOTE_DATA_STUB_PORT=8100
 ```
 
-A production facade may use different setting names. The resolved REST URL,
+A production service may use different setting names. The resolved REST URL,
 Kafka brokers, topic, schemas, and protocol behavior must agree.
 
-## Not settled yet
+## Not settled/handled yet
 
 The current implementation demonstrates the integration but does not yet define
 production answers for:
 
-- REST and Kafka authentication, authorization, and TLS;
+- REST and Kafka authentication, authorization, and TLS (the current impl assumes pswamp and the remote service are in the same network and trust each other implicitly);
 - paging, flow control, and bounded buffering;
 - maximum range, record, and query sizes;
 - retries, duplicate delivery, and idempotency;
-- durable recovery of accepted queries after facade restart;
+- durable recovery of accepted queries after a service restart;
 - Kafka retention, replication, and topic ownership;
 - multiple partitions and per-query ordering guarantees;
 - structured error codes versus free-form error text;
@@ -395,9 +393,9 @@ example rather than a production service.
 
 ## Acceptance tests for another implementation
 
-A deployment facade should be tested against at least these cases:
+A deployment's remote data service should be tested against at least these cases:
 
-1. Coverage for `pmu.header` and `pmu.frame` has correct exclusive ends.
+1. Coverage for `pmu.frame` has a correct exclusive end.
 2. A bounded query returns exactly the records in $[start,end)$ in order.
 3. `mrid` filtering returns only requested streams.
 4. A successful query emits contiguous `seq` values followed by one correct
@@ -405,7 +403,8 @@ A deployment facade should be tested against at least these cases:
 5. A failed query emits one terminal `error` and no later records.
 6. Concurrent query ids do not cross-deliver results.
 7. Duplicate active query ids are rejected consistently.
-8. Cancellation stops database work and further publication promptly.
-9. Header and frame identities, column counts, timestamps, and versions agree.
+8. Cancellation stops store work and further publication promptly.
+9. Every frame's `values` width matches its own `header`, and identities,
+   timestamps, and versions are consistent.
 10. Slow consumers and large ranges stay within agreed memory limits once the
     paging/backpressure extension is defined.

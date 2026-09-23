@@ -69,15 +69,21 @@ which exist to keep the "adding a page" path honest:
   that stays `/reference-subapp`.
 - **`/time-series-explorer` is the worked example of a provider that answers
   *queries*, and of a module driven by a command.** Its provider is the core's
-  `TimeSeriesDatabaseClient` (`core/src/pswamp_core/datagateway/clients/time_series_database.py`,
-  behind the `pswamp-core[timeseries]` extra): a range request goes **up as a
+  `RemoteDataClient` (`core/src/pswamp_core/datagateway/clients/remote_data.py`,
+  behind the `pswamp-core[remote-data]` extra): a range request goes **up as a
   REST `POST`** to a configured URL, and the answer comes **down on a configured
-  Kafka topic** as correlated envelopes — the shape a deployment implements once
-  in front of its own time-series database. **The contract is that class's
-  docstring**; read it there, not here. Beside it, `src/time_series_stub/` is
-  the dummy implementation of that REST service (`python -m time_series_stub`,
-  the same image as a separate container, serving the sample recording tiled
-  to a minute), rigged in compose and the local k8s manifest. The page asks
+  Kafka topic** as correlated envelopes — the shape a deployment implements once,
+  as a remote data service in front of whatever store it runs. **The name is
+  about decoupling, not storage**: the client never talks to a database, so the
+  deployment chooses (and can change) its store without a change here. A
+  time-series database is the typical case, and the page keeps its time-series
+  name because that is what is queried on the other end — but it is a detail of
+  the deployment. **The contract is that class's docstring**; read it there, not
+  here (`doc/remote-data-integration-contract.md` spells it out for the team
+  implementing the service). Beside it, `src/remote_data_stub/` is the dummy
+  implementation of that service (`python -m remote_data_stub`, the same image
+  as a separate container, playing a time-series store by serving the sample
+  recording tiled to a minute), rigged in compose and the local k8s manifest. The page asks
   one range two ways, each a `POST` that becomes a `Command` on the client's
   bus: **play-range** (the *stream* case — the player replays exactly
   `[start, end)` paced and ends paused there, a bounded replay the player grew
@@ -85,8 +91,8 @@ which exist to keep the "adding a page" path honest:
   `Command.target`, pulling the range from the gateway itself, unpaced, and
   answering with one result carrying the command's `request_id`). Its default
   provider is the sample recording, so CI's bare `docker run` exercises the
-  page too; compose and k8s switch it to the time-series client with
-  `TIME_SERIES_EXPLORER_DATA_CLIENTS` and the `TSDB_*` block.
+  page too; compose and k8s switch it to the Remote Data Client with
+  `TIME_SERIES_EXPLORER_DATA_CLIENTS` and the `REMOTE_DATA_*` block.
 
 Beside the pages, **the layout owns one socket of its own: the error tray.**
 `src/errors/` is the app package with no pipeline: every app that builds a core
@@ -123,8 +129,8 @@ and remote-module pieces that let a module run as its own service. pydantic is
 its only dependency by default, so a provider written outside this repo can
 import the contract and nothing else; two extras add what two optional pieces
 need, both imported lazily — `pswamp-core[kafka]` adds aiokafka for the Kafka
-transport (`transport/kafka.py`), `pswamp-core[timeseries]` adds httpx beside
-it for the time-series provider (`datagateway/clients/time_series_database.py`)
+transport (`transport/kafka.py`), `pswamp-core[remote-data]` adds httpx beside
+it for the Remote Data Client (`datagateway/clients/remote_data.py`)
 — and the web backend takes both. It has **no lockfile of its own**: it is a library, consumed by
 the web backend as a second editable path dependency, and its tests run in that
 backend's environment (below). `doc/server-data-architecture.md` describes it;
@@ -199,7 +205,7 @@ Two deployables, one wire protocol — plus, for the PMU test streamer's stats
 module only, a worker container from the same image and the Apache Kafka broker
 it is reached through (`docker-compose.yml`'s `stats-worker` and `kafka`; the
 matching Deployments in `k8s/`), and, for the Time Series Explorer only, the
-dummy time-series service from the same image (`time-series-stub`) that the
+dummy remote data service from the same image (`remote-data-stub`) that the
 explorer's provider queries over REST and reads back over that same broker.
 None is a dependency of the server: unset one variable and the module runs
 in-process, unset another and the explorer runs over the sample recording,
@@ -840,7 +846,7 @@ underlying tech). Start the server first, then the client:
 ./scripts/start-local-hotloaded-pswamp-server.sh      # state server on 127.0.0.1:8000 (docker compose up --watch --build; streams logs, Ctrl-C stops it)
                                                      # also live-syncs root src/, so desktop-package edits hot-reload too
                                                      # brings up four containers: kafka, the server, the streamer's stats-worker,
-                                                     # and the explorer's time-series-stub (a dummy store behind the REST + Kafka contract)
+                                                     # and the explorer's remote-data-stub (a dummy remote data service behind the REST + Kafka contract)
 ./scripts/start-local-hotloaded-pswamp-web-client.sh  # Vite/React web client w/ HMR on http://localhost:5173
 ```
 
@@ -973,8 +979,8 @@ separate envs and are hermetic to very different degrees:
   transport's own round trip in `core/tests/test_kafka_transport.py` is
   **skipped unless a broker is named**: `KAFKA_TEST_BOOTSTRAP_SERVERS=127.0.0.1:19092`
   runs it against the compose stack's Kafka (its EXTERNAL listener). The same
-  variable gates the time-series provider's round trip through a real topic in
-  `tests/test_time_series_database_client.py`; the rest of that file — the
+  variable gates the Remote Data Client's round trip through a real topic in
+  `tests/test_remote_data_service.py`; the rest of that file — the
   conformance suite over the client wired to the stub service in-process
   (`httpx.ASGITransport` for the REST half, the client's `InMemoryResultFeed`
   as the stub's sink) — needs neither a port nor a broker.
@@ -1334,7 +1340,7 @@ What has to hold in the `static-errorcheck` job:
 - **k8s manifest:** `p-swamp-local.yaml` is local-only (`imagePullPolicy: Never`, image
   built into minikube). It holds four Deployments — the server, the streamer's
   `p-swamp-stats-worker` (same image, different command, no Service), the
-  explorer's `p-swamp-time-series-stub` (same image again, with a ClusterIP
+  explorer's `p-swamp-remote-data-stub` (same image again, with a ClusterIP
   Service and `/healthz` probes, since the server calls it over HTTP) and
   `p-swamp-kafka` (the one *pulled* image, so `IfNotPresent`, on an
   `emptyDir`) — and the start script rolls the first three out after waiting
@@ -1351,9 +1357,9 @@ What has to hold in the `static-errorcheck` job:
   parses it with the recording's format and stamps that layout into every
   frame it emits. The ConfigMap is configuration, not storage: the
   "no persistent volume" rule stands. The same env block is **the worked
-  example of pointing a page at a remote store**: `TIME_SERIES_EXPLORER_DATA_CLIENTS`
-  names the time-series client, `TSDB_URL` the stub's Service and
-  `TSDB_BOOTSTRAP_SERVERS` the broker — a deployment with a real store keeps
+  example of pointing a page at a remote data service**: `TIME_SERIES_EXPLORER_DATA_CLIENTS`
+  names the Remote Data Client, `REMOTE_DATA_URL` the stub's Service and
+  `REMOTE_DATA_BOOTSTRAP_SERVERS` the broker — a deployment with its own service keeps
   those three lines and changes the URL.
 
 ## Workflow rules

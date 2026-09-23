@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""The stub time-series service without Kafka: the tiled recording, the query
+"""The stub remote data service without Kafka: the tiled recording, the query
 service over a list sink, and the REST routes driven in-process."""
 
 from __future__ import annotations
@@ -13,19 +13,19 @@ import httpx
 import pytest
 
 from pmu_test_streamer.sample_client import STREAM_ID, load_sample
-from pswamp_core.messages import PmuFrame, TimeSeriesQuery, TimeSeriesResult
-from time_series_stub.app import create_app
-from time_series_stub.recording import TiledRecording
-from time_series_stub.service import QueryService
+from pswamp_core.messages import PmuFrame, RemoteDataQuery, RemoteDataResult
+from remote_data_stub.app import create_app
+from remote_data_stub.recording import TiledRecording
+from remote_data_stub.service import QueryService
 
 
 class ListSink:
     def __init__(self) -> None:
-        self.items: list[TimeSeriesResult] = []
+        self.items: list[RemoteDataResult] = []
         self.gate = asyncio.Event()
         self.gate.set()
 
-    async def publish(self, result: TimeSeriesResult) -> None:
+    async def publish(self, result: RemoteDataResult) -> None:
         await self.gate.wait()
         self.items.append(result)
 
@@ -63,7 +63,7 @@ async def test_query_service_publishes_records_then_end():
     sink = ListSink()
     service = QueryService(TiledRecording.load(repeat=1), sink)
     t0 = service.recording.frames[0].timestamp
-    query = TimeSeriesQuery(query_id="q1", model="pmu.frame", start=t0, end=t0 + timedelta(seconds=1))
+    query = RemoteDataQuery(query_id="q1", model="pmu.frame", start=t0, end=t0 + timedelta(seconds=1))
     await service.start_query(query)
     kinds = [r.kind for r in sink.items]
     assert kinds == ["record"] * 20 + ["end"]
@@ -77,13 +77,13 @@ async def test_query_service_publishes_records_then_end():
 async def test_unknown_model_is_an_error_envelope_and_a_duplicate_id_is_refused():
     sink = ListSink()
     service = QueryService(TiledRecording.load(repeat=1), sink)
-    await service.start_query(TimeSeriesQuery(query_id="q2", model="nope"))
+    await service.start_query(RemoteDataQuery(query_id="q2", model="nope"))
     (only,) = sink.items
     assert only.kind == "error" and "nope" in only.error and only.seq == 0
     sink.gate.clear()  # hold the next query mid-flight
-    task = service.start_query(TimeSeriesQuery(query_id="q3", model="pmu.frame"))
+    task = service.start_query(RemoteDataQuery(query_id="q3", model="pmu.frame"))
     with pytest.raises(KeyError):
-        service.start_query(TimeSeriesQuery(query_id="q3", model="pmu.frame"))
+        service.start_query(RemoteDataQuery(query_id="q3", model="pmu.frame"))
     assert service.cancel("q3") is True
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -101,17 +101,17 @@ async def test_rest_routes():
         coverage = await http.get("/v1/coverage", params={"model": "pmu.frame"})
         assert coverage.status_code == 200
         body = coverage.json()
-        assert body["model"] == "pmu.frame" and body["live"] is False
+        assert body["model"] == "pmu.frame" and "live" not in body
         assert body["start"].startswith("2026-01-01T00:00:00.05")
         assert (await http.get("/v1/coverage", params={"model": "nope"})).status_code == 404
 
         sink.gate.clear()
         accepted = await http.post(
-            "/v1/queries", json=TimeSeriesQuery(query_id="r1", model="pmu.frame").model_dump(mode="json")
+            "/v1/queries", json=RemoteDataQuery(query_id="r1", model="pmu.frame").model_dump(mode="json")
         )
         assert accepted.status_code == 202 and accepted.json() == {"query_id": "r1"}
         again = await http.post(
-            "/v1/queries", json=TimeSeriesQuery(query_id="r1", model="pmu.frame").model_dump(mode="json")
+            "/v1/queries", json=RemoteDataQuery(query_id="r1", model="pmu.frame").model_dump(mode="json")
         )
         assert again.status_code == 409
         assert (await http.delete("/v1/queries/r1")).status_code == 204

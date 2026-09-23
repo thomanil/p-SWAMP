@@ -12,21 +12,21 @@ import contextlib
 from typing import Protocol
 
 from pswamp_core.log import get_logger
-from pswamp_core.messages import TimeSeriesQuery, TimeSeriesResult
+from pswamp_core.messages import RemoteDataQuery, RemoteDataResult
 from pswamp_core.util.time import utcnow
 
 from .recording import TiledRecording
 
 __all__ = ["QueryService", "Sink"]
 
-logger = get_logger("time-series-stub")
+logger = get_logger("remote-data-stub")
 
 
 class Sink(Protocol):
     """Where the envelopes go. ``KafkaSink`` in the container; a list, or the
     client's ``InMemoryResultFeed``, in a test."""
 
-    async def publish(self, result: TimeSeriesResult) -> None: ...
+    async def publish(self, result: RemoteDataResult) -> None: ...
 
 
 class QueryService:
@@ -54,13 +54,13 @@ class QueryService:
         if held is None:
             return None
         start, end = held
-        return {"model": topic, "start": start, "end": end, "live": False}
+        return {"model": topic, "start": start, "end": end}
 
     def running(self, query_id: str) -> bool:
         task = self._running.get(query_id)
         return task is not None and not task.done()
 
-    def start_query(self, query: TimeSeriesQuery) -> asyncio.Task:
+    def start_query(self, query: RemoteDataQuery) -> asyncio.Task:
         """Accept ``query`` and start answering it. ``KeyError`` if that id is running."""
         if self.running(query.query_id):
             raise KeyError(query.query_id)
@@ -94,17 +94,17 @@ class QueryService:
 
     # -- answering -------------------------------------------------------------
 
-    async def _answer(self, query: TimeSeriesQuery) -> None:
+    async def _answer(self, query: RemoteDataQuery) -> None:
         seq = 0
         try:
             records = self.recording.select(query.model, query.start, query.end, query.mrid)
             for record in records:
                 await self.sink.publish(
-                    TimeSeriesResult.for_record(query.query_id, seq, record, timestamp=utcnow())
+                    RemoteDataResult.for_record(query.query_id, seq, record, timestamp=utcnow())
                 )
                 seq += 1
             await self.sink.publish(
-                TimeSeriesResult.ended(query.query_id, seq, seq, timestamp=utcnow())
+                RemoteDataResult.ended(query.query_id, seq, seq, timestamp=utcnow())
             )
             self.completed += 1
             logger.info("query %s: sent %d record(s)", query.query_id, seq)
@@ -117,5 +117,5 @@ class QueryService:
             logger.warning("query %s: failed: %s", query.query_id, reason)
             with contextlib.suppress(Exception):
                 await self.sink.publish(
-                    TimeSeriesResult.failed(query.query_id, seq, reason, timestamp=utcnow())
+                    RemoteDataResult.failed(query.query_id, seq, reason, timestamp=utcnow())
                 )

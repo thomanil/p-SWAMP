@@ -7,7 +7,7 @@
 
 The third wire-level smoke test: open the explorer's socket, read the coverage
 the provider reports, count one second of it, and play half a second of it to
-the end. Under compose the provider is the ``TimeSeriesDatabaseClient`` over
+the end. Under compose the provider is the ``RemoteDataClient`` over
 the stub service and the broker (``TIME_SERIES_EXPLORER_DATA_CLIENTS``), so
 the count and the frames crossed REST and a Kafka topic; under a bare
 ``docker run`` (CI) it is the sample recording in-process. The socket cannot

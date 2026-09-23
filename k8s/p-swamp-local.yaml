@@ -15,15 +15,16 @@
 #
 # Four Deployments: the server; the PMU test streamer's stats module as its
 # own pod (p-swamp-stats-worker, the same image with a different command); the
-# dummy time-series store the Time Series Explorer queries (p-swamp-time-series-stub,
-# the same image again, with a Service since the server calls it over HTTP);
+# dummy remote data service the Time Series Explorer queries
+# (p-swamp-remote-data-stub, the same image again, with a Service since the
+# server calls it over HTTP);
 # and the Apache Kafka broker between all of them. The module runs in the
 # worker because the server's env block says so
 # (PMU_TEST_STREAMER_MODULE_TRANSPORT); drop those two variables and the module
 # runs in the server pod, with nothing else changed. Likewise the explorer reads
 # the stub because TIME_SERIES_EXPLORER_DATA_CLIENTS says so; drop it and the
 # explorer runs over the sample recording in the image. See "Running a module
-# as a separate service" and "A remote time-series store as a provider" in
+# as a separate service" and "A remote data service as a provider" in
 # doc/server-data-architecture.md.
 #
 # The PMU data sources are configured here rather than baked in. The env block
@@ -99,18 +100,19 @@ spec:
               value: kafka:pswamp_core.transport.kafka:KafkaTransport
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: p-swamp-kafka:9092
-            # The Time Series Explorer's provider is the time-series client
-            # over a remote store: it POSTs range queries to TSDB_URL (the
-            # p-swamp-time-series-stub Service below) and reads the answers
-            # off a Kafka topic on TSDB_BOOTSTRAP_SERVERS. A deployment with a
-            # real store keeps these three lines and changes the URL -- the
+            # The Time Series Explorer's provider is the Remote Data Client:
+            # it POSTs range queries to REMOTE_DATA_URL (the
+            # p-swamp-remote-data-stub Service below) and reads the answers off
+            # a Kafka topic on REMOTE_DATA_BOOTSTRAP_SERVERS. A deployment with
+            # its own data service keeps these three lines and changes the URL;
+            # what store sits behind that service is its own choice -- the
             # contract is the client's docstring (core/src/pswamp_core/
-            # datagateway/clients/time_series_database.py).
+            # datagateway/clients/remote_data.py).
             - name: TIME_SERIES_EXPLORER_DATA_CLIENTS
-              value: tsdb:pswamp_core.datagateway.clients.time_series_database:TimeSeriesDatabaseClient
-            - name: TSDB_URL
-              value: http://p-swamp-time-series-stub:8100
-            - name: TSDB_BOOTSTRAP_SERVERS
+              value: remote_data:pswamp_core.datagateway.clients.remote_data:RemoteDataClient
+            - name: REMOTE_DATA_URL
+              value: http://p-swamp-remote-data-stub:8100
+            - name: REMOTE_DATA_BOOTSTRAP_SERVERS
               value: p-swamp-kafka:9092
           volumeMounts:
             - name: pmu-data
@@ -237,42 +239,42 @@ spec:
               # one module per client key, one consumer per topic.
               memory: "512Mi"
 ---
-# The dummy time-series store the explorer queries: the same image with a
-# different command (src/time_series_stub/), standing where a deployment's own
-# api over its database would stand. It serves HTTP -- the server's
-# time-series client POSTs range queries to it -- so it gets a Service and
+# The dummy remote data service the explorer queries: the same image with a
+# different command (src/remote_data_stub/), standing where a deployment's own
+# service over its own store would stand. It serves HTTP -- the server's
+# Remote Data Client POSTs range queries to it -- so it gets a Service and
 # /healthz probes; its answers go out on the broker's results topic. Its
 # "database" is the sample recording tiled twenty times.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: p-swamp-time-series-stub
+  name: p-swamp-remote-data-stub
   labels:
-    app: p-swamp-time-series-stub
+    app: p-swamp-remote-data-stub
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: p-swamp-time-series-stub
+      app: p-swamp-remote-data-stub
   template:
     metadata:
       labels:
-        app: p-swamp-time-series-stub
+        app: p-swamp-remote-data-stub
     spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
       containers:
-        - name: time-series-stub
+        - name: remote-data-stub
           image: p-swamp:latest
           imagePullPolicy: Never
-          command: ["python", "-m", "time_series_stub"]
+          command: ["python", "-m", "remote_data_stub"]
           env:
-            - name: TIME_SERIES_STUB_BOOTSTRAP_SERVERS
+            - name: REMOTE_DATA_STUB_BOOTSTRAP_SERVERS
               value: p-swamp-kafka:9092
-            - name: TIME_SERIES_STUB_REPEAT
+            - name: REMOTE_DATA_STUB_REPEAT
               value: "20"
           ports:
             - name: http
@@ -304,13 +306,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: p-swamp-time-series-stub
+  name: p-swamp-remote-data-stub
   labels:
-    app: p-swamp-time-series-stub
+    app: p-swamp-remote-data-stub
 spec:
   type: ClusterIP
   selector:
-    app: p-swamp-time-series-stub
+    app: p-swamp-remote-data-stub
   ports:
     - name: http
       protocol: TCP

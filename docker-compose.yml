@@ -22,17 +22,18 @@ services:
       # The worker reads the same variable, so the two sides cannot disagree.
       PMU_TEST_STREAMER_MODULE_TRANSPORT: "kafka:pswamp_core.transport.kafka:KafkaTransport"
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
-      # The Time Series Explorer reads a *remote* store: the time-series client
-      # (core/src/pswamp_core/datagateway/clients/time_series_database.py)
-      # POSTs each range query to TSDB_URL -- the time-series-stub below, a
-      # dummy of the api a deployment would put in front of its database --
-      # and reads the answers off a Kafka topic on TSDB_BOOTSTRAP_SERVERS.
+      # The Time Series Explorer queries a *remote* data service: the Remote
+      # Data Client (core/src/pswamp_core/datagateway/clients/remote_data.py)
+      # POSTs each range query to REMOTE_DATA_URL -- the remote-data-stub below,
+      # a dummy of the service a deployment puts in front of whatever store it
+      # runs -- and reads the answers off a Kafka topic on
+      # REMOTE_DATA_BOOTSTRAP_SERVERS.
       # Unset the first variable and the page runs over the sample recording
       # in this process, unchanged (what CI's bare `docker run` exercises).
-      # The stub reads the matching TIME_SERIES_STUB_* block.
-      TIME_SERIES_EXPLORER_DATA_CLIENTS: "tsdb:pswamp_core.datagateway.clients.time_series_database:TimeSeriesDatabaseClient"
-      TSDB_URL: "http://time-series-stub:8100"
-      TSDB_BOOTSTRAP_SERVERS: "kafka:9092"
+      # The stub reads the matching REMOTE_DATA_STUB_* block.
+      TIME_SERIES_EXPLORER_DATA_CLIENTS: "remote_data:pswamp_core.datagateway.clients.remote_data:RemoteDataClient"
+      REMOTE_DATA_URL: "http://remote-data-stub:8100"
+      REMOTE_DATA_BOOTSTRAP_SERVERS: "kafka:9092"
     # The broker is reached lazily, on the first streamer socket, not at
     # startup -- but a publish to a broker that is still booting is dropped
     # (and logged), so wait for kafka to be healthy rather than race it. The
@@ -40,7 +41,7 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      time-series-stub:
+      remote-data-stub:
         condition: service_healthy
     # Dev-only override: run uvicorn with --reload so the files synced in by
     # `watch` (below) trigger an in-process hot reload. The Dockerfile's prod
@@ -155,22 +156,22 @@ services:
         - path: core/pyproject.toml
           action: rebuild
 
-  # A dummy time-series store behind the REST + Kafka provider contract
-  # (src/time_series_stub/): the SAME image, a different command, standing
-  # where a deployment's own api over its time-series database would stand.
-  # The server's time-series client POSTs range queries to it on :8100 and
+  # A dummy remote data service behind the REST + Kafka provider contract
+  # (src/remote_data_stub/): the SAME image, a different command, standing
+  # where a deployment's own service -- over its own store -- would stand.
+  # The server's Remote Data Client POSTs range queries to it on :8100 and
   # reads the answers off the results topic on the broker below. Its
   # "database" is the streamer's sample recording tiled twenty times (a
   # minute of timeline). It serves HTTP, so unlike the worker it has a
   # healthcheck, and the server waits for it. Not published to the host:
   # nothing outside the compose network needs it.
-  time-series-stub:
+  remote-data-stub:
     build: .
     image: p-swamp:latest
-    command: ["python", "-m", "time_series_stub"]
+    command: ["python", "-m", "remote_data_stub"]
     environment:
-      TIME_SERIES_STUB_BOOTSTRAP_SERVERS: "kafka:9092"
-      TIME_SERIES_STUB_REPEAT: "20"
+      REMOTE_DATA_STUB_BOOTSTRAP_SERVERS: "kafka:9092"
+      REMOTE_DATA_STUB_REPEAT: "20"
     expose:
       - "8100"
     depends_on:

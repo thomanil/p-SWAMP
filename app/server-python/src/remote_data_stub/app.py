@@ -4,10 +4,10 @@
 """The REST surface of the contract, as a FastAPI app over a ``QueryService``.
 
 Three routes and a probe -- exactly what
-``TimeSeriesDatabaseClient``'s docstring asks a deployment to serve:
+``RemoteDataClient``'s docstring asks a deployment to serve:
 
-    GET    /v1/coverage?model=<topic>   → 200 {model, start, end, live} | 404 unknown model
-    POST   /v1/queries  (TimeSeriesQuery) → 202 {query_id} | 409 already running
+    GET    /v1/coverage?model=<topic>   → 200 {model, start, end} | 404 unknown model
+    POST   /v1/queries  (RemoteDataQuery) → 202 {query_id} | 409 already running
     DELETE /v1/queries/{query_id}       → 204 | 404 not running
     GET    /healthz                     → 200
 
@@ -23,7 +23,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Response
 
-from pswamp_core.messages import TimeSeriesQuery
+from pswamp_core.messages import RemoteDataQuery
 
 from .service import QueryService
 
@@ -48,9 +48,10 @@ def create_app(
                 await on_shutdown()
 
     app = FastAPI(
-        title="p-SWAMP time-series stub",
+        title="p-SWAMP remote data stub",
         description=(
-            "A dummy time-series store behind the REST + Kafka provider contract. "
+            "A dummy remote data service behind the REST + Kafka provider contract, serving a "
+            "recording as a time series store would. "
             "Answers coverage over HTTP; publishes query results on a Kafka topic."
         ),
         lifespan=lifespan,
@@ -68,7 +69,7 @@ def create_app(
         return document
 
     @app.post("/v1/queries", status_code=202)
-    async def start_query(query: TimeSeriesQuery) -> dict[str, str]:
+    async def start_query(query: RemoteDataQuery) -> dict[str, str]:
         try:
             service.start_query(query)
         except KeyError:

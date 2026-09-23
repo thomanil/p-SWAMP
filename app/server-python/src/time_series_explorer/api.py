@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""The Time Series Explorer's backend: two ways to ask a store for a range.
+"""The Time Series Explorer's backend: two ways to ask for a range of a time series.
 
 The example beside the streamer for a provider that answers *queries* -- in the
-deployments this is written for, the ``TimeSeriesDatabaseClient`` over a REST api
-in front of a time-series database (see its docstring in
-``pswamp_core.datagateway.clients.time_series_database``). One pipeline per client
-over the configured providers, and three commands, each a ``POST`` here that
-becomes a ``Command`` on the client's bus::
+deployments this is written for, the ``RemoteDataClient``, which sends each
+query to a deployment's own data service and reads the answers off a Kafka
+topic (see its docstring in ``pswamp_core.datagateway.clients.remote_data``).
+The page is named for what is queried on the other end: a time series, kept in
+whatever store the deployment runs, which this page never sees.
+
+One pipeline per client over the configured providers, and three commands,
+each a ``POST`` here that becomes a ``Command`` on the client's bus::
 
     providers ── DataGateway ── Player ──▶ bus ──▶ this socket        (a) play a range
                      ▲                      │
@@ -22,14 +25,14 @@ end)``, paces it, and ends paused at ``end`` (the bounded replay the player
 grew for this page; ``PlayerStatus.range_end`` says so). (b) is the *batch*
 case: the module opens the same kind of stream itself, unpaced, and publishes
 one ``RowCountResult`` with the command's ``request_id``. Both reach the same
-provider through the same gateway, which is the point: a store implements one
-contract and gets both.
+provider through the same gateway, which is the point: a data service implements
+one contract and gets both.
 
 **Which providers.** ``TIME_SERIES_EXPLORER_DATA_CLIENTS`` names them, in the
 usual ``name:module:Class`` form; unset, the page runs over the streamer's
 sample recording (``DEFAULT_DATA_CLIENTS``), which is what CI's bare
 ``docker run`` exercises. Compose and the local k8s manifest set it to the
-time-series client over the stub service, with the ``TSDB_*`` block beside it.
+Remote Data Client over the stub service, with the ``REMOTE_DATA_*`` block beside it.
 
 **Failure reaches the page two ways.** A provider that fails mid-replay ends the
 stream paused with ``PlayerStatus.error`` set; a count that fails carries
@@ -77,7 +80,7 @@ SLUG = "time-series-explorer"
 
 #: The providers a deployment gets unless TIME_SERIES_EXPLORER_DATA_CLIENTS
 #: names others: the streamer's sample recording, history only. Compose and k8s
-#: replace it with the time-series client over the stub service.
+#: replace it with the Remote Data Client over the stub service.
 DEFAULT_DATA_CLIENTS = "sample:pmu_test_streamer.sample_client:SampleRecordingClient"
 DATA_CLIENTS_VARIABLE = "TIME_SERIES_EXPLORER_DATA_CLIENTS"
 

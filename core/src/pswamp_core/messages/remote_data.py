@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""The wire shapes between the core and a remote time-series store.
+"""The wire shapes between the core and a remote data service.
 
-A time-series database behind a deployment's own REST api is a ``DataClient``
-(:class:`pswamp_core.datagateway.clients.time_series_database.TimeSeriesDatabaseClient`).
+A deployment's own data service -- whatever store it fronts -- is reached
+through a ``DataClient``
+(:class:`pswamp_core.datagateway.clients.remote_data.RemoteDataClient`).
 The client speaks two things to that service, and both are defined here so the
 service's implementer and the client share one spelling:
 
-* **``TimeSeriesQuery``** goes *up*, as the JSON body of ``POST /v1/queries``:
+* **``RemoteDataQuery``** goes *up*, as the JSON body of ``POST /v1/queries``:
   "give me ``model`` between ``start`` and ``end``", tagged with a ``query_id``
   the client made up.
-* **``TimeSeriesResult``** comes *down*, as the value of every record the
+* **``RemoteDataResult``** comes *down*, as the value of every record the
   service publishes on the results Kafka topic in answer. It is an *envelope*:
   the PMU record itself rides inside as plain JSON (``record``), beside the
   ``query_id`` it answers, a per-query sequence number, and a ``kind`` that
@@ -46,12 +47,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from ..util.time import ensure_utc
 from .data_model import DataModel
 
-__all__ = ["ResultKind", "TimeSeriesQuery", "TimeSeriesResult"]
+__all__ = ["ResultKind", "RemoteDataQuery", "RemoteDataResult"]
 
 ResultKind = Literal["record", "end", "error"]
 
 
-class TimeSeriesQuery(BaseModel):
+class RemoteDataQuery(BaseModel):
     """A range query, as the client POSTs it to the service.
 
     ``model`` is the *topic string* of the message class wanted (``pmu.frame``),
@@ -76,8 +77,8 @@ class TimeSeriesQuery(BaseModel):
         return None if value is None else ensure_utc(value)
 
 
-class TimeSeriesResult(DataModel):
-    """One envelope on the results topic (topic ``time.series.result``).
+class RemoteDataResult(DataModel):
+    """One envelope on the results topic (topic ``remote.data.result``).
 
     Exactly one of three shapes, by ``kind``:
 
@@ -103,7 +104,7 @@ class TimeSeriesResult(DataModel):
     error: str | None = Field(default=None, description="'error' only: what went wrong.")
 
     @model_validator(mode="after")
-    def _shape_matches_kind(self) -> TimeSeriesResult:
+    def _shape_matches_kind(self) -> RemoteDataResult:
         if self.kind == "record" and (self.model is None or self.record is None):
             raise ValueError("a 'record' envelope needs 'model' and 'record'")
         if self.kind == "end" and self.count is None:
@@ -117,7 +118,7 @@ class TimeSeriesResult(DataModel):
     @classmethod
     def for_record(
         cls, query_id: str, seq: int, message: DataModel, *, timestamp: datetime
-    ) -> TimeSeriesResult:
+    ) -> RemoteDataResult:
         return cls(
             timestamp=timestamp,
             query_id=query_id,
@@ -128,9 +129,9 @@ class TimeSeriesResult(DataModel):
         )
 
     @classmethod
-    def ended(cls, query_id: str, seq: int, count: int, *, timestamp: datetime) -> TimeSeriesResult:
+    def ended(cls, query_id: str, seq: int, count: int, *, timestamp: datetime) -> RemoteDataResult:
         return cls(timestamp=timestamp, query_id=query_id, seq=seq, kind="end", count=count)
 
     @classmethod
-    def failed(cls, query_id: str, seq: int, error: str, *, timestamp: datetime) -> TimeSeriesResult:
+    def failed(cls, query_id: str, seq: int, error: str, *, timestamp: datetime) -> RemoteDataResult:
         return cls(timestamp=timestamp, query_id=query_id, seq=seq, kind="error", error=error)

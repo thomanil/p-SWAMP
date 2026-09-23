@@ -1,4 +1,5 @@
-"""The Time Series Explorer app: a range explorer over a query-answering provider.
+"""The Time Series Explorer app: a range explorer over a query-answering provider
+(the Remote Data Client, in compose and k8s).
 
 Same public surface as every app package — src/server.py uses nothing else:
 

@@ -537,7 +537,7 @@ dependencies = [
 kafka = [
     { name = "aiokafka" },
 ]
-timeseries = [
+remote-data = [
     { name = "aiokafka" },
     { name = "httpx" },
 ]
@@ -545,8 +545,8 @@ timeseries = [
 [package.metadata]
 requires-dist = [
     { name = "aiokafka", marker = "extra == 'kafka'", specifier = ">=0.14,<1" },
-    { name = "aiokafka", marker = "extra == 'timeseries'", specifier = ">=0.14,<1" },
-    { name = "httpx", marker = "extra == 'timeseries'", specifier = ">=0.28,<1" },
+    { name = "aiokafka", marker = "extra == 'remote-data'", specifier = ">=0.14,<1" },
+    { name = "httpx", marker = "extra == 'remote-data'", specifier = ">=0.28,<1" },
     { name = "pydantic", specifier = ">=2.12" },
 ]
 
@@ -557,7 +557,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "p-swamp" },
-    { name = "pswamp-core", extra = ["kafka", "timeseries"] },
+    { name = "pswamp-core", extra = ["kafka", "remote-data"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -572,7 +572,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1,<0.142" },
     { name = "p-swamp", editable = "../../" },
-    { name = "pswamp-core", extras = ["kafka", "timeseries"], editable = "../../core" },
+    { name = "pswamp-core", extras = ["kafka", "remote-data"], editable = "../../core" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.4,<0.53" },
 ]
 

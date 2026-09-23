@@ -18,7 +18,7 @@ Two things it shows that ``Module.run`` does not do for a module today:
   overrides ``run`` and stamps its result with the wall clock. It also filters
   on ``target``: every command on the bus reaches every subscriber, and the
   player's are not for us.
-* **Failure as a result and as an error event.** A store that fails mid-count
+* **Failure as a result and as an error event.** A provider that fails mid-count
   produces a result with ``error`` set (the page shows it beside the count) and
   an ``ErrorEvent`` on the bus (the layout shows it wherever the person is),
   both carrying the ``request_id``. The module itself stays up.
@@ -50,7 +50,7 @@ logger = get_logger("time-series-explorer.row-count")
 
 
 class RowCount(BaseModel):
-    """How many frames the store returned for a range, and how long it took."""
+    """How many frames the provider returned for a range, and how long it took."""
 
     start: datetime = Field(description="Inclusive start of the range counted.")
     end: datetime = Field(description="Exclusive end of the range counted.")

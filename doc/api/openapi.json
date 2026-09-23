@@ -1638,7 +1638,7 @@
         "type": "object"
       },
       "RowCount": {
-        "description": "How many frames the store returned for a range, and how long it took.",
+        "description": "How many frames the provider returned for a range, and how long it took.",
         "properties": {
           "count": {
             "description": "Frames received; partial when 'error' is set.",
@@ -3069,7 +3069,7 @@
       "name": "frequency-peek"
     },
     {
-      "description": "Timeseries Db Explorer: a range explorer over a query-answering provider (a remote time-series store): play a range, count a range.",
+      "description": "Timeseries Db Explorer: play a range and count a range of a time series, queried through the Remote Data Client from whatever store the deployment runs.",
       "name": "time-series-explorer"
     },
     {

@@ -127,8 +127,8 @@ APPS = [
     AppEntry(
         "time-series-explorer",
         time_series_explorer,
-        "Timeseries Db Explorer: a range explorer over a query-answering provider (a remote time-series "
-        "store): play a range, count a range.",
+        "Timeseries Db Explorer: play a range and count a range of a time series, queried through "
+        "the Remote Data Client from whatever store the deployment runs.",
     ),
     AppEntry(
         "errors",

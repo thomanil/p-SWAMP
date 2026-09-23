@@ -1336,7 +1336,7 @@ export interface components {
         };
         /**
          * RowCount
-         * @description How many frames the store returned for a range, and how long it took.
+         * @description How many frames the provider returned for a range, and how long it took.
          */
         RowCount: {
             /**

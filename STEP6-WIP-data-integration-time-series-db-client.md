@@ -1,5 +1,33 @@
 # STEP 6 — A remote time-series store as a provider (REST up, Kafka down)
 
+> **Addendum (2026-09-23): renamed to the Remote Data Client.** The body of
+> this note is the record of the step as built, so it keeps the names used at
+> the time. They were changed afterwards because they put the emphasis in the
+> wrong place. The point of the client is not a time-series database. It is a
+> *decoupled* way to query and get data back from a remote data service, where
+> the deployment decides what store sits behind that service. A time-series
+> database is the typical case, but it is an implementation detail on the
+> deployment's side. The explorer page keeps its time-series name and nav label
+> on purpose, since that is what is queried on the other end in the example.
+>
+> | At the time of this note | Now |
+> |---|---|
+> | `TimeSeriesDatabaseClient`, `datagateway/clients/time_series_database.py` | `RemoteDataClient`, `datagateway/clients/remote_data.py` |
+> | `TimeSeriesQuery`, `TimeSeriesResult`, `messages/time_series.py` | `RemoteDataQuery`, `RemoteDataResult`, `messages/remote_data.py` |
+> | results topic `time.series.result` | `remote.data.result` |
+> | extra `pswamp-core[timeseries]` | `pswamp-core[remote-data]` |
+> | spec name `tsdb`, env block `TSDB_*` | `remote_data`, `REMOTE_DATA_*` |
+> | stub `time_series_stub`, `TIME_SERIES_STUB_*` | `remote_data_stub`, `REMOTE_DATA_STUB_*` |
+> | compose `time-series-stub`, k8s `p-swamp-time-series-stub` | `remote-data-stub`, `p-swamp-remote-data-stub` |
+> | `doc/time-series-database-integration-contract.md` | `doc/remote-data-integration-contract.md` |
+> | tests `test_time_series_database.py`, `test_time_series_messages.py` (core) | `test_remote_data_client.py`, `test_remote_data_messages.py` |
+> | tests `test_time_series_database_client.py`, `test_time_series_stub.py` (server) | `test_remote_data_service.py`, `test_remote_data_stub.py` |
+> | unchanged: `/time-series-explorer`, `time_series_explorer/`, `TIME_SERIES_EXPLORER_DATA_CLIENTS`, nav label "Timeseries Db Explorer" | — |
+>
+> The integration contract doc was also brought up to date with the
+> self-describing frame, which landed after it was written: the service now
+> serves `pmu.frame` only, and each frame carries its own `header`.
+
 Working note behind the sixth step of the data-integration track. STEP 1–5
 built the provider contract, the gateway, the player, the bus, modules, the
 pipeline registry, and a module running as its own service. Every one of them

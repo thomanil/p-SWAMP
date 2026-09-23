@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""The time-series provider against the stub service, end to end and in-process.
+"""The Remote Data Client against the stub service, end to end and in-process.
 
 The client's HTTP half runs over ``httpx.ASGITransport`` straight into the
 stub's FastAPI app, and the stub's sink *is* the client's ``InMemoryResultFeed``
@@ -27,31 +27,31 @@ import pytest
 from pmu_test_streamer.sample_client import load_sample
 from pswamp_core.bus import InProcessBus, Overflow
 from pswamp_core.datagateway import DataGateway, Player
-from pswamp_core.datagateway.clients.time_series_database import (
+from pswamp_core.datagateway.clients.remote_data import (
     InMemoryResultFeed,
     KafkaResultFeed,
-    TimeSeriesDatabaseClient,
+    RemoteDataClient,
 )
 from pswamp_core.datagateway.conformance import DataClientConformance
 from pswamp_core.messages import Command, PlayerStatus, PmuFrame
-from time_series_stub.app import create_app
-from time_series_stub.kafka_sink import KafkaSink
-from time_series_stub.recording import TiledRecording
-from time_series_stub.service import QueryService
+from remote_data_stub.app import create_app
+from remote_data_stub.kafka_sink import KafkaSink
+from remote_data_stub.recording import TiledRecording
+from remote_data_stub.service import QueryService
 
 BOOTSTRAP = os.environ.get("KAFKA_TEST_BOOTSTRAP_SERVERS", "")
 needs_broker = pytest.mark.skipif(not BOOTSTRAP, reason="KAFKA_TEST_BOOTSTRAP_SERVERS is not set")
 
 
-def hermetic_client(repeat: int = 1, **kwargs) -> TimeSeriesDatabaseClient:
+def hermetic_client(repeat: int = 1, **kwargs) -> RemoteDataClient:
     """The client wired to the stub in-process: ASGI for HTTP, one feed as the sink."""
     feed = InMemoryResultFeed()
     service = QueryService(TiledRecording.load(repeat=repeat), feed)
     http = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(service)), base_url="http://stub")
-    return TimeSeriesDatabaseClient("tsdb", url="http://stub", http_client=http, feed=feed, **kwargs)
+    return RemoteDataClient("remote_data", url="http://stub", http_client=http, feed=feed, **kwargs)
 
 
-class TestTimeSeriesDatabaseClientConformance(DataClientConformance):
+class TestRemoteDataClientConformance(DataClientConformance):
     """The provider contract, through a gateway, over REST and the envelope."""
 
     @pytest.fixture
@@ -133,12 +133,12 @@ async def _wait_status(subscription, predicate, timeout: float = 2.0) -> PlayerS
 async def test_results_round_trip_through_a_real_topic():
     """The Kafka halves on both sides -- the stub's sink and the client's feed --
     over one fresh topic on the compose broker; HTTP still in-process."""
-    topic = f"test-time-series-{uuid4().hex[:8]}"
+    topic = f"test-remote-data-{uuid4().hex[:8]}"
     sink = KafkaSink(BOOTSTRAP, topic)
     service = QueryService(TiledRecording.load(repeat=1), sink)
     feed = KafkaResultFeed(BOOTSTRAP, topic)
     http = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(service)), base_url="http://stub")
-    client = TimeSeriesDatabaseClient("tsdb", url="http://stub", http_client=http, feed=feed)
+    client = RemoteDataClient("remote_data", url="http://stub", http_client=http, feed=feed)
     try:
         await sink.open()
         await client.open()

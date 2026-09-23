@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""The time-series provider without a service or a broker: the HTTP half over
+"""The Remote Data Client without a service or a broker: the HTTP half over
 ``httpx.MockTransport``, the results half over ``InMemoryResultFeed``.
 
 The conformance suite runs it against the stub service in
-``app/server-python/tests/test_time_series_database_client.py``; here are the
+``app/server-python/tests/test_remote_data_service.py``; here are the
 mechanics the contract promises -- subscribe before POST, demultiplexing by
 query id, the end and error envelopes, the timeout, the cancel.
 """
@@ -21,12 +21,12 @@ import pytest
 from support import at
 
 from pswamp_core.datagateway import Capability, DataGateway, MissingSettingError, TimeRange
-from pswamp_core.datagateway.clients.time_series_database import (
+from pswamp_core.datagateway.clients.remote_data import (
     InMemoryResultFeed,
-    TimeSeriesDatabaseClient,
+    RemoteDataClient,
 )
 from pswamp_core.datagateway.config import gateway_from_env
-from pswamp_core.messages import PmuFrame, PmuHeader, TimeSeriesResult
+from pswamp_core.messages import PmuFrame, PmuHeader, RemoteDataResult
 from pswamp_core.util.time import utcnow
 
 httpx = pytest.importorskip("httpx")
@@ -51,6 +51,8 @@ class FakeService:
         self.feed = feed
         self.frames = frames
         self.coverage = coverage
+        #: Extra fields merged into the coverage answer, to show they are ignored.
+        self.coverage_extra: dict = {}
         self.calls: list[tuple[str, str]] = []
         self.queue_existed_at_post: list[bool] = []
         self.mode = "answer"  # or "silent", "refuse", "fail"
@@ -62,11 +64,11 @@ class FakeService:
         self.calls.append((request.method, request.url.path))
         if request.url.path == "/v1/coverage":
             if not self.coverage or request.url.params["model"] != "pmu.frame":
-                return httpx.Response(200, json={"start": None, "end": None, "live": False})
+                return httpx.Response(200, json={"start": None, "end": None})
             last = self.frames[-1].timestamp + timedelta(microseconds=1)
             return httpx.Response(
                 200,
-                json={"start": at(0).isoformat(), "end": last.isoformat(), "live": False},
+                json={"start": at(0).isoformat(), "end": last.isoformat(), **self.coverage_extra},
             )
         if request.method == "POST":
             body = json.loads(request.content)
@@ -84,16 +86,16 @@ class FakeService:
         qid, seq = body["query_id"], 0
         stamp = utcnow()
         if self.mode == "fail":
-            self.feed.dispatch(TimeSeriesResult.failed(qid, 0, "disk on fire", timestamp=stamp))
+            self.feed.dispatch(RemoteDataResult.failed(qid, 0, "disk on fire", timestamp=stamp))
             return
         records = self.frames if body["model"] == "pmu.frame" else []
         start = body["start"] and TimeRange(_iso(body["start"]), None).start
         end = body["end"] and TimeRange(None, _iso(body["end"])).end
         for record in records:
             if (start is None or record.timestamp >= start) and (end is None or record.timestamp < end):
-                self.feed.dispatch(TimeSeriesResult.for_record(qid, seq, record, timestamp=stamp))
+                self.feed.dispatch(RemoteDataResult.for_record(qid, seq, record, timestamp=stamp))
                 seq += 1
-        self.feed.dispatch(TimeSeriesResult.ended(qid, seq, seq, timestamp=stamp))
+        self.feed.dispatch(RemoteDataResult.ended(qid, seq, seq, timestamp=stamp))
 
 
 def _iso(value: str):
@@ -102,9 +104,9 @@ def _iso(value: str):
     return datetime.fromisoformat(value)
 
 
-def make(service: FakeService, **kwargs) -> TimeSeriesDatabaseClient:
-    return TimeSeriesDatabaseClient(
-        "tsdb",
+def make(service: FakeService, **kwargs) -> RemoteDataClient:
+    return RemoteDataClient(
+        "remote_data",
         url="http://stub",
         http_client=httpx.AsyncClient(transport=service.transport(), base_url="http://stub"),
         feed=service.feed,
@@ -114,33 +116,33 @@ def make(service: FakeService, **kwargs) -> TimeSeriesDatabaseClient:
 
 def test_constructing_imports_neither_httpx_nor_aiokafka_and_checks_its_inputs():
     before = "aiokafka" in sys.modules
-    client = TimeSeriesDatabaseClient("tsdb", url="http://x", bootstrap_servers="k:9092")
-    assert client.name == "tsdb" and ("aiokafka" in sys.modules) == before
+    client = RemoteDataClient("remote_data", url="http://x", bootstrap_servers="k:9092")
+    assert client.name == "remote_data" and ("aiokafka" in sys.modules) == before
     assert client.capabilities == Capability.HISTORY_CONSUME
     assert client.supports(PmuFrame)
     with pytest.raises(ValueError):
-        TimeSeriesDatabaseClient("tsdb", bootstrap_servers="k:9092")  # no URL
+        RemoteDataClient("remote_data", bootstrap_servers="k:9092")  # no URL
     with pytest.raises(ValueError):
-        TimeSeriesDatabaseClient("tsdb", url="http://x")  # no brokers and no feed
+        RemoteDataClient("remote_data", url="http://x")  # no brokers and no feed
 
 
 def test_from_env_reads_its_block(monkeypatch):
-    monkeypatch.setenv("TSDB_URL", "http://tsdb:8100/")
-    monkeypatch.setenv("TSDB_BOOTSTRAP_SERVERS", "a:9092, b:9092")
-    monkeypatch.setenv("TSDB_TIMEOUT", "2.5")
-    monkeypatch.setenv("TSDB_PRIORITY", "3")
+    monkeypatch.setenv("REMOTE_DATA_URL", "http://remote-data:8100/")
+    monkeypatch.setenv("REMOTE_DATA_BOOTSTRAP_SERVERS", "a:9092, b:9092")
+    monkeypatch.setenv("REMOTE_DATA_TIMEOUT", "2.5")
+    monkeypatch.setenv("REMOTE_DATA_PRIORITY", "3")
     monkeypatch.setenv(
         "CLIENTS",
-        "tsdb:pswamp_core.datagateway.clients.time_series_database:TimeSeriesDatabaseClient",
+        "remote_data:pswamp_core.datagateway.clients.remote_data:RemoteDataClient",
     )
     gateway = gateway_from_env(variable="CLIENTS")
-    client = gateway.clients["tsdb"]
-    assert isinstance(client, TimeSeriesDatabaseClient)
-    assert client.url == "http://tsdb:8100"
+    client = gateway.clients["remote_data"]
+    assert isinstance(client, RemoteDataClient)
+    assert client.url == "http://remote-data:8100"
     assert client.feed.bootstrap_servers == ["a:9092", "b:9092"]
-    assert client.feed.topic == TimeSeriesResult.topic == "time.series.result"
+    assert client.feed.topic == RemoteDataResult.topic == "remote.data.result"
     assert client.timeout == timedelta(seconds=2.5) and client.priority == 3
-    monkeypatch.delenv("TSDB_URL")
+    monkeypatch.delenv("REMOTE_DATA_URL")
     with pytest.raises(MissingSettingError):
         gateway_from_env(variable="CLIENTS")
 
@@ -154,6 +156,16 @@ async def test_coverage_is_asked_of_the_service_and_null_means_none():
     service.coverage = False
     assert await client.coverage(PmuFrame) is None
     assert service.calls == [("GET", "/v1/coverage")] * 2
+    await client.close()
+
+
+async def test_coverage_ignores_a_live_flag_from_the_service():
+    # History-only by declaration: a service claiming liveness changes nothing.
+    service = FakeService(InMemoryResultFeed())
+    service.coverage_extra = {"live": True, "model": "pmu.frame"}
+    client = make(service)
+    coverage = await client.coverage(PmuFrame)
+    assert coverage is not None and coverage.live is False
     await client.close()
 
 
@@ -181,7 +193,7 @@ async def test_two_interleaved_queries_are_demultiplexed_and_a_stray_answer_is_d
     rest_b = [r async for r in second]
     assert [r.timestamp for r in [a, *rest_a]] == [at(0), at(1), at(2)]
     assert [r.timestamp for r in [b, *rest_b]] == [at(5), at(6)]
-    feed.dispatch(TimeSeriesResult.ended("nobody", 0, 0, timestamp=utcnow()))
+    feed.dispatch(RemoteDataResult.ended("nobody", 0, 0, timestamp=utcnow()))
     assert feed.dropped == 1
     await client.close()
 
@@ -227,18 +239,18 @@ async def test_an_unreachable_service_is_a_connection_error_naming_the_url():
     def refuse(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("All connection attempts failed", request=request)
 
-    client = TimeSeriesDatabaseClient(
-        "tsdb", url="http://tsdb:8100",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(refuse), base_url="http://tsdb:8100"),
+    client = RemoteDataClient(
+        "remote_data", url="http://remote-data:8100",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(refuse), base_url="http://remote-data:8100"),
         feed=InMemoryResultFeed(),
     )
-    with pytest.raises(ConnectionError, match="cannot reach http://tsdb:8100: ConnectError"):
+    with pytest.raises(ConnectionError, match="cannot reach http://remote-data:8100: ConnectError"):
         await client.coverage(PmuFrame)
-    with pytest.raises(ConnectionError, match="cannot reach http://tsdb:8100"):
+    with pytest.raises(ConnectionError, match="cannot reach http://remote-data:8100"):
         [r async for r in client.consume(PmuFrame, TimeRange(at(0), None))]
     gateway = DataGateway([client])
     assert await gateway.coverage(PmuFrame) is None
-    assert "cannot reach http://tsdb:8100" in gateway.coverage_failures["tsdb"]
+    assert "cannot reach http://remote-data:8100" in gateway.coverage_failures["remote_data"]
     await client.close()
 
 

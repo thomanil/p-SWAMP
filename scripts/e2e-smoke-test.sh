@@ -30,7 +30,7 @@
 #                                        socket: over the broker from the stats-worker container
 #                                        under compose, in-process under a bare `docker run` (CI)
 #   8. the explorer flow               — count a range, play a bounded range: over REST and the
-#                                        broker from the time-series-stub container under compose,
+#                                        broker from the remote-data-stub container under compose,
 #                                        over the sample recording under a bare `docker run` (CI)
 #
 # Steps 1-5 are curl; steps 6-8 are tools/smoketest_*.py, since bash can't speak
@@ -224,7 +224,7 @@ if [ "${#FAILURES[@]}" -ne 0 ]; then
   for f in "${FAILURES[@]}"; do printf '  - %s\n' "$f"; done
   if [ "$STARTED_STACK" -eq 1 ]; then
     printf '\nLast 50 lines of server, worker and stub logs:\n'
-    docker compose logs --tail 50 server stats-worker time-series-stub
+    docker compose logs --tail 50 server stats-worker remote-data-stub
   fi
   exit 1
 fi

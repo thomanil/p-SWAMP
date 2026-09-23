@@ -18,12 +18,12 @@ dependencies = [
     "p-swamp",
     # The [kafka] extra is aiokafka: the PMU test streamer's stats module runs
     # as its own service, reached over a Kafka-API broker through
-    # core/src/pswamp_core/transport/kafka.py. The [timeseries] extra adds
-    # httpx beside it, for the provider over a remote time-series store
-    # (core/src/pswamp_core/datagateway/clients/time_series_database.py) that
-    # the time-series explorer and its stub service use. Nothing else in the
+    # core/src/pswamp_core/transport/kafka.py. The [remote-data] extra adds
+    # httpx beside it, for the Remote Data Client, the provider over a remote data service
+    # (core/src/pswamp_core/datagateway/clients/remote_data.py) that
+    # the Time Series Explorer and the stub service use. Nothing else in the
     # backend needs either, and the core itself stays pydantic-only without them.
-    "pswamp-core[kafka,timeseries]",
+    "pswamp-core[kafka,remote-data]",
 ]
 
 # p-swamp is the desktop package at the repo root (root pyproject.toml, root

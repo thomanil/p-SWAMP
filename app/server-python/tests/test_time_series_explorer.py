@@ -3,7 +3,7 @@
 
 """The Time Series Explorer: the row-count module, the pipeline the endpoint
 builds, the two commands end to end, the refusals -- and the provider swapped
-by environment for the time-series client over the in-process stub."""
+by environment for the Remote Data Client over the in-process stub."""
 
 from __future__ import annotations
 
@@ -19,16 +19,16 @@ from pmu_test_streamer.sample_client import SampleRecordingClient, load_sample
 from pswamp_core.bus import InProcessBus, Overflow
 from pswamp_core.datagateway import Capability, DataGateway
 from pswamp_core.datagateway.clients import InMemoryClient
-from pswamp_core.datagateway.clients.time_series_database import (
+from pswamp_core.datagateway.clients.remote_data import (
     InMemoryResultFeed,
-    TimeSeriesDatabaseClient,
+    RemoteDataClient,
 )
 from pswamp_core.messages import Command, ErrorEvent, PlayerStatus, PmuFrame
 from time_series_explorer import api
 from time_series_explorer.row_count_module import RowCountModule, RowCountResult
-from time_series_stub.app import create_app
-from time_series_stub.recording import TiledRecording
-from time_series_stub.service import QueryService
+from remote_data_stub.app import create_app
+from remote_data_stub.recording import TiledRecording
+from remote_data_stub.service import QueryService
 
 ONE_SECOND = timedelta(seconds=1)
 
@@ -198,11 +198,11 @@ async def _wait_status(subscription, predicate, timeout: float = 2.0) -> PlayerS
     return await asyncio.wait_for(_wait(), timeout)
 
 
-# --- the provider swapped by environment: the time-series client over the stub -------
+# --- the provider swapped by environment: the Remote Data Client over the stub ------
 
 
-class HermeticTsdbClient(TimeSeriesDatabaseClient):
-    """The time-series client wired to the stub in-process -- what a deployment
+class HermeticRemoteDataClient(RemoteDataClient):
+    """The Remote Data Client wired to the stub in-process -- what a deployment
     names in TIME_SERIES_EXPLORER_DATA_CLIENTS, minus the port and the broker."""
 
     services: list[QueryService] = []
@@ -211,13 +211,13 @@ class HermeticTsdbClient(TimeSeriesDatabaseClient):
     def __init__(self, name: str) -> None:
         feed = InMemoryResultFeed()
         service = QueryService(TiledRecording.load(repeat=2), feed)
-        HermeticTsdbClient.services.append(service)
+        HermeticRemoteDataClient.services.append(service)
         http = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(service)), base_url="http://stub")
         super().__init__(name, url="http://stub", http_client=http, feed=feed)
 
 
 class UnreachableClient(SampleRecordingClient):
-    """A store whose URL cannot be reached, as the client reports it."""
+    """A remote data service whose URL cannot be reached, as the client reports it."""
 
     env_settings = ()
 
@@ -225,11 +225,11 @@ class UnreachableClient(SampleRecordingClient):
         super().__init__(name)
 
     async def coverage(self, model, mRID=None):
-        raise ConnectionError("cannot reach http://tsdb:8100: ConnectError: All connection attempts failed")
+        raise ConnectionError("cannot reach http://remote-data:8100: ConnectError: All connection attempts failed")
 
 
-async def test_an_unreachable_store_reaches_the_error_tray_and_the_page_still_connects(monkeypatch):
-    monkeypatch.setenv(api.DATA_CLIENTS_VARIABLE, "tsdb:test_time_series_explorer:UnreachableClient")
+async def test_an_unreachable_data_service_reaches_the_error_tray_and_the_page_still_connects(monkeypatch):
+    monkeypatch.setenv(api.DATA_CLIENTS_VARIABLE, "remote_data:test_time_series_explorer:UnreachableClient")
     api.REGISTRY.bind(asyncio.get_running_loop())
     HUB.forget("26")
     pipeline = await api.REGISTRY.acquire("26")  # no 1011: the pipeline starts, stopped
@@ -239,9 +239,9 @@ async def test_an_unreachable_store_reaches_the_error_tray_and_the_page_still_co
                 break
             await asyncio.sleep(0.01)
         (notice,) = HUB.recent("26")
-        assert notice.app == "time-series-explorer" and notice.source == "tsdb"
+        assert notice.app == "time-series-explorer" and notice.source == "remote_data"
         assert notice.message == "the provider cannot be reached"
-        assert "cannot reach http://tsdb:8100" in (notice.detail or "")
+        assert "cannot reach http://remote-data:8100" in (notice.detail or "")
         message = api.state_message(pipeline)
         assert message.player.error == notice.detail and message.player.coverage_start is None
         t0 = load_sample().frames[0].timestamp
@@ -257,9 +257,9 @@ async def test_an_unreachable_store_reaches_the_error_tray_and_the_page_still_co
 
 
 async def test_provider_is_swapped_by_environment_alone(monkeypatch):
-    monkeypatch.setenv(api.DATA_CLIENTS_VARIABLE, "tsdb:test_time_series_explorer:HermeticTsdbClient")
+    monkeypatch.setenv(api.DATA_CLIENTS_VARIABLE, "remote_data:test_time_series_explorer:HermeticRemoteDataClient")
     pipeline = await api.build_pipeline("24")
-    assert list(pipeline.gateway.clients) == ["tsdb"]
+    assert list(pipeline.gateway.clients) == ["remote_data"]
     await pipeline.start()
     try:
         status = pipeline.player.status()
@@ -271,7 +271,7 @@ async def test_provider_is_swapped_by_environment_alone(monkeypatch):
             }))
             result = await asyncio.wait_for(results.get(), 3)
         assert result.result.count == 20 and result.result.error is None
-        service = HermeticTsdbClient.services[-1]
+        service = HermeticRemoteDataClient.services[-1]
         assert service.completed == 1  # the count crossed REST and the envelope
         assert HUB.recent("24") == []
     finally:

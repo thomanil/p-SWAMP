@@ -1,5 +1,10 @@
 # Fresh adversarial review after STEP 6
 
+> **Addendum (2026-09-23):** the time-series client this review covers has
+> since been renamed the Remote Data Client, since its point is decoupling
+> rather than any particular store. The findings below keep the names of the
+> reviewed commit. The old-to-new mapping is at the top of the STEP 6 note.
+
 Date: 2026-09-17  
 Reviewed branch: `test-and-iterate-data-flow-and-integration-patterns`  
 Reviewed HEAD: `ddaba985463ab2659e1ae504844509b114041de3`  

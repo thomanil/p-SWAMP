@@ -15,18 +15,18 @@ from collections.abc import Sequence
 from typing import Any
 
 from pswamp_core.log import get_logger
-from pswamp_core.messages import TimeSeriesResult
+from pswamp_core.messages import RemoteDataResult
 
 __all__ = ["KafkaSink"]
 
-logger = get_logger("time-series-stub.kafka")
+logger = get_logger("remote-data-stub.kafka")
 
 
 class KafkaSink:
     def __init__(
         self,
         bootstrap_servers: str | Sequence[str],
-        topic: str = TimeSeriesResult.topic,
+        topic: str = RemoteDataResult.topic,
         *,
         replication_factor: int = 1,
     ) -> None:
@@ -50,7 +50,7 @@ class KafkaSink:
         await admin.start()
         try:
             await create_topic(
-                admin, self.topic, replication_factor=self.replication_factor, who="time-series-stub"
+                admin, self.topic, replication_factor=self.replication_factor, who="remote-data-stub"
             )
         finally:
             await admin.close()
@@ -64,7 +64,7 @@ class KafkaSink:
         if producer is not None:
             await producer.stop()
 
-    async def publish(self, result: TimeSeriesResult) -> None:
+    async def publish(self, result: RemoteDataResult) -> None:
         if self._producer is None:
             await self.open()
         await self._producer.send_and_wait(

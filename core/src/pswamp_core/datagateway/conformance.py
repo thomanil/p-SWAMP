@@ -3,7 +3,7 @@
 
 """The provider conformance suite: what any ``DataClient`` must do.
 
-A provider author -- a TSO wiring up their time-series store, or this repo's
+A provider author -- a TSO wiring up their own data store, or this repo's
 own sample recording -- proves their client against the contract by inheriting
 the suite and supplying three fixtures::
 

@@ -214,7 +214,7 @@ async def create_topic(
     ``True`` when the topic exists afterwards (created now, or already there);
     ``False`` when the broker refused, which is logged and left to the produce
     or consume that follows to fail loudly. Shared by the transport and by
-    anything else in the core that owns a topic (the time-series provider's
+    anything else in the core that owns a topic (the remote data provider's
     results feed), because the compose and k8s brokers have auto-creation off.
     """
     from aiokafka.admin import NewTopic

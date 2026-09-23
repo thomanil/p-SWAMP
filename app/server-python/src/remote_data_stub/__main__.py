@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""``python -m time_series_stub``: the stub as a process, configured from the environment.
+"""``python -m remote_data_stub``: the stub as a process, configured from the environment.
 
-    TIME_SERIES_STUB_BOOTSTRAP_SERVERS   kafka:9092          (required) brokers of the results topic
-    TIME_SERIES_STUB_TOPIC               time.series.result  the results topic (the default)
-    TIME_SERIES_STUB_REPEAT              20                  how many times to tile the sample (60 s)
-    TIME_SERIES_STUB_PATH                <the sample file>   another recording in the same line format
-    TIME_SERIES_STUB_PORT                8100
+    REMOTE_DATA_STUB_BOOTSTRAP_SERVERS   kafka:9092          (required) brokers of the results topic
+    REMOTE_DATA_STUB_TOPIC               remote.data.result  the results topic (the default)
+    REMOTE_DATA_STUB_REPEAT              20                  how many times to tile the sample (60 s)
+    REMOTE_DATA_STUB_PATH                <the sample file>   another recording in the same line format
+    REMOTE_DATA_STUB_PORT                8100
 
 The topic and brokers must match the client's ``{NAME}_TOPIC`` and
 ``{NAME}_BOOTSTRAP_SERVERS``; compose and k8s set both from the same values.
@@ -23,20 +23,20 @@ from pathlib import Path
 import uvicorn
 
 from pmu_test_streamer.sample_client import DEFAULT_PATH
-from pswamp_core.messages import TimeSeriesResult
+from pswamp_core.messages import RemoteDataResult
 
 from .app import create_app
 from .kafka_sink import KafkaSink
 from .recording import TiledRecording
 from .service import QueryService
 
-PREFIX = "TIME_SERIES_STUB_"
+PREFIX = "REMOTE_DATA_STUB_"
 
 
 @dataclass(frozen=True)
 class Settings:
     bootstrap_servers: list[str]
-    topic: str = TimeSeriesResult.topic
+    topic: str = RemoteDataResult.topic
     repeat: int = 20
     path: Path = DEFAULT_PATH
     port: int = 8100
@@ -51,7 +51,7 @@ class Settings:
             )
         return cls(
             bootstrap_servers=[s.strip() for s in servers.split(",") if s.strip()],
-            topic=os.environ.get(PREFIX + "TOPIC", "").strip() or TimeSeriesResult.topic,
+            topic=os.environ.get(PREFIX + "TOPIC", "").strip() or RemoteDataResult.topic,
             repeat=int(os.environ.get(PREFIX + "REPEAT", "20") or 20),
             path=Path(os.environ.get(PREFIX + "PATH", "").strip() or DEFAULT_PATH),
             port=int(os.environ.get(PREFIX + "PORT", "8100") or 8100),
@@ -66,7 +66,7 @@ def main() -> int:
     app = create_app(service, on_startup=sink.open, on_shutdown=sink.close)
     start, end = recording.coverage("pmu.frame")
     print(
-        f"time-series stub: {len(recording.frames)} frames "
+        f"remote data stub: {len(recording.frames)} frames "
         f"[{start.isoformat()}, {end.isoformat()}) from {settings.path} x{settings.repeat}; "
         f"results on {settings.topic} at {settings.bootstrap_servers}; port {settings.port}",
         file=sys.stderr,

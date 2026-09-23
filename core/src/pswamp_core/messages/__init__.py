@@ -18,17 +18,17 @@ Two layers of message live here (STEP 1 A1, "two layers, not one"):
   ``results`` and ``control``; ``ErrorEvent`` (an operational failure, for the
   edge to show) in ``errors``.
 
-Beside them, in ``time_series``, the two shapes a remote time-series store
-speaks: ``TimeSeriesQuery`` (a range query going up over REST) and
-``TimeSeriesResult`` (the envelope each answer rides in on a Kafka topic).
+Beside them, in ``remote_data``, the two shapes a remote data service
+speaks: ``RemoteDataQuery`` (a range query going up over REST) and
+``RemoteDataResult`` (the envelope each answer rides in on a Kafka topic).
 """
 
 from .control import Command, PlayerStatus, StreamChanged
 from .data_model import DataModel, topic_from_name
 from .errors import ErrorEvent
 from .pmu import PmuFrame, PmuHeader
+from .remote_data import RemoteDataQuery, RemoteDataResult
 from .results import AppIdentity, AppStatus, AppStatusMessage, ResultEnvelope
-from .time_series import TimeSeriesQuery, TimeSeriesResult
 
 __all__ = [
     "AppIdentity",
@@ -40,9 +40,9 @@ __all__ = [
     "PlayerStatus",
     "PmuFrame",
     "PmuHeader",
+    "RemoteDataQuery",
+    "RemoteDataResult",
     "ResultEnvelope",
     "StreamChanged",
-    "TimeSeriesQuery",
-    "TimeSeriesResult",
     "topic_from_name",
 ]

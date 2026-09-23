@@ -7,7 +7,7 @@ last section says what is still open.
 
 The code is the `pswamp_core` package under `core/`, with pydantic as its only
 dependency (plus aiokafka behind the `kafka` extra, and httpx beside it behind
-the `timeseries` extra). The PMU test streamer
+the `remote-data` extra). The PMU test streamer
 (`app/server-python/src/pmu_test_streamer/`, route `/pmu-test-streamer`) is
 the worked example of every piece, and is what the snippets below are taken
 from. "Adding things" at the end is the recipe for a module of your own and
@@ -86,7 +86,7 @@ schema version, end to end, and the browser's TypeScript types are generated
 from those same classes. And **nothing above the bus knows what is below it**: the endpoint
 subscribes to message classes; the module subscribes to message classes; the
 player writes to the bus. Swapping a provider (top row) changes nothing else. A
-deployment's own provider -- a TSO's time-series store, a broker feed -- takes
+deployment's own provider -- a TSO's remote data service, a broker feed -- takes
 the place of either of the two shown.
 
 A third: L5 is the one box that can leave the process. In the compose and
@@ -172,8 +172,8 @@ to a `HISTORY_CONSUME` client, the live hand-off only to a `LIVE_CONSUME` one,
 and a client that can only tail is offered only from the hand-off margin on.
 `coverage` is re-asked on every call because most real stores have now-relative
 windows. **History lives with the provider** — the repo persists nothing; a
-TSO's time-series database is a `DataClient`, and that is how "no database in
-the repo" and "navigate history" coexist.
+TSO's store, behind its remote data service, is a `DataClient`, and that is how
+"no database in the repo" and "navigate history" coexist.
 
 *Where.* The contract: `core/src/pswamp_core/datagateway/data_client_model.py`.
 The reference client (`InMemoryClient`): `datagateway/clients/in_memory.py`. Two
@@ -776,36 +776,43 @@ broker; the numbers to produce next are listed in the last section.
 `docker-compose.yml` and `k8s/p-swamp-local.yaml`; `core/tests/test_remote.py`
 and the last cases of `app/server-python/tests/test_pmu_test_streamer.py`.
 
-## A remote time-series store as a provider
+## A remote data service as a provider
 
-*What.* `TimeSeriesDatabaseClient` (`datagateway/clients/time_series_database.py`,
-the `pswamp-core[timeseries]` extra) is a `DataClient` over a deployment's own
-time-series database, reached through a small REST api in front of it. A range
-query goes up as `POST /v1/queries`; the records come back as `TimeSeriesResult`
-envelopes on a Kafka topic, keyed by the query's id, closed by an `end` (or
-`error`) envelope; coverage is `GET /v1/coverage`. **The contract is the class's
-docstring.** Configuration is the `TSDB_*` block.
+*What.* `RemoteDataClient` (`datagateway/clients/remote_data.py`,
+the `pswamp-core[remote-data]` extra) is a `DataClient` over a deployment's own
+remote data service: a small REST api the deployment runs in front of whatever
+store holds its history. A range query goes up as `POST /v1/queries`; the
+records come back as `RemoteDataResult` envelopes on a Kafka topic, keyed by
+the query's id, closed by an `end` (or `error`) envelope; coverage is
+`GET /v1/coverage`. **The contract is the class's docstring**, and
+`doc/remote-data-integration-contract.md` spells it out for the team that
+implements the service. Configuration is the `REMOTE_DATA_*` block.
 
 ```
  gateway.consume(PmuFrame, t0, t1)
-   └─ TimeSeriesDatabaseClient ── subscribe topic (key = query_id) ── POST /v1/queries ──▶ the store's api
-                                ◀── time.series.result envelopes … {kind: "end"} ◀─────── its database
+   └─ RemoteDataClient ── subscribe topic (key = query_id) ── POST /v1/queries ──▶ remote data service
+                                ◀── remote.data.result envelopes … {kind: "end"} ◀─────── any store
 ```
 
-*Why.* Results are messages end to end, and the store's owner can put anything
+*Why.* Decoupling. p-SWAMP asks for a range and gets it back; which store
+answers -- a time-series database, a historian, an archive -- is the
+deployment's choice, and it can change that choice without a change here.
+Results are messages end to end, and the service's owner can put anything
 behind the POST. The price is correlation -- a `query_id` on every envelope, an
 explicit `end`, an `error` envelope, subscribe-before-POST -- paid once, in the
-client. The dummy service `app/server-python/src/time_series_stub/` (the sample
-recording tiled to a minute, `python -m time_series_stub`) stands in for a
-deployment's api in compose and k8s, so the whole path runs from this repo.
-`/time-series-explorer` drives it two ways: **play-range** (the player's bounded
-replay, above) and **count** (`RowCountModule`, the first `Command` addressed to
-a module, `target="row-count"`). Open points are in the last section.
+client. The dummy service `app/server-python/src/remote_data_stub/` (the sample
+recording tiled to a minute, `python -m remote_data_stub`) stands in for a
+deployment's service in compose and k8s, playing the part of a time-series
+store, so the whole path runs from this repo. `/time-series-explorer` drives
+it two ways: **play-range** (the player's bounded replay, above) and **count**
+(`RowCountModule`, the first `Command` addressed to a module,
+`target="row-count"`). The page keeps its time-series name because that is
+what is queried on the other end. Open points are in the last section.
 
-*Where.* `messages/time_series.py`, `datagateway/clients/time_series_database.py`,
-`transport/kafka.py:create_topic`; `time_series_stub/`, `time_series_explorer/`;
-`time-series-stub` in `docker-compose.yml` and `k8s/p-swamp-local.yaml`. Tests:
-`tests/test_time_series_database_client.py` runs the conformance suite over the
+*Where.* `messages/remote_data.py`, `datagateway/clients/remote_data.py`,
+`transport/kafka.py:create_topic`; `remote_data_stub/`, `time_series_explorer/`;
+`remote-data-stub` in `docker-compose.yml` and `k8s/p-swamp-local.yaml`. Tests:
+`tests/test_remote_data_service.py` runs the conformance suite over the
 client wired to the stub in-process (`httpx.ASGITransport`, `InMemoryResultFeed`);
 `KAFKA_TEST_BOOTSTRAP_SERVERS` gates the round trip through a real topic.
 
@@ -838,8 +845,8 @@ Absent from this slice, on purpose:
   time-addressed source; the transport is not one), and the measurements the
   out-of-process hosting was meant to wait for (frame-to-result latency and
   broker throughput at the target rates);
-- paging and backpressure in the time-series provider, and models beyond the
-  PMU pair in it; `Module.run` carrying a `Command` natively (the row-count
+- paging and backpressure in the Remote Data Client, and models beyond
+  `PmuFrame` in it; `Module.run` carrying a `Command` natively (the row-count
   module overrides it);
 - a `Command` addressed to a module *in the worker* (in-process, the explorer
   has one);
