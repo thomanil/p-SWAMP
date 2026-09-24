@@ -24,6 +24,12 @@ dependencies = [
     # the Time Series Explorer and the stub service use. Nothing else in the
     # backend needs either, and the core itself stays pydantic-only without them.
     "pswamp-core[kafka,remote-data]",
+    # N4SID subspace identification, for the Mode estimation app
+    # (src/mode_estimation/), the same library the desktop package's
+    # N4SIDApp uses (there only in p-swamp's [full] extra, which this server
+    # does not take). It hard-imports matplotlib at module level, so matplotlib
+    # and its dependencies come into the image with it, unused but imported.
+    "nfoursid>=1.0.2,<2",
 ]
 
 # p-swamp is the desktop package at the repo root (root pyproject.toml, root

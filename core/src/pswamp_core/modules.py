@@ -84,6 +84,11 @@ class KeepUpMonitor:
     It judges only when a message arrives, so a stream that stops while behind
     reports its catching up on the next message rather than on a timer.
 
+    ``note`` is the same judgement over counts the caller supplies, for
+    falling behind that is not an input queue's: a module whose analysis
+    skips evaluations it had no time for counts those, with ``unit`` naming
+    them in the report.
+
     Args:
         source: The ``source`` the reports carry; the module's ``name``, which
             is also what a ``RemoteModule`` filters the error topic on.
@@ -93,13 +98,23 @@ class KeepUpMonitor:
         label: Who the report names, when that is not just ``source`` -- the
             host's shared feed and the server-side publisher report under the
             module's ``source`` but are not the module.
+        unit: What the dropped count counts, as the report words it.
     """
 
-    def __init__(self, source: str, what: str, policy: KeepUp | None, *, label: str | None = None) -> None:
+    def __init__(
+        self,
+        source: str,
+        what: str,
+        policy: KeepUp | None,
+        *,
+        label: str | None = None,
+        unit: str = "input dropped",
+    ) -> None:
         self.source = source
         self.label = label or source
         self.what = what
         self.policy = policy
+        self.unit = unit
         #: Total input dropped by the subscription so far.
         self.input_dropped = 0
         #: Age of the last input read, in seconds; ``None`` if it never crossed a transport.
@@ -120,6 +135,12 @@ class KeepUpMonitor:
         stamped = sent_at(message)
         age = None if stamped is None else max(0.0, time.time() - stamped)
         self.input_age_s = age
+        self.note(bus, new_drops, age)
+
+    def note(self, bus: Bus, new_drops: int, age: float | None = None) -> None:
+        """Judge ``new_drops`` (since the last call) and an ``age``, and report
+        per the policy. What ``observe`` calls; callable directly for counts
+        that are not a subscription's."""
         if self.policy is None:
             return
 
@@ -161,7 +182,7 @@ class KeepUpMonitor:
 
     def _detail(self) -> str:
         """This interval's counts: since the last report, or since it fell behind."""
-        parts = [f"{self._interval_dropped} input dropped"]
+        parts = [f"{self._interval_dropped} {self.unit}"]
         if self._interval_max_age is not None:
             parts.append(f"oldest input read {self._interval_max_age:.1f} s after it was sent")
         return ", ".join(parts)

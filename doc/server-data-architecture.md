@@ -941,11 +941,23 @@ topic the transport creates has about a minute's retention, enforced every
 10 s by the compose and k8s brokers: the broker's defaults let a fast replay
 fill the disk.
 
+**A CPU-bound module must leave the event loop.** `/mode-estimation` runs
+p-SWAMP's N4SID identification (~0.6 s of CPU per data-second per client) the
+same way, and there the analysis is the load. Run on the loop, one
+identification stalls every client the worker serves, and the report blames
+their input; in a thread or process pool the worker's loop stays at a small
+fraction of the work, a client whose identification is still running when the
+next falls due skips it (`KeepUpMonitor.note`, "identifications skipped"), and
+the capacity limit is the arithmetic of the algorithm. BLAS libraries thread
+by default, which inside a pool multiplies the CPU and collapses throughput,
+so that worker runs with one BLAS thread per identification.
+
 *Where.* `modules.py` (`KeepUp`, `KeepUpMonitor`), `remote.py`,
 `messages/data_model.py` (`sent_at`), the two transports;
-`app/server-python/src/islanding_stream/`; `islanding-worker` in
-`docker-compose.yml` and `k8s/p-swamp-local.yaml`; `core/tests/test_keep_up.py`,
-`app/server-python/tests/test_islanding_stream.py`.
+`app/server-python/src/islanding_stream/`, `mode_estimation/`;
+`islanding-worker` and `mode-estimation-worker` in `docker-compose.yml` and
+`k8s/p-swamp-local.yaml`; `core/tests/test_keep_up.py`,
+`app/server-python/tests/test_islanding_stream.py`, `test_mode_estimation.py`.
 
 ## What is deliberately not here yet
 

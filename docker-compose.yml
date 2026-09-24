@@ -30,6 +30,12 @@ services:
       ISLANDING_STREAM_MODULE_TRANSPORT: "islanding:pswamp_core.transport.kafka:KafkaTransport"
       ISLANDING_BOOTSTRAP_SERVERS: "kafka:9092"
       ISLANDING_TOPIC_PREFIX: "islanding-stream"
+      # The Mode estimation page's N4SID module runs in the
+      # mode-estimation-worker below, on a transport and topic prefix of its
+      # own for the same reason.
+      MODE_ESTIMATION_MODULE_TRANSPORT: "modes:pswamp_core.transport.kafka:KafkaTransport"
+      MODES_BOOTSTRAP_SERVERS: "kafka:9092"
+      MODES_TOPIC_PREFIX: "mode-estimation"
       # The Time Series Explorer queries a *remote* data service: the Remote
       # Data Client (core/src/pswamp_core/datagateway/clients/remote_data.py)
       # POSTs each range query to REMOTE_DATA_URL -- the remote-data-stub below,
@@ -179,6 +185,44 @@ services:
       ISLANDING_STREAM_MODULE_TRANSPORT: "islanding:pswamp_core.transport.kafka:KafkaTransport"
       ISLANDING_BOOTSTRAP_SERVERS: "kafka:9092"
       ISLANDING_TOPIC_PREFIX: "islanding-stream"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+    develop:
+      watch:
+        - path: app/server-python/src
+          action: sync+restart
+          target: /workspace/p-SWAMP/app/server-python/src
+        - path: core
+          action: sync+restart
+          target: /workspace/p-SWAMP/core
+        - path: app/server-python/pyproject.toml
+          action: rebuild
+        - path: app/server-python/uv.lock
+          action: rebuild
+        - path: core/pyproject.toml
+          action: rebuild
+
+  # The N4SID module as its own process (src/mode_estimation/worker.py): the
+  # heavy one -- ~200 ms of CPU per identification, once per second of data
+  # per client. How it runs them is MODE_ESTIMATION_EXECUTION: "thread" (the
+  # default: a pool of MODE_ESTIMATION_POOL_SIZE threads, cpu count if unset),
+  # "process" (a process pool) or "inline" (on the event loop, blocking it).
+  mode-estimation-worker:
+    build: .
+    image: p-swamp:latest
+    command: ["python", "-m", "mode_estimation.worker"]
+    environment:
+      MODE_ESTIMATION_MODULE_TRANSPORT: "modes:pswamp_core.transport.kafka:KafkaTransport"
+      MODES_BOOTSTRAP_SERVERS: "kafka:9092"
+      MODES_TOPIC_PREFIX: "mode-estimation"
+      MODE_ESTIMATION_EXECUTION: "thread"
+      # One BLAS thread per identification; the pool is the parallelism.
+      # OpenBLAS's default (a thread per core, per call) made one
+      # identification 16x the CPU for a slower result, and collapsed at four
+      # concurrent clients (STEP7b).
+      OPENBLAS_NUM_THREADS: "1"
     depends_on:
       kafka:
         condition: service_healthy

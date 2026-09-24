@@ -39,6 +39,7 @@ import frequency_peek
 import time_series_explorer
 import errors
 import islanding_stream
+import mode_estimation
 import pswamp_web.app_status
 import pswamp_web.grid
 import pswamp_web.islanding
@@ -140,6 +141,11 @@ APPS = [
         "islanding-stream",
         islanding_stream,
         "p-SWAMP's islanding detector as a module over the N44 recording, under load; in-process or as a worker.",
+    ),
+    AppEntry(
+        "mode-estimation",
+        mode_estimation,
+        "p-SWAMP's N4SID mode estimation as a module over the N44 recording, under load; in-process or as a worker.",
     ),
 ]
 

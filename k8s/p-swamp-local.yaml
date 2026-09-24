@@ -13,9 +13,10 @@
 # The volumes below are a read-only ConfigMap (configuration, not storage) and
 # the broker's emptyDir (scratch that dies with its pod, on purpose).
 #
-# Five Deployments: the server; the PMU test streamer's stats module as its
+# Six Deployments: the server; the PMU test streamer's stats module as its
 # own pod (p-swamp-stats-worker, the same image with a different command); the
-# Islanding stream's module likewise (p-swamp-islanding-worker); the
+# Islanding stream's and the Mode estimation's modules likewise
+# (p-swamp-islanding-worker, p-swamp-mode-estimation-worker); the
 # dummy remote data service the Time Series Explorer queries
 # (p-swamp-remote-data-stub, the same image again, with a Service since the
 # server calls it over HTTP);
@@ -112,6 +113,15 @@ spec:
               value: p-swamp-kafka:9092
             - name: ISLANDING_TOPIC_PREFIX
               value: islanding-stream
+            # The Mode estimation page's N4SID module runs in the
+            # p-swamp-mode-estimation-worker pod, on its own transport name
+            # and topic prefix for the same reason.
+            - name: MODE_ESTIMATION_MODULE_TRANSPORT
+              value: modes:pswamp_core.transport.kafka:KafkaTransport
+            - name: MODES_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
+            - name: MODES_TOPIC_PREFIX
+              value: mode-estimation
             # The Time Series Explorer's provider is the Remote Data Client:
             # it POSTs range queries to REMOTE_DATA_URL (the
             # p-swamp-remote-data-stub Service below) and reads the answers off
@@ -302,6 +312,63 @@ spec:
               cpu: "1"
               # One 10 s window of 44 frequencies per client key: small.
               memory: "512Mi"
+---
+# The N4SID module as its own pod (src/mode_estimation/worker.py): the heavy
+# module -- ~200 ms of CPU per identification, once per second of data per
+# client -- so unlike the other workers it gets more than one core, and its
+# identifications run in a thread pool (MODE_ESTIMATION_EXECUTION; see
+# docker-compose.yml for the other two ways). One replica for the same reason
+# as the stats-worker.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp-mode-estimation-worker
+  labels:
+    app: p-swamp-mode-estimation-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp-mode-estimation-worker
+  template:
+    metadata:
+      labels:
+        app: p-swamp-mode-estimation-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: mode-estimation-worker
+          image: p-swamp:latest
+          imagePullPolicy: Never
+          command: ["python", "-m", "mode_estimation.worker"]
+          env:
+            - name: MODE_ESTIMATION_MODULE_TRANSPORT
+              value: modes:pswamp_core.transport.kafka:KafkaTransport
+            - name: MODES_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
+            - name: MODES_TOPIC_PREFIX
+              value: mode-estimation
+            - name: MODE_ESTIMATION_EXECUTION
+              value: thread
+            # One thread per core the pod may use: more only queue for the CPU.
+            - name: MODE_ESTIMATION_POOL_SIZE
+              value: "2"
+            # And one BLAS thread per identification: OpenBLAS's default of a
+            # thread per core, per call, oversubscribes the pool (see the same
+            # setting in docker-compose.yml).
+            - name: OPENBLAS_NUM_THREADS
+              value: "1"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "2"
+              memory: "768Mi"
 ---
 # The dummy remote data service the explorer queries: the same image with a
 # different command (src/remote_data_stub/), standing where a deployment's own

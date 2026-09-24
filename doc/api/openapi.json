@@ -1258,6 +1258,359 @@
         "title": "LineOutageLog",
         "type": "object"
       },
+      "Mode": {
+        "description": "One electromechanical mode (0.1\u20132 Hz), least damped first.",
+        "properties": {
+          "damping": {
+            "description": "Damping ratio; under 0.03 is an emergency, under 0.07 an alert.",
+            "title": "Damping",
+            "type": "number"
+          },
+          "freq_hz": {
+            "description": "Oscillation frequency.",
+            "title": "Freq Hz",
+            "type": "number"
+          },
+          "participation": {
+            "description": "Their mode shape magnitudes, normalised to the largest.",
+            "items": {
+              "type": "number"
+            },
+            "title": "Participation",
+            "type": "array"
+          },
+          "stations": {
+            "description": "The stations taking most part in it, most first (mode shape magnitude).",
+            "items": {
+              "type": "string"
+            },
+            "title": "Stations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "freq_hz",
+          "damping",
+          "stations",
+          "participation"
+        ],
+        "title": "Mode",
+        "type": "object"
+      },
+      "ModeEstimationResult": {
+        "description": "The module's envelope; its class name is its topic: ``mode.estimation.result``.",
+        "properties": {
+          "app": {
+            "$ref": "#/components/schemas/AppIdentity"
+          },
+          "mRID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mrid"
+          },
+          "parameters": {
+            "additionalProperties": true,
+            "description": "The module's settings, for the record.",
+            "title": "Parameters",
+            "type": "object"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Set when this result answers a Command.",
+            "title": "Request Id"
+          },
+          "result": {
+            "$ref": "#/components/schemas/Modes"
+          },
+          "timestamp": {
+            "description": "The instant the result is about.",
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "version": {
+            "const": "v1",
+            "default": "v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "app",
+          "result"
+        ],
+        "title": "ModeEstimationResult",
+        "type": "object"
+      },
+      "ModeEstimationState": {
+        "description": "The one message pushed on connect, on every result or player change, and\non a slow tick for the throughput readings.\n\nA declared model, because this IS the downstream half of the published\ncontract: api_contract.py collects it via this package's WS_MESSAGE export.",
+        "properties": {
+          "duration_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How long the recording is.",
+            "title": "Duration S"
+          },
+          "offset_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Seconds into the recording at the cursor.",
+            "title": "Offset S"
+          },
+          "player": {
+            "$ref": "#/components/schemas/PlayerStatus",
+            "description": "Where the replay is, and how fast it is asked to go."
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModeEstimationResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The N4SID module's latest result; null until the first window fills."
+          },
+          "throughput": {
+            "$ref": "#/components/schemas/ModeEstimationThroughput"
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "player",
+          "offset_s",
+          "duration_s",
+          "result",
+          "throughput"
+        ],
+        "title": "ModeEstimationState",
+        "type": "object"
+      },
+      "ModeEstimationThroughput": {
+        "description": "How the pipeline is coping, from this server's side of the hop.",
+        "properties": {
+          "effective_speed": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Seconds of recording replayed per wall-clock second, recently; null while paused.",
+            "title": "Effective Speed"
+          },
+          "frames_per_s": {
+            "description": "Frames the player emitted per wall-clock second, recently.",
+            "title": "Frames Per S",
+            "type": "number"
+          },
+          "module_runs": {
+            "description": "Where the N4SID module runs.",
+            "enum": [
+              "in-process",
+              "worker"
+            ],
+            "title": "Module Runs",
+            "type": "string"
+          },
+          "publish_failed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Frames the transport refused to publish (broker down, timeout); null in-process.",
+            "title": "Publish Failed"
+          },
+          "published": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Frames published to the module's topic; null in-process.",
+            "title": "Published"
+          },
+          "queue_dropped": {
+            "description": "Frames this server dropped for falling behind: from the module's queue in-process, from the queue in front of the publisher when the module runs in the worker. The worker's own drops are in the result's input_dropped.",
+            "title": "Queue Dropped",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "module_runs",
+          "frames_per_s",
+          "effective_speed",
+          "published",
+          "publish_failed",
+          "queue_dropped"
+        ],
+        "title": "ModeEstimationThroughput",
+        "type": "object"
+      },
+      "Modes": {
+        "description": "What one identification found, and how the module was keeping up when it did.",
+        "properties": {
+          "compute_cpu_ms": {
+            "description": "CPU milliseconds of the thread or process that ran it.",
+            "title": "Compute Cpu Ms",
+            "type": "number"
+          },
+          "compute_ms": {
+            "description": "Wall-clock milliseconds inside the identification.",
+            "title": "Compute Ms",
+            "type": "number"
+          },
+          "evaluations": {
+            "description": "Identifications that fell due so far.",
+            "title": "Evaluations",
+            "type": "integer"
+          },
+          "evaluations_skipped": {
+            "description": "Of those, skipped because the previous one had not finished.",
+            "title": "Evaluations Skipped",
+            "type": "integer"
+          },
+          "execution": {
+            "description": "How the identification ran: on the event loop, a thread or a process.",
+            "enum": [
+              "inline",
+              "thread",
+              "process"
+            ],
+            "title": "Execution",
+            "type": "string"
+          },
+          "frames_in": {
+            "description": "Frames processed since the previous result.",
+            "title": "Frames In",
+            "type": "integer"
+          },
+          "input_age_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How long the last input had been in flight when it was read; null in-process.",
+            "title": "Input Age S"
+          },
+          "input_dropped": {
+            "description": "Input dropped by this module's queue so far.",
+            "title": "Input Dropped",
+            "type": "integer"
+          },
+          "latency_ms": {
+            "description": "Milliseconds from falling due to this result.",
+            "title": "Latency Ms",
+            "type": "number"
+          },
+          "modes": {
+            "description": "Electromechanical modes, least damped first; up to five.",
+            "items": {
+              "$ref": "#/components/schemas/Mode"
+            },
+            "title": "Modes",
+            "type": "array"
+          },
+          "queue_ms": {
+            "description": "Milliseconds from submission to start: waiting for a pool slot.",
+            "title": "Queue Ms",
+            "type": "number"
+          },
+          "stations": {
+            "description": "How many stations' frequency the window holds.",
+            "title": "Stations",
+            "type": "integer"
+          },
+          "status": {
+            "description": "From the least damped mode; Undetermined when the identification was singular.",
+            "enum": [
+              "OK",
+              "Alert",
+              "Emergency",
+              "Undetermined"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "window_end": {
+            "description": "The data time of the window's last sample.",
+            "format": "date-time",
+            "title": "Window End",
+            "type": "string"
+          },
+          "window_s": {
+            "description": "Seconds of frequency history identified.",
+            "title": "Window S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "status",
+          "modes",
+          "window_end",
+          "window_s",
+          "stations",
+          "execution",
+          "compute_ms",
+          "compute_cpu_ms",
+          "queue_ms",
+          "latency_ms",
+          "evaluations",
+          "evaluations_skipped",
+          "frames_in",
+          "input_age_s",
+          "input_dropped"
+        ],
+        "title": "Modes",
+        "type": "object"
+      },
       "Phasor": {
         "properties": {
           "ang": {
@@ -2237,6 +2590,22 @@
         "title": "SpeedBody",
         "type": "object"
       },
+      "mode_estimation__api__SpeedBody": {
+        "properties": {
+          "speed": {
+            "description": "Replay speed multiplier; 1 is real time (50 frames/s).",
+            "exclusiveMinimum": 0.0,
+            "maximum": 50.0,
+            "title": "Speed",
+            "type": "number"
+          }
+        },
+        "required": [
+          "speed"
+        ],
+        "title": "SpeedBody",
+        "type": "object"
+      },
       "pmu_test_streamer__api__SpeedBody": {
         "properties": {
           "speed": {
@@ -2604,6 +2973,154 @@
         "summary": "Silence",
         "tags": [
           "islanding"
+        ]
+      }
+    },
+    "/api/mode-estimation/playback/play": {
+      "post": {
+        "description": "Resume this client's replay.",
+        "operationId": "mode_estimation_play",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Play",
+        "tags": [
+          "mode-estimation"
+        ]
+      }
+    },
+    "/api/mode-estimation/playback/speed": {
+      "post": {
+        "description": "Change the replay speed: identifications per wall-clock second, and frames on the topic.",
+        "operationId": "mode_estimation_speed",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/mode_estimation__api__SpeedBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Speed",
+        "tags": [
+          "mode-estimation"
+        ]
+      }
+    },
+    "/api/mode-estimation/playback/stop": {
+      "post": {
+        "description": "Pause this client's replay where it is.",
+        "operationId": "mode_estimation_stop",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop",
+        "tags": [
+          "mode-estimation"
         ]
       }
     },
@@ -3516,6 +4033,10 @@
     {
       "description": "p-SWAMP's islanding detector as a module over the N44 recording, under load; in-process or as a worker.",
       "name": "islanding-stream"
+    },
+    {
+      "description": "p-SWAMP's N4SID mode estimation as a module over the N44 recording, under load; in-process or as a worker.",
+      "name": "mode-estimation"
     }
   ],
   "x-websocket-channels": [
@@ -3606,6 +4127,14 @@
         "$ref": "#/components/schemas/IslandingStreamState"
       },
       "path": "/api/islanding-stream/ws"
+    },
+    {
+      "app": "mode-estimation",
+      "direction": "server-to-client",
+      "message": {
+        "$ref": "#/components/schemas/ModeEstimationState"
+      },
+      "path": "/api/mode-estimation/ws"
     }
   ]
 }

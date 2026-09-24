@@ -149,6 +149,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/mode-estimation/playback/play": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Play
+         * @description Resume this client's replay.
+         */
+        post: operations["mode_estimation_play"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mode-estimation/playback/speed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Speed
+         * @description Change the replay speed: identifications per wall-clock second, and frames on the topic.
+         */
+        post: operations["mode_estimation_speed"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mode-estimation/playback/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stop
+         * @description Pause this client's replay where it is.
+         */
+        post: operations["mode_estimation_stop"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/pmu-test-streamer/playback/back": {
         parameters: {
             query?: never;
@@ -1194,6 +1254,222 @@ export interface components {
              */
             window_length: number | null;
         };
+        /**
+         * Mode
+         * @description One electromechanical mode (0.1–2 Hz), least damped first.
+         */
+        Mode: {
+            /**
+             * Damping
+             * @description Damping ratio; under 0.03 is an emergency, under 0.07 an alert.
+             */
+            damping: number;
+            /**
+             * Freq Hz
+             * @description Oscillation frequency.
+             */
+            freq_hz: number;
+            /**
+             * Participation
+             * @description Their mode shape magnitudes, normalised to the largest.
+             */
+            participation: number[];
+            /**
+             * Stations
+             * @description The stations taking most part in it, most first (mode shape magnitude).
+             */
+            stations: string[];
+        };
+        /**
+         * ModeEstimationResult
+         * @description The module's envelope; its class name is its topic: ``mode.estimation.result``.
+         */
+        ModeEstimationResult: {
+            app: components["schemas"]["AppIdentity"];
+            /**
+             * Mrid
+             * @default null
+             */
+            mRID: string | null;
+            /**
+             * Parameters
+             * @description The module's settings, for the record.
+             */
+            parameters?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Request Id
+             * @description Set when this result answers a Command.
+             * @default null
+             */
+            request_id: string | null;
+            result: components["schemas"]["Modes"];
+            /**
+             * Timestamp
+             * Format: date-time
+             * @description The instant the result is about.
+             */
+            timestamp: string;
+            /**
+             * Version
+             * @default v1
+             * @constant
+             */
+            version: "v1";
+        };
+        /**
+         * ModeEstimationState
+         * @description The one message pushed on connect, on every result or player change, and
+         *     on a slow tick for the throughput readings.
+         *
+         *     A declared model, because this IS the downstream half of the published
+         *     contract: api_contract.py collects it via this package's WS_MESSAGE export.
+         */
+        ModeEstimationState: {
+            /**
+             * Duration S
+             * @description How long the recording is.
+             */
+            duration_s: number | null;
+            /**
+             * Offset S
+             * @description Seconds into the recording at the cursor.
+             */
+            offset_s: number | null;
+            /** @description Where the replay is, and how fast it is asked to go. */
+            player: components["schemas"]["PlayerStatus"];
+            /** @description The N4SID module's latest result; null until the first window fills. */
+            result: components["schemas"]["ModeEstimationResult"] | null;
+            throughput: components["schemas"]["ModeEstimationThroughput"];
+            /**
+             * Type
+             * @default state
+             * @constant
+             */
+            type: "state";
+        };
+        /**
+         * ModeEstimationThroughput
+         * @description How the pipeline is coping, from this server's side of the hop.
+         */
+        ModeEstimationThroughput: {
+            /**
+             * Effective Speed
+             * @description Seconds of recording replayed per wall-clock second, recently; null while paused.
+             */
+            effective_speed: number | null;
+            /**
+             * Frames Per S
+             * @description Frames the player emitted per wall-clock second, recently.
+             */
+            frames_per_s: number;
+            /**
+             * Module Runs
+             * @description Where the N4SID module runs.
+             * @enum {string}
+             */
+            module_runs: "in-process" | "worker";
+            /**
+             * Publish Failed
+             * @description Frames the transport refused to publish (broker down, timeout); null in-process.
+             */
+            publish_failed: number | null;
+            /**
+             * Published
+             * @description Frames published to the module's topic; null in-process.
+             */
+            published: number | null;
+            /**
+             * Queue Dropped
+             * @description Frames this server dropped for falling behind: from the module's queue in-process, from the queue in front of the publisher when the module runs in the worker. The worker's own drops are in the result's input_dropped.
+             */
+            queue_dropped: number;
+        };
+        /**
+         * Modes
+         * @description What one identification found, and how the module was keeping up when it did.
+         */
+        Modes: {
+            /**
+             * Compute Cpu Ms
+             * @description CPU milliseconds of the thread or process that ran it.
+             */
+            compute_cpu_ms: number;
+            /**
+             * Compute Ms
+             * @description Wall-clock milliseconds inside the identification.
+             */
+            compute_ms: number;
+            /**
+             * Evaluations
+             * @description Identifications that fell due so far.
+             */
+            evaluations: number;
+            /**
+             * Evaluations Skipped
+             * @description Of those, skipped because the previous one had not finished.
+             */
+            evaluations_skipped: number;
+            /**
+             * Execution
+             * @description How the identification ran: on the event loop, a thread or a process.
+             * @enum {string}
+             */
+            execution: "inline" | "thread" | "process";
+            /**
+             * Frames In
+             * @description Frames processed since the previous result.
+             */
+            frames_in: number;
+            /**
+             * Input Age S
+             * @description How long the last input had been in flight when it was read; null in-process.
+             */
+            input_age_s: number | null;
+            /**
+             * Input Dropped
+             * @description Input dropped by this module's queue so far.
+             */
+            input_dropped: number;
+            /**
+             * Latency Ms
+             * @description Milliseconds from falling due to this result.
+             */
+            latency_ms: number;
+            /**
+             * Modes
+             * @description Electromechanical modes, least damped first; up to five.
+             */
+            modes: components["schemas"]["Mode"][];
+            /**
+             * Queue Ms
+             * @description Milliseconds from submission to start: waiting for a pool slot.
+             */
+            queue_ms: number;
+            /**
+             * Stations
+             * @description How many stations' frequency the window holds.
+             */
+            stations: number;
+            /**
+             * Status
+             * @description From the least damped mode; Undetermined when the identification was singular.
+             * @enum {string}
+             */
+            status: "OK" | "Alert" | "Emergency" | "Undetermined";
+            /**
+             * Window End
+             * Format: date-time
+             * @description The data time of the window's last sample.
+             */
+            window_end: string;
+            /**
+             * Window S
+             * @description Seconds of frequency history identified.
+             */
+            window_s: number;
+        };
         /** Phasor */
         Phasor: {
             /** Ang */
@@ -1728,6 +2004,14 @@ export interface components {
             speed: number;
         };
         /** SpeedBody */
+        mode_estimation__api__SpeedBody: {
+            /**
+             * Speed
+             * @description Replay speed multiplier; 1 is real time (50 frames/s).
+             */
+            speed: number;
+        };
+        /** SpeedBody */
         pmu_test_streamer__api__SpeedBody: {
             /**
              * Speed
@@ -1946,6 +2230,106 @@ export interface operations {
             path: {
                 alarm_uuid: string;
             };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mode_estimation_play: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mode_estimation_speed: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["mode_estimation__api__SpeedBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mode_estimation_stop: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;

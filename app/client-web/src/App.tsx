@@ -13,6 +13,7 @@ import { ReferenceSubappPage } from '@/pages/reference-subapp/ReferenceSubappPag
 import { FrequencyPeekPage } from '@/pages/frequency-peek/FrequencyPeekPage'
 import { TimeSeriesExplorerPage } from '@/pages/time-series-explorer/TimeSeriesExplorerPage'
 import { IslandingStreamPage } from '@/pages/islanding-stream/IslandingStreamPage'
+import { ModeEstimationPage } from '@/pages/mode-estimation/ModeEstimationPage'
 
 /**
  * The route table — the one place that knows which apps this client hosts.
@@ -64,6 +65,7 @@ function App() {
           <Route path="frequency-peek" element={<FrequencyPeekPage />} />
           <Route path="time-series-explorer" element={<TimeSeriesExplorerPage />} />
           <Route path="islanding-stream" element={<IslandingStreamPage />} />
+          <Route path="mode-estimation" element={<ModeEstimationPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

@@ -108,6 +108,20 @@ which exist to keep the "adding a page" path honest:
   and must keep them: the stats-worker tails the unprefixed `pmu.frame` under
   the same client ids. What broke first, with numbers, is in
   `STEP7-WIP-data-integration-heavy-module-load-test.md`.
+- **`/mode-estimation` is the load test for a heavy *algorithm*.** p-SWAMP's
+  N4SID mode estimation (the desktop `N4SID` class copied into
+  `mode_estimation/n4sid_module.py`, over the `nfoursid` library) identifies
+  the grid's electromechanical modes from a 45 s window of every station's
+  frequency, once per data-second: ~0.6 s of CPU each, 97 % of it LAPACK. It
+  reads the N44 recording through the islanding stream's provider *by spec
+  string*, and runs in `mode-estimation-worker` (transport `modes`, prefix
+  `mode-estimation`). **How it runs is `MODE_ESTIMATION_EXECUTION`**:
+  `thread` (the default, a pool of `MODE_ESTIMATION_POOL_SIZE`), `process`, or
+  `inline` — the last blocks the worker's one event loop and stalls every
+  client's stream, so it exists to be measured, not used. The worker sets
+  **`OPENBLAS_NUM_THREADS=1`**; keep it: OpenBLAS's default made each
+  identification cost 16x the CPU and collapsed at four clients. Findings in
+  `STEP7b-WIP-data-integration-heavy-algorithm-load-test.md`.
 
 Beside the pages, **the layout owns one socket of its own: the error tray.**
 `src/errors/` is the app package with no pipeline: every app that builds a core
@@ -205,7 +219,9 @@ Consequences worth knowing before touching anything:
   under `core/src/pswamp_core/` needs no build change.
 - **The web backend takes p-swamp with no extras.** `[full]` is what carries
   PySide6, pyqtgraph, kafka-python, nqkafka and tops-rt; none of that belongs in a
-  headless server image. `synchrophasor` is a *base* root dependency but is
+  headless server image. The one `[full]` dependency the server does take is
+  `nfoursid`, directly in its own manifest, for the Mode estimation app — and
+  with it matplotlib, which `nfoursid` imports at module level. `synchrophasor` is a *base* root dependency but is
   excluded from the image too (`--no-emit-package` in the Dockerfile): only the
   live-PMU and playback paths import it, and it is the one dependency fetched from
   git rather than an index. The Dockerfile's `import server` smoke test is what
@@ -226,8 +242,9 @@ it is reached through (`docker-compose.yml`'s `stats-worker` and `kafka`; the
 matching Deployments in `k8s/`), and, for the Time Series Explorer only, the
 dummy remote data service from the same image (`remote-data-stub`) that the
 explorer's provider queries over REST and reads back over that same broker,
-and, for the Islanding stream only, a second worker from the same image
-(`islanding-worker`) on its own prefixed topics.
+and, for the Islanding stream and the Mode estimation page, one more worker
+each from the same image (`islanding-worker`, `mode-estimation-worker`), each
+on its own prefixed topics.
 None is a dependency of the server: unset one variable and a module runs
 in-process, unset another and the explorer runs over the sample recording,
 which is what CI's e2e job runs.
@@ -866,8 +883,8 @@ underlying tech). Start the server first, then the client:
 ```
 ./scripts/start-local-hotloaded-pswamp-server.sh      # state server on 127.0.0.1:8000 (docker compose up --watch --build; streams logs, Ctrl-C stops it)
                                                      # also live-syncs root src/, so desktop-package edits hot-reload too
-                                                     # brings up five containers: kafka, the server, the streamer's stats-worker,
-                                                     # the islanding-worker (the Islanding stream's module),
+                                                     # brings up six containers: kafka, the server, the streamer's stats-worker,
+                                                     # the islanding-worker and mode-estimation-worker (those pages' modules),
                                                      # and the explorer's remote-data-stub (a dummy remote data service behind the REST + Kafka contract)
 ./scripts/start-local-hotloaded-pswamp-web-client.sh  # Vite/React web client w/ HMR on http://localhost:5173
 ```
@@ -1362,13 +1379,14 @@ What has to hold in the `static-errorcheck` job:
   `latest` and the branch tag both move, and neither triggers a k8s rollout on
   its own (the pod spec doesn't change) — the sha tag does.
 - **k8s manifest:** `p-swamp-local.yaml` is local-only (`imagePullPolicy: Never`, image
-  built into minikube). It holds five Deployments — the server, the streamer's
+  built into minikube). It holds six Deployments — the server, the streamer's
   `p-swamp-stats-worker` (same image, different command, no Service), its
-  twin `p-swamp-islanding-worker` for the Islanding stream, the
+  twins `p-swamp-islanding-worker` and `p-swamp-mode-estimation-worker` (the
+  one with two CPUs), the
   explorer's `p-swamp-remote-data-stub` (same image again, with a ClusterIP
   Service and `/healthz` probes, since the server calls it over HTTP) and
   `p-swamp-kafka` (the one *pulled* image, so `IfNotPresent`, on an
-  `emptyDir`) — and the start script rolls the first four out after waiting
+  `emptyDir`) — and the start script rolls the first five out after waiting
   for the broker. It is also **the worked example of configuring the PMU
   data sources from outside the image**: its env block spells out
   `PSWAMP_DATA_CLIENTS` and points the live feed's `LIVE_PATH` at

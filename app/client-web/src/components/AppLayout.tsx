@@ -26,6 +26,7 @@ const NAV_ITEMS = [
   { to: '/frequency-peek', label: 'Frequency peek', end: false },
   { to: '/time-series-explorer', label: 'Timeseries Db Explorer', end: false },
   { to: '/islanding-stream', label: 'Islanding stream', end: false },
+  { to: '/mode-estimation', label: 'Mode estimation', end: false },
 ]
 
 function isLocalhost(): boolean {
