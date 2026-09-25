@@ -1,7 +1,17 @@
+# syntax=docker/dockerfile:1
 # State server image, with the web client baked in: the first stage below builds
 # app/client-web to static assets that the server stage serves at / alongside /ws
 # (same process, port, and origin) — so one image and one Service serve both.
 #
+# TARGETARCH is one of BuildKit's automatic platform args (amd64 / arm64). It is
+# declared globally so the per-arch `FROM server-${TARGETARCH}` split in the
+# server stage can read it; see the note there. The `syntax` line above is what
+# makes that reliable: the Dockerfile frontend bundled with an older Docker
+# Engine (seen with Docker Desktop's, buildx 0.17) leaves TARGETARCH empty in a
+# FROM stage name and fails on `server-`, so the build pins the current
+# frontend rather than taking whichever one the engine ships.
+ARG TARGETARCH
+
 # --- web client build stage -------------------------------------------------
 #
 # Build the Vite/React/TS web client to plain static files. A pinned Node image
@@ -41,7 +51,7 @@ RUN npm run build
 #   curl -sI -H "Authorization: Bearer <token>" \
 #     -H "Accept: application/vnd.oci.image.index.v1+json" \
 #     https://ghcr.io/v2/astral-sh/uv/manifests/python3.11-bookworm-slim
-FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim@sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim@sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36 AS server-base
 
 # The image mirrors the *whole repo* at its real depth, not just the server dir
 # flattened to /app. The depth is required for the build to work at all, not a
@@ -80,6 +90,11 @@ COPY app/server-python/pyproject.toml app/server-python/uv.lock ./
 # root src/pswamp/ does not invalidate.
 COPY pyproject.toml README.md ${REPO_DIR}/
 
+# The shared core's manifest, for the same reason and on the same layer: it is
+# the second editable path dependency (core/, "../../core" from the server dir),
+# and uv needs its metadata to resolve. Its source is copied further down.
+COPY core/pyproject.toml core/README.md ${REPO_DIR}/core/
+
 # pyproject.toml declares the direct dependencies; uv.lock pins the whole
 # transitive closure resolved from it. Install system-wide at build time, so
 # container startup needs no network and no runtime resolution.
@@ -106,7 +121,8 @@ COPY pyproject.toml README.md ${REPO_DIR}/
 # fully hash-verified packages. The import check after the source copy below is
 # what keeps that a checked decision rather than a hopeful one.
 RUN uv export --locked --no-emit-project --no-dev \
-      --no-emit-package p-swamp --no-emit-package synchrophasor \
+      --no-emit-package p-swamp --no-emit-package pswamp-core \
+      --no-emit-package synchrophasor \
       -o /tmp/requirements.txt \
     && uv pip install --system -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
@@ -134,12 +150,47 @@ RUN uv export --locked --no-emit-project --no-dev \
 COPY src/ ${REPO_DIR}/src/
 RUN uv pip install --system --no-deps -e ${REPO_DIR}
 
+# The shared core (core/src/pswamp_core/): messages, data gateway, player, bus,
+# modules, pipeline. Same treatment as the desktop package above -- copied after
+# the dependency layer, installed editable so compose watch can sync edits in.
+# core/tests/ is kept out by .dockerignore.
+COPY core/ ${REPO_DIR}/core/
+RUN uv pip install --system --no-deps -e ${REPO_DIR}/core
+
 # Server source last, so editing it doesn't invalidate the dependency layer
 # above. The image mirrors the repo, so server.py and the app packages beside it
 # land in <server dir>/src exactly as they sit in the working tree.
 # Copying the directory rather than naming files means a new module — or a whole
 # new app package — needs no Dockerfile edit.
 COPY app/server-python/src/ ./src/
+
+# --- per-arch seam --------------------------------------------------------
+#
+# On arm64 the image sets OPENBLAS_CORETYPE=ARMV8, and on amd64 it sets nothing.
+# numpy's bundled OpenBLAS (0.3.31, via numpy 2.4.x) picks its ARMV9SME kernel
+# on any CPU advertising SME and then executes a non-streaming SVE instruction
+# in its init -- which an Apple-silicon VM (Parallels/UTM on M-series: SME but
+# no SVE) does not have, so `import numpy` dies with SIGILL (exit 132) and no
+# traceback. That kills the import check below, the server at start and every
+# tool that imports pswamp. Forcing the generic ARMV8 kernel sidesteps the
+# detection. It costs BLAS throughput on real arm64 servers, but CI publishes
+# amd64 only, so arm64 images are the ones developers build for themselves.
+# Upstream fixed the detection (OpenBLAS #6011, 2026-09-05); drop this seam
+# once a numpy bump carries OpenBLAS > 0.3.31 and `import numpy` survives on
+# such a VM without it.
+#
+# Why a stage split rather than a plain ENV: Dockerfile has no conditional ENV,
+# and the value must be in effect for the RUN below (a build-time import), not
+# only at runtime. `FROM server-${TARGETARCH}` selects one of two otherwise
+# identical stages; the amd64 image is byte-for-byte what it was before.
+FROM server-base AS server-amd64
+FROM server-base AS server-arm64
+ENV OPENBLAS_CORETYPE=ARMV8
+FROM server-${TARGETARCH} AS server
+# ARGs do not cross a FROM, so the two paths are re-declared with the same
+# defaults as at the top of the stage; WORKDIR, ENV and the layers carry over.
+ARG REPO_DIR=/workspace/p-SWAMP
+ARG SERVER_DIR=${REPO_DIR}/app/server-python
 
 # Prove the dependency set is actually sufficient. Importing server.py pulls in
 # every app package, and through them the whole p-SWAMP import graph this server

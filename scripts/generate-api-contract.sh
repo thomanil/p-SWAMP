@@ -69,7 +69,34 @@ else
   OUT_TYPES="$TYPES"
 fi
 
-uv run --project app/server-python python app/server-python/tools/dump_openapi.py "$OUT_SPEC" || exit 1
+# TEMPORARY: numpy's bundled OpenBLAS (<= 0.3.34 as shipped in numpy 2.5.3)
+# picks its ARMV9SME kernel on any CPU advertising SME and then runs a plain SVE
+# instruction its init needs -- which an Apple-silicon Linux VM (Parallels/UTM on
+# an M-series Mac) advertises SME without. `import numpy` then dies with SIGILL,
+# exit 132, no traceback. Detect exactly that combination and force the generic
+# ARMv8 kernel, the same thing the Dockerfile's arm64 stage does for the image.
+# An explicit OPENBLAS_CORETYPE in the environment always wins. Drop this once a
+# numpy on our Python line imports cleanly here without it (OpenBLAS #6011).
+if [ -z "${OPENBLAS_CORETYPE:-}" ] && [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = aarch64 ] \
+   && grep -m1 '^Features' /proc/cpuinfo 2>/dev/null | grep -qw sme \
+   && ! grep -m1 '^Features' /proc/cpuinfo 2>/dev/null | grep -qw sve; then
+  export OPENBLAS_CORETYPE=ARMV8
+  echo "arm64 CPU with SME but no SVE detected: setting OPENBLAS_CORETYPE=ARMV8 so numpy imports (see script for why)."
+fi
+
+# Don't hide a crash here: a signal death (e.g. SIGILL from numpy's OpenBLAS on
+# some arm64 VMs, exit 132) prints no traceback, and a bare `|| exit 1` would
+# turn it into a silent "contract is stale" upstream. Name the step and the code.
+uv run --project app/server-python python app/server-python/tools/dump_openapi.py "$OUT_SPEC"
+status=$?
+if [ "$status" -ne 0 ]; then
+  printf '\033[31mgenerate-api-contract: dumping the OpenAPI document failed (exit %s) -- the contract was NOT compared\033[0m\n' "$status" >&2
+  if [ "$status" -eq 132 ]; then
+    echo "  exit 132 is SIGILL: on an arm64 VM without SVE, numpy's OpenBLAS picks a core the CPU lacks." >&2
+    echo "  Work around it with: export OPENBLAS_CORETYPE=ARMV8" >&2
+  fi
+  exit 1
+fi
 
 # openapi-typescript emits types only -- no runtime, no `enum` (tsconfig.app.json
 # sets erasableSyntaxOnly). Run from app/client-web so npx --no-install resolves

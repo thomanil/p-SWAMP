@@ -1,0 +1,63 @@
+# Manifest for pswamp-core: the shared data-architecture building blocks that
+# every host (the web server today; Qt or a standalone module service later)
+# imports. Deliberately tiny: pydantic is its only dependency, so a provider
+# written outside this repo can import the contract and nothing else, and none
+# of the analysis core's numpy/scipy stack rides along.
+#
+# It is the THIRD Python project in the repo, beside the desktop package (root
+# pyproject.toml) and the web backend (app/server-python/pyproject.toml). The
+# web backend consumes it as an editable path dependency, exactly as it does
+# the desktop package; see "Three Python projects in one repo" in AGENTS.md.
+#
+# Its tests (core/tests/) run in the web backend's locked environment through
+# scripts/run-python-server-tests.sh, so there is no lockfile here on purpose.
+
+[project]
+name = "pswamp-core"
+version = "0.1.0"
+description = "p-SWAMP shared data architecture: messages, data gateway, player, bus, modules, pipeline."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.12",
+]
+
+# Two optional extras, both imported lazily inside the methods that need them,
+# so the core stays pydantic-only unless a host asks for one:
+# - [kafka]: `pswamp_core.transport.kafka` carries a module's input and output
+#   topics between processes over a Kafka-API broker (Apache Kafka locally).
+# - [remote-data]: `pswamp_core.datagateway.clients.remote_data`, the
+#   Remote Data Client, a provider over a deployment's own data service --
+#   httpx for the REST queries it sends and the streamed responses it reads.
+# The web backend takes both (app/server-python/pyproject.toml): the PMU test
+# streamer's stats module runs as its own service, and the Time Series Explorer
+# queries a remote data service.
+[project.optional-dependencies]
+kafka = ["aiokafka>=0.14,<1"]
+remote-data = ["httpx>=0.28,<1"]
+
+# What core/examples/ needs beyond the library: the remote data stub is a small
+# FastAPI service. A group, not an extra, because nothing that installs
+# pswamp-core should ever get it; examples/ is outside the built package too.
+# The web backend's environment, where the core's tests run, already has both.
+[dependency-groups]
+examples = ["fastapi>=0.141", "uvicorn>=0.52"]
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+# uv_build's default source layout is src/<module-name>/, which is what we use.
+[tool.uv.build-backend]
+module-name = "pswamp_core"
+
+# Deliberately no [tool.ruff] section: scripts/error_check.sh passes an explicit
+# `--select F`, and ruff would otherwise treat this file as config.
+
+# So the suite also runs when pointed at directly (`pytest core/tests`, or a
+# node id through scripts/run-python-server-tests.sh): pytest then takes THIS
+# file as its config rather than the server's. Same asyncio mode as there.
+[tool.pytest.ini_options]
+pythonpath = ["examples"]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -35,6 +35,11 @@ import api_contract
 import pmu_test_streamer
 import pswamp_web
 import reference_subapp
+import frequency_peek
+import time_series_explorer
+import errors
+import islanding_stream
+import mode_estimation
 import pswamp_web.app_status
 import pswamp_web.grid
 import pswamp_web.islanding
@@ -76,7 +81,8 @@ APPS = [
     AppEntry(
         "pmu-test-streamer",
         pmu_test_streamer,
-        "Scaffold demo: replays sample PMU records line by line.",
+        "The data architecture's thin slice: a recorded and a live PMU feed through one "
+        "core pipeline per client, with replay commands and a frame-stats module.",
     ),
     AppEntry(
         "app-status",
@@ -115,6 +121,33 @@ APPS = [
         "reference-subapp",
         reference_subapp,
         "The reference example: a per-client counter over the whole stack.",
+    ),
+    AppEntry(
+        "frequency-peek",
+        frequency_peek,
+        "Live frequencies per station from a core module over the live PMU feed. "
+        "Downstream only, no commands.",
+    ),
+    AppEntry(
+        "time-series-explorer",
+        time_series_explorer,
+        "Timeseries Db Explorer: play a range and count a range of a time series, queried through "
+        "the Remote Data Client from whatever store the deployment runs.",
+    ),
+    AppEntry(
+        "errors",
+        errors,
+        "Operational errors from any of a client's pipelines, for the layout's error tray.",
+    ),
+    AppEntry(
+        "islanding-stream",
+        islanding_stream,
+        "p-SWAMP's islanding detector as a module over the N44 recording, under load; in-process or as a worker.",
+    ),
+    AppEntry(
+        "mode-estimation",
+        mode_estimation,
+        "p-SWAMP's N4SID mode estimation as a module over the N44 recording, under load; in-process or as a worker.",
     ),
 ]
 

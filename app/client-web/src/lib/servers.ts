@@ -31,6 +31,12 @@ export const ISLANDING_WS_PATH = '/api/islanding/ws'
 export const PHASORS_WS_PATH = '/api/phasors/ws'
 export const LINE_OUTAGE_WS_PATH = '/api/line-outage/ws'
 export const REFERENCE_SUBAPP_WS_PATH = '/api/reference-subapp/ws'
+export const FREQUENCY_PEEK_WS_PATH = '/api/frequency-peek/ws'
+export const TIME_SERIES_EXPLORER_WS_PATH = '/api/time-series-explorer/ws'
+// Not a page's: the layout opens this one, outside any page, for the error tray.
+export const ERRORS_WS_PATH = '/api/errors/ws'
+export const ISLANDING_STREAM_WS_PATH = '/api/islanding-stream/ws'
+export const MODE_ESTIMATION_WS_PATH = '/api/mode-estimation/ws'
 
 // Each app's REST prefix — where its commands are POSTed. Same value as the app's
 // mount prefix in APPS (app/server-python/src/server.py); an endpoint path is
@@ -39,6 +45,9 @@ export const PMU_STREAM_API_PATH = '/api/pmu-test-streamer'
 export const TIME_WINDOW_API_PATH = '/api/time-window'
 export const ISLANDING_API_PATH = '/api/islanding'
 export const REFERENCE_SUBAPP_API_PATH = '/api/reference-subapp'
+export const TIME_SERIES_EXPLORER_API_PATH = '/api/time-series-explorer'
+export const ISLANDING_STREAM_API_PATH = '/api/islanding-stream'
+export const MODE_ESTIMATION_API_PATH = '/api/mode-estimation'
 
 // The grid topology is static, so it is fetched over HTTP rather than pushed.
 export const GRID_MODEL_PATH = '/api/grid/model'

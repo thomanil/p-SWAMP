@@ -1,0 +1,271 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright Contributors to the p-SWAMP Project.
+
+"""The Time Series Explorer: the row-count module, the pipeline the endpoint
+builds, the two commands end to end, the refusals -- and the provider swapped
+by environment for the Remote Data Client over the in-process stub."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import timedelta
+
+import httpx
+import pytest
+from fastapi import HTTPException
+
+from errors import HUB
+from pmu_test_streamer.sample_client import SampleRecordingClient, load_sample
+from pswamp_core.bus import InProcessBus, Overflow
+from pswamp_core.datagateway import Capability, DataGateway
+from pswamp_core.datagateway.clients import InMemoryClient
+from pswamp_core.datagateway.clients.remote_data import RemoteDataClient
+from pswamp_core.messages import ErrorEvent, PlayerStatus, PmuFrame, ReplayCommand
+from time_series_explorer import api
+from time_series_explorer.row_count_module import CountRangeCommand, RowCountModule, RowCountResult
+from remote_data_stub.app import create_app
+from remote_data_stub.recording import TiledRecording
+from remote_data_stub.service import QueryService
+
+ONE_SECOND = timedelta(seconds=1)
+
+
+class FailsAfterTwo(InMemoryClient):
+    """A history client whose stream dies after two records."""
+
+    def __init__(self, name: str = "flaky") -> None:
+        recording = load_sample()
+        super().__init__(
+            name, [PmuFrame], list(recording.frames),
+            capabilities=Capability.HISTORY_CONSUME,
+        )
+
+    async def consume(self, model, time_range, mRID=None):
+        sent = 0
+        async for record in super().consume(model, time_range, mRID):
+            if sent == 2 and model is PmuFrame:
+                raise TimeoutError("the store went quiet")
+            sent += 1
+            yield record
+
+
+# --- the module ------------------------------------------------------------------------
+
+
+async def test_row_count_module_counts_a_range_and_reports_a_failure():
+    t0 = load_sample().frames[0].timestamp
+    module = RowCountModule()
+    await module.setup(DataGateway([SampleRecordingClient()]), InProcessBus())
+    result = await module.count(t0, t0 + ONE_SECOND)
+    assert (result.count, result.error) == (20, None) and result.elapsed_s >= 0
+    assert (await module.count(t0 + timedelta(seconds=10), t0 + timedelta(seconds=11))).count == 0
+    assert RowCountResult.topic == "row.count.result"
+    assert RowCountModule.commands == (CountRangeCommand,) and RowCountModule.input_model is None
+    assert CountRangeCommand.name == "count.range"
+
+    flaky = RowCountModule()
+    await flaky.setup(DataGateway([FailsAfterTwo()]), InProcessBus())
+    failed = await flaky.count(t0, t0 + ONE_SECOND)
+    assert failed.count == 2 and failed.error == "TimeoutError: the store went quiet"
+    with pytest.raises(ValueError):
+        CountRangeCommand(start="not a time", end=t0)
+    with pytest.raises(ValueError):
+        CountRangeCommand(start=t0, end=t0)
+
+    class Unreachable(SampleRecordingClient):
+        async def coverage(self, model, mRID=None):
+            raise ConnectionError("refused")
+
+    down = RowCountModule()
+    await down.setup(DataGateway([Unreachable()]), InProcessBus())
+    unreachable = await down.count(t0, t0 + ONE_SECOND)
+    assert unreachable.count == 0 and "no coverage" in (unreachable.error or "")
+
+
+async def test_the_module_answers_a_command_with_its_request_id_and_raises_an_error_event():
+    bus = InProcessBus()
+    bus.bind(asyncio.get_running_loop())
+    module = RowCountModule()
+    await module.setup(DataGateway([FailsAfterTwo()]), bus)
+    inbox = module.command_inbox(bus)
+    inbox.start()
+    t0 = load_sample().frames[0].timestamp
+    try:
+        with bus.subscribe(RowCountResult) as results, bus.subscribe(ErrorEvent) as errors:
+            bus.publish(ReplayCommand())  # a player's command: not ours
+            bus.publish(CountRangeCommand(start=t0, end=t0 + ONE_SECOND, target="player"))  # not for us
+            command = CountRangeCommand(start=t0, end=t0 + ONE_SECOND)
+            bus.publish(command)
+            result = await asyncio.wait_for(results.get(), 2)
+            event = await asyncio.wait_for(errors.get(), 2)
+            assert results.get_nowait() is None
+    finally:
+        await inbox.stop()
+    assert result.request_id == command.request_id and result.result.count == 2
+    assert result.result.error is not None and result.app.name == "row-count"
+    assert event.request_id == command.request_id and event.source == "row-count"
+    assert event.detail == result.result.error
+
+
+# --- the pipeline the endpoint builds --------------------------------------------------
+
+
+async def test_pipeline_counts_a_range_and_plays_a_bounded_range(monkeypatch):
+    monkeypatch.delenv(api.DATA_CLIENTS_VARIABLE, raising=False)
+    pipeline = await api.build_pipeline("21")
+    assert list(pipeline.gateway.clients) == ["sample"]
+    assert [m.name for m in pipeline.modules] == ["row-count", "error-forwarder"]
+    await pipeline.start()
+    try:
+        opening = api.state_message(pipeline)
+        assert opening.frame is None and opening.count is None
+        assert opening.player.mode == "replay" and opening.player.paused and opening.player.loop is False
+        t0 = opening.player.coverage_start
+        assert t0 is not None and opening.player.coverage_end == t0 + timedelta(seconds=3.0)
+
+        with pipeline.bus.subscribe(RowCountResult, overflow=Overflow.GROW) as results, pipeline.bus.subscribe(
+            PmuFrame, overflow=Overflow.GROW
+        ) as frames, pipeline.bus.subscribe(PlayerStatus, overflow=Overflow.GROW) as statuses:
+            pipeline.player.paced = False
+            command = CountRangeCommand(client_id="21", start=t0, end=t0 + ONE_SECOND)
+            pipeline.dispatch(command)
+            result = await asyncio.wait_for(results.get(), 2)
+            assert result.result.count == 20 and result.request_id == command.request_id
+            message = api.state_message(pipeline)
+            assert message.count is not None and message.count.result.count == 20
+            assert message.frame is None  # a count plays nothing
+
+            pipeline.dispatch(ReplayCommand(
+                client_id="21", start=t0 + ONE_SECOND, end=t0 + timedelta(seconds=1.25), play=True,
+            ))
+            got = [await asyncio.wait_for(frames.get(), 2) for _ in range(5)]
+            ended = await _wait_status(statuses, lambda s: s.ended)
+            assert [f.timestamp for f in got] == [t0 + timedelta(seconds=1.0 + 0.05 * i) for i in range(5)]
+            assert ended.paused and ended.range_end == t0 + timedelta(seconds=1.25) and ended.error is None
+            message = api.state_message(pipeline)
+            assert message.frame is not None and message.frame.timestamp == got[-1].timestamp
+            assert message.frame.header == load_sample().header  # the layout rides with the frame
+            assert message.count is not None  # the last count is kept alongside
+    finally:
+        await pipeline.stop()
+
+
+async def test_commands_are_refused_outside_the_coverage_and_dispatched_inside_it(monkeypatch):
+    monkeypatch.delenv(api.DATA_CLIENTS_VARIABLE, raising=False)
+    api.REGISTRY.bind(asyncio.get_running_loop())
+    pipeline = await api.REGISTRY.acquire("22")
+    try:
+        t0 = pipeline.player.status().coverage_start
+        # A replay starting outside the coverage is refused, with the player's reason.
+        with pytest.raises(HTTPException) as refused:
+            await api.play_range("22", api.RangeBody(start=t0 - ONE_SECOND, end=t0 + ONE_SECOND))
+        assert refused.value.status_code == 409 and "outside the history" in refused.value.detail
+        with pytest.raises(HTTPException) as missing:
+            await api.stop("23")
+        assert missing.value.status_code == 404
+        assert (await api.refresh("22")).applied == "refresh"
+        with pytest.raises(ValueError):
+            api.RangeBody(start=t0, end=t0)
+        with pipeline.bus.subscribe(RowCountResult, overflow=Overflow.GROW) as results:
+            ack = await api.count("22", api.RangeBody(start=t0, end=t0 + ONE_SECOND))
+            assert ack.applied == "count.range"
+            result = await asyncio.wait_for(results.get(), 2)
+            assert result.result.count == 20
+            # A count is not checked against the coverage: it counts what is there.
+            await api.count("22", api.RangeBody(start=t0 - ONE_SECOND, end=t0))
+            outside = await asyncio.wait_for(results.get(), 2)
+            assert outside.result.count == 0 and outside.result.error is None
+        # A range ending past the coverage is clamped to it, not refused.
+        assert (await api.play_range("22", api.RangeBody(start=t0, end=t0 + timedelta(seconds=30)))).applied == "replay"
+        assert (await api.stop("22")).applied == "pause"
+    finally:
+        api.REGISTRY.release("22")
+        await api.REGISTRY.stop_all()
+        api.REGISTRY.bind(None)
+
+
+async def _wait_status(subscription, predicate, timeout: float = 2.0) -> PlayerStatus:
+    async def _wait():
+        while True:
+            message = await subscription.get()
+            if predicate(message):
+                return message
+
+    return await asyncio.wait_for(_wait(), timeout)
+
+
+# --- the provider swapped by environment: the Remote Data Client over the stub ------
+
+
+class HermeticRemoteDataClient(RemoteDataClient):
+    """The Remote Data Client wired to the stub in-process -- what a deployment
+    names in TIME_SERIES_EXPLORER_DATA_CLIENTS, minus the port."""
+
+    services: list[QueryService] = []
+    env_settings = ()  # nothing to read: the wiring is in-process
+
+    def __init__(self, name: str) -> None:
+        service = QueryService(TiledRecording.load(repeat=2))
+        HermeticRemoteDataClient.services.append(service)
+        http = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(service)), base_url="http://stub")
+        super().__init__(name, url="http://stub", http_client=http)
+
+
+class UnreachableClient(SampleRecordingClient):
+    """A remote data service whose URL cannot be reached, as the client reports it."""
+
+    env_settings = ()
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+
+    async def coverage(self, model, mRID=None):
+        raise ConnectionError("cannot reach http://remote-data:8100: ConnectError: All connection attempts failed")
+
+
+async def test_an_unreachable_data_service_reaches_the_error_tray_and_the_page_still_connects(monkeypatch):
+    monkeypatch.setenv(api.DATA_CLIENTS_VARIABLE, "remote_data:test_time_series_explorer:UnreachableClient")
+    api.REGISTRY.bind(asyncio.get_running_loop())
+    HUB.forget("26")
+    pipeline = await api.REGISTRY.acquire("26")  # no 1011: the pipeline starts, stopped
+    try:
+        for _ in range(50):
+            if HUB.recent("26"):
+                break
+            await asyncio.sleep(0.01)
+        (notice,) = HUB.recent("26")
+        assert notice.app == "time-series-explorer" and notice.source == "remote_data"
+        assert notice.message == "the provider cannot be reached"
+        assert "cannot reach http://remote-data:8100" in (notice.detail or "")
+        message = api.state_message(pipeline)
+        assert message.player.error == notice.detail and message.player.coverage_start is None
+        t0 = load_sample().frames[0].timestamp
+        with pytest.raises(HTTPException) as refused:
+            await api.play_range("26", api.RangeBody(start=t0, end=t0 + ONE_SECOND))
+        assert refused.value.status_code == 409 and "no history" in refused.value.detail
+        assert (await api.refresh("26")).applied == "refresh"  # the way back, once it answers
+    finally:
+        api.REGISTRY.release("26")
+        await api.REGISTRY.stop_all()
+        api.REGISTRY.bind(None)
+        HUB.forget("26")
+
+
+async def test_provider_is_swapped_by_environment_alone(monkeypatch):
+    monkeypatch.setenv(api.DATA_CLIENTS_VARIABLE, "remote_data:test_time_series_explorer:HermeticRemoteDataClient")
+    pipeline = await api.build_pipeline("24")
+    assert list(pipeline.gateway.clients) == ["remote_data"]
+    await pipeline.start()
+    try:
+        status = pipeline.player.status()
+        t0 = status.coverage_start
+        assert status.coverage_end == t0 + timedelta(seconds=6.0)  # the stub's tiled minute
+        with pipeline.bus.subscribe(RowCountResult, overflow=Overflow.GROW) as results:
+            pipeline.dispatch(CountRangeCommand(start=t0 + timedelta(seconds=4), end=t0 + timedelta(seconds=5)))
+            result = await asyncio.wait_for(results.get(), 3)
+        assert result.result.count == 20 and result.result.error is None
+        service = HermeticRemoteDataClient.services[-1]
+        assert service.completed == 1  # the count crossed REST and the streamed answer
+        assert HUB.recent("24") == []
+    finally:
+        await pipeline.stop()

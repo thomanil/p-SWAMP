@@ -279,7 +279,8 @@ __all__ = ["WS_MESSAGE", "ReferenceSubappState", "router"]
 ```
 
 An app that also needs startup/shutdown work exports a `lifespan` beside those —
-`pmu_test_streamer` (a playback ticker) and `pswamp_web` (the pipeline registry) do.
+every app over a core pipeline (binding and draining its `PipelineRegistry`) and
+`pswamp_web` (the hub registry) do.
 
 `api_contract.py` walks the same `APPS` list `server.py` mounts and collects
 whatever each package exports under that name. An app with no socket
@@ -325,8 +326,7 @@ type. Additive changes need nothing.
 
 It is manual on purpose: a version that moves on every commit tells a reader
 nothing; one that moves only when compatibility breaks becomes the single diff line
-that says "coordinate this one". If you bump it, say so in the PR — see "The api
-contract" in `how-we-work-together.md`.
+that says "coordinate this one". If you bump it, say so in the PR.
 
 
 Addressing: origin, prefix, client id
@@ -416,14 +416,18 @@ From there the two families of app part ways.
 - a command handler that mutates one client's state and pushes it, and a socket
   handler that pushes on connect and then only waits.
 
-`pmu_test_streamer/` (the older demo, on its way out) adds the one thing the
-reference app has no need of: a `ticker()` task, started by the package's `lifespan`,
-advancing every playing client each tick and sending each its own `state_message()`.
-Copy that pair when an app must push on its own clock rather than only in response to
-a command.
+**The apps over the shared core** — `pmu_test_streamer/` is the worked example, and
+`frequency_peek/`, `time_series_explorer/`, `islanding_stream/` and `mode_estimation/`
+follow it — keep one core `Pipeline` per client in a `PipelineRegistry` (bound by the
+package's `lifespan`, capped and idle-evicted). The socket subscribes to the
+pipeline's bus and pushes a `state_message()` on each change: `frequency_peek/`
+through the grid monitor's `event_queue` / `serve_updates` loop, the streamer
+and the explorer through their own subscribe-and-coalesce copy
+(`subscribe_updates` / `serve_stream`), and the two load-test pages through an
+inline subscription that also wakes every half second for throughput readings. See `server-data-architecture.md` for the pipeline itself.
 
 A client id may briefly hold several sockets — a reconnect overlapping the dying one
-— which is why it is a set. `send_to_client` iterates a snapshot and drops any socket
+— which is why it maps to a list. `send_to_client` iterates a snapshot and drops any socket
 that fails mid-send, so one dead connection cannot break delivery to the rest.
 
 **The p-SWAMP layer** (`src/pswamp_web/`) is the real one, with a pipeline behind
@@ -566,18 +570,18 @@ and re-exported by `shared.py` for the scaffold apps (the import runs inward bec
 and sockets cannot disagree about identity.
 
 Every handler then does two things: change the right state, and get that change onto
-the screen. The state lives in three different places, so there are three
+the screen. The state lives in four different places, so there are four
 arrangements.
 
-**1. State in a module dict** — `reference_subapp`, `pmu_test_streamer`, anything the
-scaffold generates. The simplest case, needing no new plumbing: `SocketRegistry`
+**1. State in a module dict** — `reference_subapp`, anything the scaffold
+generates. The simplest case, needing no new plumbing: `SocketRegistry`
 already addresses a client id and runs on this same event loop.
 
 ```
 POST /api/reference-subapp/count/bump?client_id=42
   → get_state("42").bump()
   → logger.info("client %s: %s …", "42", "bump")
-  → manager.send_to_client("42", state_message(model))   ← the push, from an HTTP handler
+  → sockets.send_to_client("42", state_message(model))   ← the push, from an HTTP handler
   → 200 CommandAck(applied="bump")
 ```
 
@@ -620,15 +624,43 @@ to all of them: one browser is one viewer, and its views should agree. The regis
 stores them in a **list**, not a set, because these are `eq=True` dataclasses and
 Python makes those unhashable.
 
-Two rules that hold across all three
+**4. State in a core pipeline, typed commands** — `pmu_test_streamer` (playback:
+play / stop / back / forward / seek / speed / live / replay), `time_series_explorer`
+(play-range / stop / count / refresh), `islanding_stream` and `mode_estimation`
+(play / stop / speed). The endpoint builds one typed command and hands it on; the
+receiver checks it before anything is published:
+
+```
+POST /api/pmu-test-streamer/playback/seek?client_id=42   {"offset_s": 12.5}
+  → SeekCommand(client_id="42", offset_s=12.5)
+  → shared.dispatch_command(REGISTRY, command, logger)
+      → REGISTRY.peek("42")                   ← 404 if this client has no pipeline
+      → pipeline.dispatch(command)            ← routed by its class to the one
+                                                receiver that declared it;
+                                                receiver.validate() refuses → 409
+                                                (a module in a worker: the
+                                                stand-in accepts; its refusal
+                                                arrives as an ErrorEvent)
+      → published on the client's bus
+  → 200 CommandAck(applied=…)
+  → …the effect arrives on the socket, like every other change.
+```
+
+No verb strings and no per-app refusal checks: a precondition belongs in the
+receiver's `validate`. The mechanism is "Commands" in `server-data-architecture.md`.
+
+Two rules that hold across all four
 --
 
-- **A command never builds a pipeline.** `live_hub(client_id)` peeks; it never calls
-  `REGISTRY.acquire`. Acquiring would spend four threads and ~30 MB against
-  `MAX_PIPELINES` on a replay nobody is watching, and the POST has no socket to
+- **A command never builds a pipeline.** `live_hub(client_id)` peeks (and
+  `dispatch_command` does the same with `REGISTRY.peek`); neither calls
+  `REGISTRY.acquire`. Acquiring would build a whole pipeline against
+  `MAX_PIPELINES` (for the grid monitor's hub, four threads and ~30 MB) on a
+  replay nobody is watching, and the POST has no socket to
   deliver to. No pipeline means a 404 — in practice, "you have no page open".
 - **A socket that receives nothing still needs its receive loop.** Every WS handler
-  ends in `while True: await ws.receive_text()`. Without a pending receive, nothing
+  ends in `wait_for_disconnect(ws)` (`pswamp_web/pump.py`), a
+  `while True: await ws.receive_text()`. Without a pending receive, nothing
   notices a closed socket until the next send, so an idle client lingers
   indefinitely — holding a pipeline slot, in the `pswamp_web` case.
 
@@ -651,9 +683,9 @@ Error and refusal semantics
 |---|---|
 | missing, empty, negative or non-numeric `client_id`, or more than 20 digits | `422`, from FastAPI validation, before the handler |
 | malformed command body | `422`, from the pydantic model |
-| unknown sequence name | `422` naming the valid ones |
 | unknown alarm uuid | `404` |
 | command for a client with no pipeline | `404` |
+| command its receiver refuses in the pipeline's current state (a core pipeline: e.g. seek while live) | `409` with the reason as `detail` (`COMMAND_RESPONSES` in `shared.py`) |
 | command for a client with no open view (`time-window`) | `404` |
 | socket with an unusable client id | close `1008`, **before** accept — client stops retrying |
 | socket when every pipeline is in use | accept, then close `1013` — client stops retrying |
@@ -682,7 +714,7 @@ Where the pieces live
 | `app/client-web/src/hooks/useServerSocket.ts` | The connection half, shared by every page |
 | `app/client-web/src/lib/servers.ts` | `resolveApiUrl` / `resolveServerUrl` and the path consts |
 | `app/server-python/src/server.py` | Wiring: mounts routers from `APPS`, composes lifespans |
-| `app/server-python/src/shared.py` | `SocketRegistry`, and `ClientId` / `CommandAck` / `read_client_id` re-exported from `pswamp_web/wire.py` |
+| `app/server-python/src/shared.py` | `SocketRegistry`; `dispatch_command` + `COMMAND_RESPONSES` for core-pipeline commands; re-exports of the `pswamp_web` wire primitives, push loop and the `errors` forwarder (its `__all__` is the list) |
 | `app/server-python/src/pswamp_web/wire.py` | Every p-SWAMP message model, and `send_state` |
 | `app/server-python/src/pswamp_web/hub.py` | One pipeline per client, and the registry over them |
 

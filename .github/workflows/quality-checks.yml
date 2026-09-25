@@ -68,6 +68,12 @@ jobs:
       - name: Server unit tests
         run: ./scripts/run-python-server-tests.sh
 
+      # The remote data stub held to the same black-box HTTP check a deployment's
+      # own service is (doc/remote-data-integration-contract.md): starts the stub
+      # on a local port, checks it over plain HTTP, stops it.
+      - name: Remote data stub keeps the HTTP contract
+        run: ./scripts/check-remote-data-service.sh
+
       # TODO Re-enable once the desktop suite (repo-root tests/) collects again:
       # tests/test_run_simple_case_{kafka,nqkafka}.py import
       # pswamp.monitoring.utils.TimeWindowRTApp, removed in 15a3f7a. It also needs

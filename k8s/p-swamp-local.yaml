@@ -1,15 +1,45 @@
 # Local minikube deployment of the p-swamp client-server stack (the FastAPI
 # state server, with the web client baked in and served from the same origin).
 #
-# Single replica on purpose: the server holds per-client state in memory and
-# runs one ticker for everyone (see src/pmu_test_streamer/api.py), so it must
-# never be scaled past 1 — a second pod would have its own independent state and
+# Single replica on purpose: the server holds per-client state in memory — one
+# pipeline per connected client (src/pmu_test_streamer/api.py, pswamp_web/hub.py)
+# — so it must never be scaled past 1 — a second pod would have its own independent state and
 # the Service would split clients across them. The strategy is Recreate (not the
 # default RollingUpdate) so the old pod is gone before the new one serves, for
 # the same reason.
 #
-# Nothing is persisted: no DB, no volumes. A rollout resets every client's state,
-# which is the expected behavior for this stateless deployment.
+# Nothing is persisted: no DB, no persistent volumes. A rollout resets every
+# client's state, which is the expected behavior for this stateless deployment.
+# The volumes below are a read-only ConfigMap (configuration, not storage) and
+# the broker's emptyDir (scratch that dies with its pod, on purpose).
+#
+# Six Deployments: the server; the PMU test streamer's stats module as its
+# own pod (p-swamp-stats-worker, the same image with a different command); the
+# Islanding stream's and the Mode estimation's modules likewise
+# (p-swamp-islanding-worker, p-swamp-mode-estimation-worker); the
+# dummy remote data service the Time Series Explorer queries
+# (p-swamp-remote-data-stub, the same image again, with a Service since the
+# server calls it over HTTP);
+# and the Apache Kafka broker between the server and the workers (the stub is
+# reached over HTTP alone). The module runs in the
+# worker because the server's env block says so
+# (PMU_TEST_STREAMER_MODULE_TRANSPORT); drop those two variables and the module
+# runs in the server pod, with nothing else changed. Likewise the explorer reads
+# the stub because TIME_SERIES_EXPLORER_DATA_CLIENTS says so; drop it and the
+# explorer runs over the sample recording in the image. See "Running a module
+# as a separate service" and "A remote data service as a provider" in
+# doc/server-data-architecture.md.
+#
+# The PMU data sources are configured here rather than baked in. The env block
+# names the two providers (the streamer's own default, spelled out) and points
+# the live feed at k8s/deployment_pmu_data_file_example.txt, which the start
+# script turns into the ConfigMap mounted below — a file that is NOT in the
+# image, which is the point: it shows a deployment feeding the server its own
+# data with nothing but a variable and a mount. In that file every value counts
+# up by one per frame from a round start (100 kV, 0°, 60 Hz), the same in every
+# station, so a page switched to Live shows at a glance both that the
+# k8s-configured source is what is feeding it and that it is moving, while
+# Recorded still replays the recording shipped in the image.
 #
 # Apply with scripts/start-pswamp-in-local-minikube-cluster.sh, which builds the image straight into
 # minikube and forces a rollout. Clients reach this over the NodePort at
@@ -52,6 +82,63 @@ spec:
             # the Dockerfile's ENV, so it's not repeated here.
             - name: HOST
               value: "0.0.0.0"
+            # Which providers make up each client's gateway: name:module:Class,
+            # comma-separated (doc/server-data-architecture.md, "Providers").
+            # This is the streamer's built-in default; a deployment's own
+            # provider is one more package in the image and one more entry here.
+            - name: PSWAMP_DATA_CLIENTS
+              value: "sample:pmu_test_streamer.sample_client:SampleRecordingClient,live:pmu_test_streamer.live_client:LiveSyntheticClient"
+            # Each provider reads its own {NAME}_{SETTING} block. The live feed
+            # cycles the rows of this file instead of the image's sample_data.txt.
+            # It keeps the recording's channel layout (the same five stations at
+            # 20 Hz), which the live client stamps into every frame it emits.
+            - name: LIVE_PATH
+              value: /etc/p-swamp/pmu/deployment_pmu_data_file_example.txt
+            # The stats module runs in the p-swamp-stats-worker pod, reached
+            # over the p-swamp-kafka broker: each client's pipeline then
+            # holds a RemoteModule that publishes frames on the module's input
+            # topic under the client's key and tails the results back. The
+            # worker reads the same two variables.
+            - name: PMU_TEST_STREAMER_MODULE_TRANSPORT
+              value: kafka:pswamp_core.transport.kafka:KafkaTransport
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
+            # The Islanding stream's module runs in the
+            # p-swamp-islanding-worker pod, over a transport of its own name
+            # whose topics carry a prefix (islanding-stream.pmu.frame, ...):
+            # otherwise it and the stats-worker would both tail pmu.frame,
+            # keyed by the same client ids, and run over each other's frames.
+            - name: ISLANDING_STREAM_MODULE_TRANSPORT
+              value: islanding:pswamp_core.transport.kafka:KafkaTransport
+            - name: ISLANDING_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
+            - name: ISLANDING_TOPIC_PREFIX
+              value: islanding-stream
+            # The Mode estimation page's N4SID module runs in the
+            # p-swamp-mode-estimation-worker pod, on its own transport name
+            # and topic prefix for the same reason.
+            - name: MODE_ESTIMATION_MODULE_TRANSPORT
+              value: modes:pswamp_core.transport.kafka:KafkaTransport
+            - name: MODES_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
+            - name: MODES_TOPIC_PREFIX
+              value: mode-estimation
+            # The Time Series Explorer's provider is the Remote Data Client:
+            # it POSTs range queries to REMOTE_DATA_URL (the
+            # p-swamp-remote-data-stub Service below) and reads each answer back
+            # as that call's streamed response. A deployment with its own data
+            # service keeps these two lines and changes the URL;
+            # what store sits behind that service is its own choice -- the
+            # contract is the client's docstring (core/src/pswamp_core/
+            # datagateway/clients/remote_data.py).
+            - name: TIME_SERIES_EXPLORER_DATA_CLIENTS
+              value: remote_data:pswamp_core.datagateway.clients.remote_data:RemoteDataClient
+            - name: REMOTE_DATA_URL
+              value: http://p-swamp-remote-data-stub:8100
+          volumeMounts:
+            - name: pmu-data
+              mountPath: /etc/p-swamp/pmu
+              readOnly: true
           # Both probes hit /healthz: with no external dependencies there is
           # nothing readiness could check that liveness doesn't. Readiness still
           # earns its keep by holding the pod out of the Service until the app
@@ -96,6 +183,13 @@ spec:
               # This was 128Mi when one pipeline served the whole process, which
               # does not fit even a single client under the new arrangement.
               memory: "768Mi"
+      volumes:
+        # Built by scripts/start-pswamp-in-local-minikube-cluster.sh from
+        # k8s/deployment_pmu_data_file_example.txt (kubectl create configmap
+        # --from-file). Not inlined here, so the data stays a plain text file.
+        - name: pmu-data
+          configMap:
+            name: p-swamp-pmu-data
 ---
 apiVersion: v1
 kind: Service
@@ -113,3 +207,375 @@ spec:
       port: 8000        # cluster-internal Service port
       targetPort: 8000  # container port
       nodePort: 30080   # fixed external port (valid range 30000-32767)
+---
+# The stats module as its own pod: the same image with a different command
+# (src/pmu_test_streamer/worker.py). No port and no Service: it tails pmu.frame
+# off the broker below, runs one FrameStatsModule per client key it sees, and
+# publishes frame.stats.result back under that key. One replica because the
+# host owns every key it sees; two workers would each answer every frame.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp-stats-worker
+  labels:
+    app: p-swamp-stats-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp-stats-worker
+  template:
+    metadata:
+      labels:
+        app: p-swamp-stats-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: stats-worker
+          image: p-swamp:latest
+          imagePullPolicy: Never
+          command: ["python", "-m", "pmu_test_streamer.worker"]
+          env:
+            - name: PMU_TEST_STREAMER_MODULE_TRANSPORT
+              value: kafka:pswamp_core.transport.kafka:KafkaTransport
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
+          # No probes: nothing routes here (no readiness), and the process
+          # exits when it cannot serve, which restarts the pod. A liveness
+          # probe that could tell an idle worker from a stuck one would need
+          # the worker to expose something; recorded as open in STEP 5.
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              # See the server's note on CPU: the same nested-virtualization
+              # throttling applies to a 20 Hz loop here.
+              cpu: "1"
+              # The same import graph as the server but no replay pipeline:
+              # one module per client key, one consumer per topic.
+              memory: "512Mi"
+---
+# The islanding module as its own pod (src/islanding_stream/worker.py): the
+# stats-worker's twin for the Islanding stream page, with its own transport
+# name and topic prefix (see the server's env). It runs p-SWAMP's islanding
+# detector once per client key over the N44 recording's 700-channel frames;
+# the page's speed control is what loads it, and when it cannot keep up it
+# says so on error.event, which reaches that client's error tray. One replica
+# for the same reason as the stats-worker.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp-islanding-worker
+  labels:
+    app: p-swamp-islanding-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp-islanding-worker
+  template:
+    metadata:
+      labels:
+        app: p-swamp-islanding-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: islanding-worker
+          image: p-swamp:latest
+          imagePullPolicy: Never
+          command: ["python", "-m", "islanding_stream.worker"]
+          env:
+            - name: ISLANDING_STREAM_MODULE_TRANSPORT
+              value: islanding:pswamp_core.transport.kafka:KafkaTransport
+            - name: ISLANDING_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
+            - name: ISLANDING_TOPIC_PREFIX
+              value: islanding-stream
+          # No probes, as for the stats-worker.
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              # Decoding 700-column frames at speed is the load this pod is
+              # here to show; a full core lets it find its own ceiling.
+              cpu: "1"
+              # One 10 s window of 44 frequencies per client key: small.
+              memory: "512Mi"
+---
+# The N4SID module as its own pod (src/mode_estimation/worker.py): the heavy
+# module -- ~200 ms of CPU per identification, once per second of data per
+# client -- so unlike the other workers it gets more than one core, and its
+# identifications run in a thread pool (MODE_ESTIMATION_EXECUTION; see
+# docker-compose.yml for the other two ways). One replica for the same reason
+# as the stats-worker.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp-mode-estimation-worker
+  labels:
+    app: p-swamp-mode-estimation-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp-mode-estimation-worker
+  template:
+    metadata:
+      labels:
+        app: p-swamp-mode-estimation-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: mode-estimation-worker
+          image: p-swamp:latest
+          imagePullPolicy: Never
+          command: ["python", "-m", "mode_estimation.worker"]
+          env:
+            - name: MODE_ESTIMATION_MODULE_TRANSPORT
+              value: modes:pswamp_core.transport.kafka:KafkaTransport
+            - name: MODES_BOOTSTRAP_SERVERS
+              value: p-swamp-kafka:9092
+            - name: MODES_TOPIC_PREFIX
+              value: mode-estimation
+            - name: MODE_ESTIMATION_EXECUTION
+              value: thread
+            # One thread per core the pod may use: more only queue for the CPU.
+            - name: MODE_ESTIMATION_POOL_SIZE
+              value: "2"
+            # And one BLAS thread per identification: OpenBLAS's default of a
+            # thread per core, per call, oversubscribes the pool (see the same
+            # setting in docker-compose.yml).
+            - name: OPENBLAS_NUM_THREADS
+              value: "1"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "2"
+              memory: "768Mi"
+---
+# The dummy remote data service the explorer queries: the same image with a
+# different command (core/examples/remote_data_stub/, outside the installed
+# core package, hence the PYTHONPATH), standing where a deployment's own
+# service over its own store would stand. It serves HTTP -- the server's
+# Remote Data Client POSTs range queries to it and reads the streamed
+# answers back -- so it gets a Service and /healthz probes, and needs no
+# broker. Its "database" is the sample recording tiled twenty times.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp-remote-data-stub
+  labels:
+    app: p-swamp-remote-data-stub
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp-remote-data-stub
+  template:
+    metadata:
+      labels:
+        app: p-swamp-remote-data-stub
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: remote-data-stub
+          image: p-swamp:latest
+          imagePullPolicy: Never
+          command: ["python", "-m", "remote_data_stub"]
+          env:
+            - name: PYTHONPATH
+              value: /workspace/p-SWAMP/core/examples
+            - name: REMOTE_DATA_STUB_REPEAT
+              value: "20"
+          ports:
+            - name: http
+              containerPort: 8100
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8100
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8100
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: p-swamp-remote-data-stub
+  labels:
+    app: p-swamp-remote-data-stub
+spec:
+  type: ClusterIP
+  selector:
+    app: p-swamp-remote-data-stub
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8100
+      targetPort: 8100
+---
+# The broker between the server and the stats-worker: Apache Kafka, the
+# official image (Apache 2.0), one node in KRaft mode. The ONE image here that
+# is pulled rather than built into minikube -- hence IfNotPresent, not the
+# Never the p-swamp image needs -- so the first rollout waits for a download
+# (the start script gives it the longer timeout). Its log dir is an emptyDir:
+# ephemeral by the "no persistent volume" rule, and fine, since everything on
+# its topics is a live hop the server re-primes. Auto-creation is off; the
+# transport creates its topics with the right config.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp-kafka
+  labels:
+    app: p-swamp-kafka
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp-kafka
+  template:
+    metadata:
+      labels:
+        app: p-swamp-kafka
+    spec:
+      # The image's own `appuser`.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: kafka
+          image: apache/kafka:4.3.1
+          imagePullPolicy: IfNotPresent
+          # Every KAFKA_* variable becomes a server.properties entry.
+          env:
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: broker,controller
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: 1@localhost:9093
+            - name: KAFKA_LISTENERS
+              value: PLAINTEXT://:9092,CONTROLLER://:9093
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: PLAINTEXT://p-swamp-kafka:9092
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: CONTROLLER
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: PLAINTEXT
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "false"
+            - name: KAFKA_LOG_DIRS
+              value: /var/lib/kafka/data
+            # Retention is set per topic by the transport (a minute), but the
+            # broker enforces it only on this interval -- five minutes by
+            # default, long enough for a fast replay to fill the node's disk
+            # through the emptyDir. See the same setting in docker-compose.yml.
+            - name: KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS
+              value: "10000"
+            - name: KAFKA_HEAP_OPTS
+              value: -Xmx512m -Xms256m
+          ports:
+            - name: kafka
+              containerPort: 9092
+          # The broker's own CLI asking for its api versions: a JVM start per
+          # probe, hence the long timeout and period.
+          readinessProbe:
+            exec:
+              command:
+                - /opt/kafka/bin/kafka-broker-api-versions.sh
+                - --bootstrap-server
+                - localhost:9092
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /opt/kafka/bin/kafka-broker-api-versions.sh
+                - --bootstrap-server
+                - localhost:9092
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: p-swamp-kafka
+  labels:
+    app: p-swamp-kafka
+spec:
+  type: ClusterIP
+  selector:
+    app: p-swamp-kafka
+  ports:
+    - name: kafka
+      protocol: TCP
+      port: 9092
+      targetPort: 9092
