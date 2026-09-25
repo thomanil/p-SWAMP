@@ -68,8 +68,9 @@ flowchart TB
     modules ==>|"results · errors"| bus
     bus ==>|"frames · status · results · errors"| socket
     socket ==>|"one state model per change"| browser
-    bus -.->|"frames"| remote
-    remote -.->|"results"| bus
+    bus ==>|"frames"| remote
+    remote ==>|"results"| bus
+    bus -.->|"a module's own command class"| remote
 
     browser -.->|"POST, answered with a CommandAck"| post
     post -.->|"pipeline.dispatch: route by class, validate, publish"| bus
@@ -98,7 +99,9 @@ Reading it:
   `CountRangeCommand`, …) and the pipeline routes it by its class to the one
   receiver that declared it -- the player, or a module listing it in
   `commands` -- which checks it before it is published (a refusal is the
-  POST's 409) and applies it off the bus. A frame-driven module never sees one. A command never reaches
+  POST's 409) and applies it off the bus. For a module running in a worker the
+  stand-in accepts, and the worker's own refusal comes back as an `ErrorEvent`
+  carrying the command's `request_id`. A frame-driven module never sees one. A command never reaches
   the gateway or a data client: the gateway has no bus. The player or the
   module calls `consume(start, end)` on it, the planner picks a client by
   coverage and capability, and that client's own `consume(range)` is how it
@@ -122,7 +125,7 @@ flowchart BT
         registry["L6 · Pipeline + PipelineRegistry<br/>one pipeline PER CLIENT: gateway, player, bus, modules<br/>cap, idle eviction, per-key lock"]
         player["L3 · Player<br/>paces a gateway stream; replay / live / seek / step / speed / bounded replay<br/>publishes PmuFrame, PlayerStatus, StreamChanged, ErrorEvent"]
         bus["L4 · InProcessBus (+ Latest)<br/>pub/sub typed on message class, per pipeline<br/>overflow policy per subscription"]
-        modules["L5 · Module<br/>consume one class, publish a ResultEnvelope<br/>KeepUpMonitor → ErrorEvent when behind"]
+        modules["L5 · Module<br/>consume one class, publish a ResultEnvelope<br/>the commands it declares → handle()<br/>KeepUpMonitor → ErrorEvent when behind"]
         gateway["L2 · DataGateway<br/>consume(model, start, end) · produce(msg)<br/>SegmentPlanner picks the provider by Capability + Coverage<br/>DataStream stitches segments, watermark drops duplicates<br/>Enricher hook: CimReferenceEnricher (stub) → PmuHeader.cimReferenceId"]
         contract["L2 · DataClient contract<br/>coverage / consume / produce<br/>Capability: HISTORY_CONSUME · LIVE_CONSUME · PRODUCE<br/>+ conformance suite"]
         transport["L7 · Transport<br/>InMemoryTransport · KafkaTransport<br/>RemoteModule (in the server) ↔ ModuleHost (in a worker)<br/>one topic per class, record key = pipeline key"]
@@ -173,7 +176,7 @@ flowchart BT
         w2["islanding-worker<br/>IslandingModule (detect_islands)"]
         w3["mode-estimation-worker<br/>N4SID, thread pool, 1 BLAS thread"]
     end
-    transport -->|"pmu.frame, keyed by client<br/>(per-app topic prefix)"| kafka
+    transport -->|"pmu.frame, keyed by client<br/>(islanding and mode estimation under their own prefix)"| kafka
     kafka -->|"result topics"| transport
     kafka --> workers
     workers --> kafka
@@ -204,7 +207,7 @@ concrete data clients on the left of his drawing.
 | **ClickHouseClient / ClickHouse** | `RemoteDataClient`: a `DataClient` over a **remote data service** the deployment runs in front of *whatever* store it has. Range query up as `POST /v1/queries`, coverage as `GET /v1/coverage`, records back as that call's streamed response, one `RemoteDataResult` NDJSON line each, closed by `end`/`error`; closing the connection cancels. Contract in `doc/remote-data-integration-contract.md` (HTTP only). `core/examples/remote_data_stub/` is the dummy service. | Different by design: no store-specific client in the repo. ClickHouse would be one implementation of the service, chosen and changed by the deployment. |
 | **KafkaClient (as data source) / NAPS** | No broker-as-source. Kafka here is a **transport** behind the bus (`transport/kafka.py`), never a `DataClient`: a time-addressed `DataStream` would drop the timestamps a looping replay sends backwards. | Not built as a provider; "a broker as history" is on the open list. NAPS has no counterpart. |
 | *(no box)* | **Player** (`datagateway/player.py`): paces a gateway stream, owns replay/live/pause/step/seek/speed and bounded replay; seek is a new stream; mode is which stream is open; commands come off the bus; provider failure ends the stream paused with `PlayerStatus.error` and an `ErrorEvent`. | Built, missing from Louis's view. |
-| *(no box)* | **Module** (`modules.py`): `name`, `input_model`, `output_model`, `process()`; `run` subscribes, wraps the answer in a `ResultEnvelope` and publishes. `KeepUpMonitor` reports dropped or stale input on the error topic. | Built; this is what an `IslandingDetector` or `StateEstimator` box *is* here. |
+| *(no box)* | **Module** (`modules.py`): `name`, `input_model`, `output_model`, `process()`; `run` subscribes, wraps the answer in a `ResultEnvelope` and publishes. A module may also answer commands: it lists their classes in `commands` and implements `handle()` (and `validate()` to refuse one now); a command-only module sets `input_model = None`, and `reads_gateway` marks one that reads the gateway itself. `KeepUpMonitor` reports dropped or stale input on the error topic. | Built; this is what an `IslandingDetector` or `StateEstimator` box *is* here. |
 | *(no box)* | **Pipeline + PipelineRegistry** (`pipeline.py`): one gateway, player, bus and module list per key; the key is the browser's client id today; per-key lock, cap, idle eviction, refusal at the cap. | Built. Everything is per client; a shared live stream keyed per stream is designed, not built. |
 | *(no box)* | **Transport / RemoteModule / ModuleHost** (`transport/`, `remote.py`): the module's slot in the pipeline is taken by a `RemoteModule` that carries its input class to a topic and its result back; a `ModuleHost` in a worker runs the real module, one instance per key, evicting idle keys. `InMemoryTransport` for tests, `KafkaTransport` for compose and k8s. | Built. Switched by one env var per app (`*_MODULE_TRANSPORT`); unset, the module runs in-process. |
 | *(no box)* | **Conformance suite** (`datagateway/conformance.py`): inherit, three fixtures, cases follow the declared capabilities. | Built. Every provider in the repo runs it. |
@@ -213,9 +216,9 @@ concrete data clients on the left of his drawing.
 
 | Louis's box | What is built | Status |
 |---|---|---|
-| **Namespace / Branch** holding **StateEstimator**, **IslandingDetector** | The module list of each app's `build_pipeline`, and the worker services in compose/k8s: `FrameStatsModule` (stats-worker), `IslandingModule` over `detect_islands` (islanding-worker), N4SID `ModeEstimationModule` (mode-estimation-worker), `RowCountModule` and `FrequencyModule` in-process. | The *set* of modules exists; the *namespace* does not. Isolation comes from the pipeline key and a per-app topic prefix, not from a namespace object. |
-| **DataModel / CommandModel / ResultModel** arrows into each module | Exactly this, as bus subscriptions: `PmuFrame` in, `ResultEnvelope[T]` out, a command routed by its class to the module that lists it in `commands` (the explorer's `RowCountModule` is the worked example). | Built, in-process and in a worker: a `RemoteModule` forwards its module's commands over the transport. A module that reads the gateway itself cannot be hosted yet: `ModuleHost` hands the module an empty gateway. |
-| **ServiceManager** with **Start / Deploy / ManageLifeCycle** | `docker-compose.yml` and `k8s/p-swamp-local.yaml`: six containers from one image, workers are plain processes with no port. `ModuleHost` manages module *instances* per key; nothing manages *processes*. | Not built. Lifecycle is the orchestrator's (compose, k8s), not a p-SWAMP service. |
+| **Namespace / Branch** holding **StateEstimator**, **IslandingDetector** | The module list of each app's `build_pipeline`, and the worker services in compose/k8s: `FrameStatsModule` (stats-worker), `IslandingModule` over `detect_islands` (islanding-worker), N4SID `N4SIDModule` (mode-estimation-worker), `RowCountModule` and `FrequencyModule` in-process. | The *set* of modules exists; the *namespace* does not. Isolation comes from the pipeline key and a per-app topic prefix, not from a namespace object. |
+| **DataModel / CommandModel / ResultModel** arrows into each module | Exactly this, as bus subscriptions: `PmuFrame` in, `ResultEnvelope[T]` out, a command routed by its class to the module that lists it in `commands` (the explorer's `RowCountModule` is the worked example). | Built, in-process and in a worker: a `RemoteModule` forwards its module's commands over the transport. Refused at construction: a module that reads the gateway itself (`reads_gateway`; a worker has no providers), and command classes that are not concrete (a topic carries one class). |
+| **ServiceManager** with **Start / Deploy / ManageLifeCycle** | `docker-compose.yml` and `k8s/p-swamp-local.yaml`: six containers, five from the one `p-swamp` image plus the Apache Kafka image; workers are plain processes with no port. `ModuleHost` manages module *instances* per key; nothing manages *processes*. | Not built. Lifecycle is the orchestrator's (compose, k8s), not a p-SWAMP service. |
 | **Prometheus** | None. What exists instead is the **error topic**: `ErrorEvent` from the player, a module, a transport queue, or the keep-up check, forwarded per client into `/api/errors/ws` and the layout's error tray. Throughput numbers so far are hand-measured. | Not built. A metrics endpoint is an open point. |
 
 ### Top — the edge
@@ -233,9 +236,9 @@ flowchart LR
     subgraph image["one image: p-swamp"]
         direction TB
         server["server<br/>FastAPI + built web client<br/>every Player, every bus, every RemoteModule"]
-        sw["stats-worker<br/>ModuleHost(FrameStatsModule)"]
+        sw["stats-worker<br/>ModuleHost(FrameStatsModule)<br/>unprefixed topics"]
         iw["islanding-worker<br/>ModuleHost(IslandingModule)<br/>topic prefix islanding-stream"]
-        mw["mode-estimation-worker<br/>ModuleHost(ModeEstimationModule)<br/>prefix mode-estimation, 2 CPUs"]
+        mw["mode-estimation-worker<br/>ModuleHost(N4SIDModule)<br/>prefix mode-estimation, 2 CPUs in k8s"]
         stub["remote-data-stub<br/>REST, streamed answers<br/>plays a time-series store"]
     end
     kafka[("kafka<br/>KRaft, no volume<br/>~1 min retention, checked every 10 s")]
@@ -272,6 +275,7 @@ classDiagram
     BaseModel <|-- DataModel
 
     class PmuFrame {
+        +mRID: str  (required: the stream)
         +timestamp: datetime  (required: the PMU time)
         +header: PmuHeader
         +values: list of float or null
@@ -296,7 +300,7 @@ classDiagram
     }
     class PlayerCommand {
         subclasses: Play, Pause, Step(n), Seek(to or offset_s),
-        Speed(speed), GoLive, Replay(start, end, play), Refresh
+        Speed(speed), GoLive, Replay(start or offset_s, end or end_offset_s, play), Refresh
     }
     Command <|-- PlayerCommand
     class PlayerStatus {
@@ -304,6 +308,7 @@ classDiagram
         +cursor, speed, paused, loop, ended
         +can_seek, can_go_live
         +coverage_start, coverage_end, range_end
+        +frame_interval_s: float, optional
         +error: str, optional
     }
     class StreamChanged {
@@ -335,7 +340,7 @@ classDiagram
     DataModel <|-- ErrorEvent
 
     class RemoteDataQuery {
-        +query_id, model (a topic string), start, end, mrid
+        +version, query_id, model (a topic string), start, end, mrid
     }
     class RemoteDataResult {
         +kind: record, end or error
@@ -363,8 +368,11 @@ RDFLib/KGraphPy, Validator, GraphDB, Apache Jena); `PMUC37Client`;
 `DataModel`; the `DataFrameValues` / `DataFrameHeader` split; a generic
 `Measurement` model.
 
-From the core's own open list: `request_id` returned to the browser in the acknowledgement; a
-module that reads the gateway running in a worker (needs a gateway factory in `ModuleHost`);
-proxy settings for `RemoteDataClient`'s long-lived streamed responses; a broker as history; a
-`PmuFrameAssembler` for per-PMU ingest; the throughput fixes the first load tests point at
-(cheaper frames, producer batching, keyed partitions, sub-millisecond pacing).
+From the core's own open list: the bridge from the desktop package's thread-based applications
+to the bus; the grid monitor re-pointed at the core; `request_id` in the browser-facing
+acknowledgement, and batch jobs beyond the explorer's row count; a CSV provider and a broker as
+history; the throughput fixes the first load tests point at (cheaper frames, producer batching,
+keyed partitions, sub-millisecond pacing, a per-app topic prefix by default); proxy settings for
+`RemoteDataClient`'s long-lived streamed responses, and models beyond `PmuFrame` in it; a module
+that reads the gateway running in a worker (needs a gateway factory in `ModuleHost`); a
+`PmuFrameAssembler` for per-PMU ingest.

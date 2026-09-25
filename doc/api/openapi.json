@@ -4088,7 +4088,7 @@
   },
   "tags": [
     {
-      "description": "Scaffold demo: replays sample PMU records line by line.",
+      "description": "The data architecture's thin slice: a recorded and a live PMU feed through one core pipeline per client, with replay commands and a frame-stats module.",
       "name": "pmu-test-streamer"
     },
     {
@@ -4120,7 +4120,7 @@
       "name": "reference-subapp"
     },
     {
-      "description": "Frequency peek.",
+      "description": "Live frequencies per station from a core module over the live PMU feed. Downstream only, no commands.",
       "name": "frequency-peek"
     },
     {

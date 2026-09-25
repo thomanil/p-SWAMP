@@ -328,6 +328,9 @@ Header rules:
 - Only `absolute_hz` frequency encoding is currently supported.
 - `header_id` is a content hash p-SWAMP computes from the layout. The service
   may send it or leave it out; p-SWAMP ignores it on read and recomputes it.
+- `cimReferenceId` is omitted or `null`. p-SWAMP's own enrichment step stamps
+  it, never the service; a frame that arrives with it already set is left as
+  it is.
 
 The header repeats in every frame. That costs bytes on every line; response
 compression, where the deployment enables it, collapses most of the repetition.
@@ -360,15 +363,17 @@ The current client:
 Current p-SWAMP client settings:
 
 ```text
-REMOTE_DATA_URL=http://remote-data-service:8100
-REMOTE_DATA_TIMEOUT=30
+REMOTE_DATA_URL=http://remote-data-service:8100   # required: the service's base URL
+REMOTE_DATA_TIMEOUT=30                            # seconds for a response to start, and for each next line
+REMOTE_DATA_PRIORITY=0                            # preference against other providers in the same gateway
 ```
 
 Current stub settings:
 
 ```text
 REMOTE_DATA_STUB_PORT=8100
-REMOTE_DATA_STUB_REPEAT=20
+REMOTE_DATA_STUB_REPEAT=20   # times the three-second sample is tiled back to back (60 s)
+REMOTE_DATA_STUB_PATH=       # another file of pmu.frame lines in time order; default: the bundled sample_frames.ndjson
 ```
 
 A production service may use different setting names. The resolved URL,
@@ -402,16 +407,23 @@ scripts/check-remote-data-service.sh https://remote-data.example.internal
 ```
 
 The check is `core/examples/check_remote_data_service.py`. It uses
-Python's standard library and nothing from p-SWAMP, reads each response line
-by line off the socket, and asks only for a few seconds at the start and end of
-the coverage. Run with no URL, it starts the stub in this repo and checks that
-instead, which is what CI does on every pull request, so the stub is held to
-exactly the contract a deployment's service is.
+Python's standard library and nothing from p-SWAMP, and reads each response
+line by line off the socket. It checks health, coverage (the exclusive end,
+and `404` for an unknown model), a bounded query's framing, order and window,
+the half-open bound, the `mrid` filter, refusals by status code before any
+body, a streamed rather than pre-sized body, two queries on two connections,
+and a service that answers in full after a client hung up mid-query. Most
+queries ask for a second or two at the start or end of the coverage; the
+hang-up case asks for the whole coverage and reads three lines. Run with no
+URL, it starts the stub in this repo and checks that instead, which is what CI
+does on every pull request, so the stub is held to exactly the contract a
+deployment's service is.
 
-It covers every acceptance case below that a client can observe. Whether the
-service stopped reading its store after a hang-up (case 8) and what happens
-behind the deployment's proxies (case 9) are for the service's owner to check
-on their side.
+It does not cover every case below. It cannot provoke a failed query, so an
+`error` line is counted as a failure rather than checked (case 5), and it does
+not check `version` (part of case 10). Whether the service stopped reading its
+store after a hang-up (case 8) and what happens behind the deployment's
+proxies (case 9) are for the service's owner to check on their side.
 
 ## Acceptance tests for another implementation
 

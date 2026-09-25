@@ -21,16 +21,22 @@ request travels.
 ## The layers
 
 The core is a stack of eight layers, numbered from the bottom; the `L` numbers
-below refer to it. **Each layer imports only the ones below it.** That is what
-lets a provider be written outside the repo against L1 and L2 alone, and a
-module move to another process without touching its neighbours.
+below refer to it. **Dependencies point down where it matters:** a provider
+needs only L1, the L2 contract and its settings helpers (`EnvSetting` from
+`datagateway/config.py`), so it can be written outside the repo, and
+modules and the pipeline sit above the bus and command routing, so a module
+can move to another process without touching its neighbours. The known
+exceptions: the provider contract imports its settings helpers from
+`datagateway/config.py` (listed under L7), the player imports `CommandRefused`
+from command routing, `datagateway/__init__.py` re-exports `Player`, and
+`remote.py` uses `transport/`.
 
 | | Layer | What it is | Where |
 |---|---|---|---|
 | L1 | Messages | The wire models: `DataModel` and every message derived from it -- `PmuFrame` (carrying its `PmuHeader`), the typed commands, `PlayerStatus`, `ResultEnvelope`, `ErrorEvent`. pydantic only; what every arrow carries | `messages/` |
 | L2 | Gateway | The provider contract (`DataClient`, its capabilities) and the `DataGateway` that stitches providers into one time-addressed stream | `datagateway/` |
 | L3 | Player | Paces a gateway stream and owns the transport controls: play, pause, step, seek, speed, replay, live | `datagateway/player.py` |
-| L4 | Bus | In-process publish/subscribe typed on message classes; one per pipeline | `bus/` |
+| L4 | Bus | In-process publish/subscribe typed on message classes; one per pipeline. Beside it, command routing: each typed command to the one receiver that declared it, or `CommandRefused` | `bus/`, `command_routing.py` |
 | L5 | Modules | Analysis: consume one message class off the bus, publish another | `modules.py`, `remote.py` |
 | L6 | Pipeline | One stream's gateway, player, bus and modules as a unit, and the registry that keeps one per key | `pipeline.py` |
 | L7 | Hosting | Which process each piece runs in, from the environment: providers and transports by name, a module as its own service | `transport/`, `datagateway/config.py`, `remote.main` |
@@ -252,8 +258,9 @@ A bounded replay (a `ReplayCommand` with `end`, and `play=True` to start it)
 ends paused at `end` even on a looping player. A provider that raises mid-stream
 -- or whose coverage call fails, at start or later -- ends the stream paused
 with `PlayerStatus.error` set to the client's own error and an `ErrorEvent` on
-the bus naming that client; the pipeline still starts, so the page connects and
-shows why. A `RefreshCommand` asks the gateway again; a play or seek that finds
+the bus: from `player` for a mid-stream failure, naming the client for a
+coverage failure. The pipeline still starts, so the page connects and shows
+why. A `RefreshCommand` asks the gateway again; a play or seek that finds
 the source clears the error.
 
 *Why.* The gateway yields as fast as the provider reads; a human watching a
@@ -369,7 +376,9 @@ builds one per key, caps them and evicts them.
 async def build_pipeline(client_id: str) -> Pipeline:
     gateway = gateway_from_env(DEFAULT_DATA_CLIENTS)
     bus = InProcessBus()
-    return Pipeline(client_id, gateway, bus, Player(gateway, bus, loop=True), [FrameStatsModule()])
+    player = Player(gateway, bus, model=PmuFrame, loop=True)
+    modules = [FrameStatsModule(), ErrorForwarderModule(client_id, "pmu-test-streamer")]  # the tray's copy
+    return Pipeline(client_id, gateway, bus, player, modules)
 
 REGISTRY = PipelineRegistry(build_pipeline, max_pipelines=8, idle_seconds=300)
 pipeline = await REGISTRY.acquire(client_id)   # builds on first connect; one per key
@@ -438,10 +447,12 @@ down one socket, an acknowledgement that never carries state, everything
 generated into `doc/api/openapi.json`.
 
 *Where.* `app/server-python/src/pmu_test_streamer/api.py`; the page in
-`app/client-web/src/pages/pmu-test-streamer/`. The push loop a page needs is
-the grid monitor's, `event_queue` + `serve_updates` in `pswamp_web/pump.py`
-(re-exported by `shared.py`), which serves a core pipeline unchanged. The
-client-id handshake is not yet shared; see "Adding things".
+`app/client-web/src/pages/pmu-test-streamer/`. The streamer pushes with its
+own `subscribe_updates` and `serve_stream`, since it coalesces four message
+classes. A page that wakes on one result class uses the grid monitor's loop,
+`event_queue` + `serve_updates` in `pswamp_web/pump.py` (re-exported by
+`shared.py`), which serves a core pipeline unchanged; `frequency_peek/api.py`
+does. The client-id handshake is not yet shared; see "Adding things".
 
 ## How data flows: source to browser
 
@@ -541,11 +552,13 @@ carrying the `request_id`, which the error tray shows.
 **7. The switch.** `go_live()` takes the player's lock and calls
 `_switch_stream(utcnow(), live=True)`; `replay()` calls
 `_switch_stream(history_start, live=False)`. This is the one place a stream is
-replaced, and it does five things in order: bump the generation (so a frame the
-run loop had parked from the old stream is discarded); cancel the read task in
-flight on the old stream; close the old `DataStream`; re-read what the gateway
-offers (`coverage(model, capability=HISTORY_CONSUME)` for the seekable range,
-`supports(model, LIVE_CONSUME)` for whether live exists); and open the new one
+replaced, and it does five things in order: re-read what the gateway offers
+(`coverage(model, capability=HISTORY_CONSUME)` for the seekable range,
+`supports(model, LIVE_CONSUME)` for whether live exists) and check the range
+against it, first, so a refused range leaves the current stream exactly as it
+was; bump the generation (so a frame the run loop had parked from the old
+stream is discarded); cancel the read task in flight on the old stream; close
+the old `DataStream`; and open the new one
 with `gateway.consume(model, start, end)` -- `end` is the history's end for a
 replay, so it runs out and loops, and `None` for live, so it never ends. Then it
 sets the `_live` flag, which is what `mode` reports, and publishes
@@ -592,7 +605,8 @@ paces it (replay) or passes it straight through (live) and `bus.publish`es it;
 `FrameStatsModule` and the socket's subscription both receive it;
 `FrameStatsModule` publishes a `FrameStatsResult`; the endpoint's push task
 wakes, drains what else is pending, builds one `PmuStreamState` from the
-player's status and the bus's latest frame and result, and `send_state`s it.
+player's status, its `last_frame` and the latest stats result, and
+`send_state`s it.
 The page renders that message -- the badge turns red, the transport row
 disables, the readout shows a wall-clock time -- because the *server* said the
 mode is live, not because a button was pressed.
@@ -614,7 +628,7 @@ sequenceDiagram
     A->>Bus: publish(GoLiveCommand)
     A-->>B: CommandAck
     Bus->>P: GoLiveCommand, on the player's inbox (this pipeline only)
-    Note over P: inbox → validate · handle → go_live()<br/>→ _switch_stream(now, live=True)<br/>generation++ · cancel read · close stream · re-read coverage
+    Note over P: inbox → validate · handle → go_live()<br/>→ _switch_stream(now, live=True)<br/>re-read coverage · generation++ · cancel read · close stream
     P->>G: consume(PmuFrame, now, None)
     Note over P: _live = True
     P->>Bus: StreamChanged · PlayerStatus
@@ -677,8 +691,8 @@ write; keeping the gateway inside the pipeline keeps every provider
 single-consumer.
 
 The cost is what the registry caps. A streamer pipeline is a handful of
-`asyncio` tasks (the player's run, command and read tasks, one per module, the
-live ticker) and the objects above -- no threads, no copies of the recording --
+`asyncio` tasks (the player's run and read tasks, one `CommandInbox` task per
+receiver, one per module including the error forwarder, the live ticker) and the objects above -- no threads, no copies of the recording --
 so it is cheap next to the grid monitor's four-thread hubs. `MAX_PIPELINES` and
 `IDLE_EVICT_SECONDS` in `api.py` are the bounds, pinned by the registry's
 tests. Every socket a browser opens carries the same `client_id`, so all its
@@ -704,7 +718,8 @@ model.
 
 **A module, and the page that shows it**: one app package with its own
 pipeline. The streamer is that shape with more in it, so each step names the
-piece of `pmu_test_streamer/` to copy.
+piece of `pmu_test_streamer/` to copy. `frequency_peek/` is the recipe at its
+smallest: one core module on a live-only page, with no commands.
 
 1. `./scripts/generate-new-subapp.sh my-thing "My Thing"` for the folders and
    the four registry entries; replace the counter it writes, delete its
@@ -720,8 +735,10 @@ piece of `pmu_test_streamer/` to copy.
    `commands`, with a `handle` returning the result body
    (`row_count_module.py`). Import only `pswamp_core`.
 3. **The pipeline**, copied from the streamer's `build_pipeline`, `REGISTRY`
-   and `lifespan`. The module list there is the only registry a module has.
-   Name the provider in the `gateway_from_env` spec string and give the app its
+   and `lifespan`. The module list there is the only registry a module has;
+   keep its `ErrorForwarderModule(client_id, "my-thing")` at the end, since
+   that is what puts the pipeline's `ErrorEvent`s on the error tray. Build the
+   player with `model=PmuFrame` (or your input class). Name the provider in the `gateway_from_env` spec string and give the app its
    own `variable=`; don't import `pmu_test_streamer`. A page with no transport
    wants `Player(..., autoplay=True, loop=True)`, or it shows dashes for ever.
 4. **The socket**: a state model exported as `WS_MESSAGE`, carrying the
@@ -863,9 +880,9 @@ KAFKA_BOOTSTRAP_SERVERS=kafka:9092                # KAFKA_TOPIC_PREFIX optional
 ```
 
 Unset, the module runs in-process; `mem:pswamp_core.transport:InMemoryTransport`
-is the portless value every test uses. Compose runs `kafka` (the Apache image,
-one KRaft node, no volume), the server and `stats-worker`; `k8s/` has the
-matching three Deployments; the smoke test plays the streamer and waits for the
+is the portless value every test uses. Compose runs six services and `k8s/`
+the matching six Deployments; the three this needs are `kafka` (the Apache
+image, one KRaft node, no volume), the server and `stats-worker`. The smoke test plays the streamer and waits for the
 module's result either way.
 
 *Why.* Three decisions:
@@ -939,9 +956,9 @@ which asks the gateway for a range like anyone else. That keeps the
 in the pipeline, and the connection itself is what ties an answer to its
 query. Play-range
 takes the same path, with `Player.replay(t0, t1)` in the module's place. This
-holds only in-process for now: a module hosted in a worker gets an empty
-gateway, so the command would reach it but the count would find no provider.
-The intended fix is a worker that builds its own gateway from the same
+holds only in-process for now: a worker has no providers, so a module that
+reads the gateway (`reads_gateway`) is refused when its `RemoteModule` or
+`ModuleHost` is built. The intended fix is a worker that builds its own gateway from the same
 environment, so the command crosses the process as a message and the gateway
 call stays a method call (see the last section).
 

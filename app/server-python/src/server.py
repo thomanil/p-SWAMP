@@ -81,7 +81,8 @@ APPS = [
     AppEntry(
         "pmu-test-streamer",
         pmu_test_streamer,
-        "Scaffold demo: replays sample PMU records line by line.",
+        "The data architecture's thin slice: a recorded and a live PMU feed through one "
+        "core pipeline per client, with replay commands and a frame-stats module.",
     ),
     AppEntry(
         "app-status",
@@ -124,7 +125,8 @@ APPS = [
     AppEntry(
         "frequency-peek",
         frequency_peek,
-        "Frequency peek.",
+        "Live frequencies per station from a core module over the live PMU feed. "
+        "Downstream only, no commands.",
     ),
     AppEntry(
         "time-series-explorer",
