@@ -1,49 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""Control messages: a command going up, and the player's state coming down.
+"""Control state coming down: the player's status and its stream changes.
 
-``Command`` is how an operator's action reaches the pipeline. At the web edge a
-``POST`` becomes one of these and is published on the client's bus; whoever it
-is addressed to (``target``: the player, or a module's target name) picks it up
-there. A module that takes commands declares a fixed target name for the
-purpose -- its per-instance uuid is unknown to the edge that POSTs.
-The POST's reply is only an acknowledgement -- the *effect* arrives as the next
-``PlayerStatus`` or result on the socket, so state keeps its one path.
-
-``request_id`` is the correlation id STEP 1 A7 asked for: generated when the
-command is built, logged with it, and carried on any result produced in answer.
+The commands going up are in :mod:`.commands`. ``PlayerStatus`` is what a
+client renders its controls from; ``StreamChanged`` tells consumers with a
+window that the player opened a new stream.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
-from uuid import uuid4
+from typing import Literal
 
 from pydantic import Field
 
 from .data_model import DataModel
 
-__all__ = ["Command", "PlayerStatus", "StreamChanged"]
-
-
-def _new_request_id() -> str:
-    return uuid4().hex
-
-
-class Command(DataModel):
-    """One operator action, addressed to the player or to a module."""
-
-    version: Literal["v1"] = "v1"
-    request_id: str = Field(default_factory=_new_request_id)
-    client_id: str | None = Field(default=None, description="The issuing client, at the edge.")
-    target: str | None = Field(
-        default=None,
-        description="A module's target name, or None (or 'player') for the stream's player.",
-    )
-    verb: str = Field(description="What to do: play, stop, step, seek, speed, ...")
-    args: dict[str, Any] = Field(default_factory=dict)
+__all__ = ["PlayerStatus", "StreamChanged"]
 
 
 class PlayerStatus(DataModel):

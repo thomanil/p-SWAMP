@@ -11,15 +11,17 @@ call's streamed response (see its docstring in
 The page is named for what is queried on the other end: a time series, kept in
 whatever store the deployment runs, which this page never sees.
 
-One pipeline per client over the configured providers, and three commands,
-each a ``POST`` here that becomes a ``Command`` on the client's bus::
+One pipeline per client over the configured providers, and four commands,
+each a ``POST`` here that builds one typed command and dispatches it into the
+client's pipeline, which routes it by its class::
 
     providers ── DataGateway ── Player ──▶ bus ──▶ this socket        (a) play a range
                      ▲                      │
                      └── RowCountModule ◀───┘                         (b) count a range
-    POST /playback/play-range ── Command(target=player, replay to/end/play) ──▶ Player
-    POST /playback/stop       ── Command(target=player, stop)              ──▶ Player
-    POST /count               ── Command(target="row-count", count)        ──▶ RowCountModule
+    POST /playback/play-range ── ReplayCommand(start, end, play) ──▶ Player
+    POST /playback/stop       ── PauseCommand                    ──▶ Player
+    POST /refresh             ── RefreshCommand                  ──▶ Player
+    POST /count               ── CountRangeCommand(start, end)   ──▶ RowCountModule
 
 (a) is the *stream* case: the player opens ``gateway.consume(PmuFrame, start,
 end)``, paces it, and ends paused at ``end`` (the bounded replay the player
@@ -39,8 +41,9 @@ Remote Data Client over the stub service, with the ``REMOTE_DATA_*`` block besid
 stream paused with ``PlayerStatus.error`` set; a count that fails carries
 ``error`` in its result. Both are *state*, shown inline. The same failures are
 also ``ErrorEvent``s on the bus, which the layout's error tray shows on every
-page (``src/errors/``). A range outside the coverage is refused here with a 409
-before anything is published.
+page (``src/errors/``). A replay the player cannot start -- no coverage, or a
+start outside it -- is refused with a 409 before anything is published; a count
+is not checked against the coverage, and counts what is there.
 
 Per client: one pipeline, built by ``REGISTRY`` on first connect, capped and
 idle-evicted like the streamer's. server.py mounts this ``router`` under
@@ -55,12 +58,14 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, FastAPI, HTTPException, WebSocket
+from fastapi import APIRouter, FastAPI, WebSocket
 from pydantic import BaseModel, Field, model_validator
 from shared import (
+    COMMAND_RESPONSES,
     ClientId,
     CommandAck,
     ErrorForwarderModule,
+    dispatch_command,
     get_logger,
     read_client_id,
     send_state,
@@ -69,11 +74,18 @@ from shared import (
 
 from pswamp_core.bus import InProcessBus, Overflow, Subscription
 from pswamp_core.datagateway import DataGateway, Player, gateway_from_env
-from pswamp_core.messages import Command, PlayerStatus, PmuFrame, StreamChanged
+from pswamp_core.messages import (
+    PauseCommand,
+    PlayerStatus,
+    PmuFrame,
+    RefreshCommand,
+    ReplayCommand,
+    StreamChanged,
+)
 from pswamp_core.pipeline import CapacityError, Pipeline, PipelineRegistry
 from pswamp_core.util.time import ensure_utc
 
-from .row_count_module import RowCountModule, RowCountResult
+from .row_count_module import CountRangeCommand, RowCountModule, RowCountResult
 
 logger = get_logger("time-series-explorer")
 
@@ -161,8 +173,6 @@ def state_message(pipeline: Pipeline) -> TimeSeriesExplorerState:
 
 router = APIRouter()
 
-_REFUSED = {409: {"description": "The range lies outside the provider's coverage, or there is none."}}
-
 
 class RangeBody(BaseModel):
     """A half-open range ``[start, end)`` of the provider's timeline."""
@@ -178,81 +188,35 @@ class RangeBody(BaseModel):
         return self
 
 
-def live_pipeline(client_id: str) -> Pipeline:
-    """The pipeline a command applies to, or 404 -- "you have no page open"."""
-    pipeline = REGISTRY.peek(client_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"no live pipeline for client {client_id}; "
-                "open the page (and its WebSocket) before sending commands"
-            ),
-        )
-    return pipeline
-
-
-def refusal(status: PlayerStatus, body: RangeBody | None, verb: str = "") -> str | None:
-    """Why a command cannot be applied right now, or ``None`` if it can."""
-    if verb == "refresh":
-        return None  # the one command that is *for* a provider reporting nothing
-    if status.coverage_start is None or status.coverage_end is None:
-        return "the provider reports no coverage: nothing to play or count"
-    if body is not None and (body.start < status.coverage_start or body.end > status.coverage_end):
-        return (
-            f"range [{body.start.isoformat()}, {body.end.isoformat()}) lies outside the coverage "
-            f"[{status.coverage_start.isoformat()}, {status.coverage_end.isoformat()})"
-        )
-    return None
-
-
-def publish(client_id: str, verb: str, body: RangeBody | None = None, *, target: str | None = None, **args: object) -> CommandAck:
-    """Publish one command on the client's bus and acknowledge it -- or refuse
-    it with a 409 when the coverage cannot take it."""
-    pipeline = live_pipeline(client_id)
-    reason = refusal(pipeline.player.status(), body, verb)
-    if reason is not None:
-        logger.info("client %s: refused %s: %s", client_id, verb, reason)
-        raise HTTPException(status_code=409, detail=reason)
-    command = Command(client_id=client_id, target=target, verb=verb, args=dict(args))
-    pipeline.bus.publish(command)
-    logger.info("client %s: %s %s (request %s)", client_id, verb, args or "", command.request_id)
-    return CommandAck(applied=verb)
-
-
-@router.post("/playback/play-range", operation_id="time_series_explorer_play_range", responses=_REFUSED)
+@router.post("/playback/play-range", operation_id="time_series_explorer_play_range", responses=COMMAND_RESPONSES)
 async def play_range(client_id: ClientId, body: RangeBody) -> CommandAck:
     """Replay exactly ``[start, end)`` at real time, then end paused. The stream
     case: the player asks the provider for the range and paces it."""
-    return publish(
-        client_id, "replay", body,
-        to=body.start.isoformat(), end=body.end.isoformat(), play=True,
-    )
+    command = ReplayCommand(client_id=client_id, start=body.start, end=body.end, play=True)
+    return dispatch_command(REGISTRY, command, logger)
 
 
-@router.post("/playback/stop", operation_id="time_series_explorer_stop", responses=_REFUSED)
+@router.post("/playback/stop", operation_id="time_series_explorer_stop", responses=COMMAND_RESPONSES)
 async def stop(client_id: ClientId) -> CommandAck:
     """Pause the replay where it is."""
-    return publish(client_id, "stop")
+    return dispatch_command(REGISTRY, PauseCommand(client_id=client_id), logger)
 
 
-@router.post("/refresh", operation_id="time_series_explorer_refresh")
+@router.post("/refresh", operation_id="time_series_explorer_refresh", responses=COMMAND_RESPONSES)
 async def refresh(client_id: ClientId) -> CommandAck:
     """Ask the provider again what it holds. The one command a page sends when
     the provider stopped answering: if it is back, the next state carries its
     coverage and clears the error; if not, the state still says so."""
-    return publish(client_id, "refresh")
+    return dispatch_command(REGISTRY, RefreshCommand(client_id=client_id), logger)
 
 
-@router.post("/count", operation_id="time_series_explorer_count", responses=_REFUSED)
+@router.post("/count", operation_id="time_series_explorer_count", responses=COMMAND_RESPONSES)
 async def count(client_id: ClientId, body: RangeBody) -> CommandAck:
     """Count the frames in ``[start, end)``. The batch case: the row-count module
     asks the provider for the range itself, unpaced, and publishes one result
     carrying this command's request id."""
-    return publish(
-        client_id, "count", body, target=RowCountModule.target,
-        start=body.start.isoformat(), end=body.end.isoformat(),
-    )
+    command = CountRangeCommand(client_id=client_id, start=body.start, end=body.end)
+    return dispatch_command(REGISTRY, command, logger)
 
 
 # --- websocket endpoint (downstream only) ---------------------------------------

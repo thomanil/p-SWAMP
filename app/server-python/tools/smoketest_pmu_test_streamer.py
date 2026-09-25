@@ -74,11 +74,12 @@ def post(base_url: str, path: str, client_id: str) -> tuple[int, dict]:
         return 0, {"unreachable": str(error)}
 
 
-def command(base_url: str, client_id: str, action: str) -> None:
+def command(base_url: str, client_id: str, action: str, applied: str) -> None:
+    """POST one playback action; ``applied`` is the command it becomes (``stop`` is ``pause``)."""
     status, body = post(base_url, f"{API_PATH}/playback/{action}", client_id)
     check(
-        f"POST {API_PATH}/playback/{action} -> 200 {{status, applied}}",
-        status == 200 and body.get("applied") == action and "status" in body,
+        f"POST {API_PATH}/playback/{action} -> 200 {{status, applied: {applied}}}",
+        status == 200 and body.get("applied") == applied and "status" in body,
         f"got {status} {body}",
     )
 
@@ -97,7 +98,7 @@ async def stream_flow(base_url: str, ws_url: str) -> None:
             f"got {json.dumps(first)[:300]}",
         )
 
-        command(base_url, client_id, "play")
+        command(base_url, client_id, "play", "play")
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + STATS_TIMEOUT
@@ -133,7 +134,7 @@ async def stream_flow(base_url: str, ws_url: str) -> None:
                 f"got {json.dumps(stats)[:300]} for frame at {frame.get('timestamp')}",
             )
 
-        command(base_url, client_id, "stop")
+        command(base_url, client_id, "stop", "pause")
 
 
 async def main(argv: list[str]) -> int:

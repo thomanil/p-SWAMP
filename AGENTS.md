@@ -58,7 +58,8 @@ which exist to keep the "adding a page" path honest:
   contract in one `DataGateway`, a `Player` that either replays the recording
   paced by the replay commands (back / play / stop / forward / seek / speed) or
   tails the live feed with no transport at all, switched by two more commands
-  (replay / live) — each a `POST` that becomes a `Command` on the client's bus —
+  (replay / live) — each a `POST` that becomes a typed command on the client's
+  bus —
   a module computing per-frame stats off that bus, and one pipeline per client.
   The page shows a Recorded | Live switch and, while live, a red LIVE badge with
   every transport control disabled. It used
@@ -96,11 +97,11 @@ which exist to keep the "adding a page" path honest:
   package, the stub and the black-box check in `core/examples/`, their tests in
   `core/tests/`. The stub imports nothing from `app/` and keeps its own
   fixture (`sample_frames.ndjson`) for that reason. The page asks
-  one range two ways, each a `POST` that becomes a `Command` on the client's
-  bus: **play-range** (the *stream* case — the player replays exactly
+  one range two ways, each a `POST` that becomes a typed command on the
+  client's bus: **play-range** (the *stream* case — the player replays exactly
   `[start, end)` paced and ends paused there, a bounded replay the player grew
-  for this) and **count** (the *batch* case — a `RowCountModule` addressed by
-  `Command.target`, pulling the range from the gateway itself, unpaced, and
+  for this) and **count** (the *batch* case — a `CountRangeCommand`, routed by
+  its class to the `RowCountModule`, pulling the range from the gateway itself, unpaced, and
   answering with one result carrying the command's `request_id`). Its default
   provider is the sample recording, so CI's bare `docker run` exercises the
   page too; compose and k8s switch it to the Remote Data Client with
@@ -305,8 +306,9 @@ which is what CI's e2e job runs.
   `PipelineRegistry` bound in its
   `lifespan`, a socket that subscribes the client's bus *before* its first send
   and coalesces into one `PmuStreamState` per change, and eight POSTs that each
-  publish a `Command` — or answer **409** when the player's current mode cannot
-  apply the verb, so the ack never claims a command the player would only log).
+  build a typed player command and hand it to `shared.dispatch_command` — which
+  answers **409** when the player's `validate` refuses it in the current mode,
+  so the ack never claims a command the player would only drop).
   Both providers are the default (`DEFAULT_DATA_CLIENTS`); `PSWAMP_DATA_CLIENTS`
   names others. `doc/server-data-architecture.md` walks through it.
   **It is also the worked example of a module running as its own service.**
@@ -337,8 +339,10 @@ which is what CI's e2e job runs.
   `pswamp_web/` (see "The p-SWAMP web layer" for why the definitions live down
   there and the import runs inward), and `event_queue` + `serve_updates`, the
   grid monitor's event-driven push loop from `pswamp_web/pump.py`, which
-  serves a core pipeline unchanged; it is *not* an app package and never appears
-  in `APPS`.
+  serves a core pipeline unchanged, and `dispatch_command` +
+  `COMMAND_RESPONSES`, the one way a POST sends a typed command into a core
+  pipeline (404 without one, 409 when refused); it is *not* an app package and
+  never appears in `APPS`.
   Note the spelling split: a package dir must be a Python identifier
   (`reference_subapp`) while its URL prefix is hyphenated to match the page route
   (`/api/reference-subapp`). The image mirrors the **repo root** —
@@ -460,6 +464,15 @@ Key invariants to preserve:
   `components.schemas` entries plus an `x-websocket-channels` extension, because
   OpenAPI has no notion of a socket. See the contract commands under "Common
   commands" below, and `doc/the-client-server-api.md` for the whole account.
+  - **Over a core pipeline, a command is a typed class, routed by its class.**
+    The base and the player's commands are in
+    `core/src/pswamp_core/messages/commands.py`; a module's own command class
+    lives beside the module. A POST builds one and calls
+    `shared.dispatch_command`; `pipeline.dispatch` finds the one receiver that
+    declared the class, runs its synchronous `validate` (the 409), and only
+    then publishes. No verb strings, no `args` dicts, no per-app refusal
+    checks: a precondition belongs in the receiver's `validate`.
+    `core/src/pswamp_core/command_routing.py` is the whole mechanism.
   - **A command never answers with state.** It returns a small `CommandAck`
     (`{status, applied}`) and the resulting state arrives on the socket like any
     other change — so there is exactly one path for state and no ordering to

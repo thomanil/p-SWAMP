@@ -121,7 +121,7 @@ async def explorer_flow(base_url: str, ws_url: str) -> None:
         start = datetime.fromisoformat(player["coverage_start"])
 
         # (b) the batch case: count one second through the row-count module.
-        command(base_url, client_id, "/count", "count",
+        command(base_url, client_id, "/count", "count.range",
                 {"start": iso(start), "end": iso(start + timedelta(seconds=1))})
         state = await wait_for(ws, lambda s: s.get("count") is not None, RESULT_TIMEOUT)
         result = (state.get("count") or {}).get("result") or {}
@@ -153,12 +153,12 @@ async def explorer_flow(base_url: str, ws_url: str) -> None:
             f"got {json.dumps(player)[:300]}",
         )
 
-        # A range outside the coverage is refused before anything is published.
-        status, reply = post(base_url, f"{API_PATH}/count", client_id,
+        # A replay starting outside the coverage is refused before anything is published.
+        status, reply = post(base_url, f"{API_PATH}/playback/play-range", client_id,
                              {"start": iso(start - timedelta(seconds=5)), "end": iso(start)})
-        check("a range outside the coverage is refused with 409", status == 409, f"got {status} {reply}")
+        check("a replay outside the coverage is refused with 409", status == 409, f"got {status} {reply}")
 
-        command(base_url, client_id, "/playback/stop", "stop")
+        command(base_url, client_id, "/playback/stop", "pause")
 
 
 async def main(argv: list[str]) -> int:

@@ -17,6 +17,12 @@ alive across reconnects, evicts it after an idle grace period or -- at the cap -
 the least-recently-used one nobody is watching, and refuses when none can be
 reclaimed. Nothing here knows what a WebSocket is; the edge maps
 ``CapacityError`` to a close code.
+
+**A pipeline is where commands are routed.** Its receivers are the player and
+every module that declares ``commands``; ``start`` opens one inbox per receiver
+before anything runs, and ``dispatch`` is the one way in -- route by class,
+check, publish (:mod:`pswamp_core.command_routing`). The edge calls
+``pipeline.dispatch(command)`` and maps ``CommandRefused`` to a 409.
 """
 
 from __future__ import annotations
@@ -29,10 +35,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from .bus import Latest
+from .command_routing import CommandInbox, CommandReceiver, dispatch
 from .log import get_logger
 
 if TYPE_CHECKING:
     from .bus import InProcessBus
+    from .messages.commands import Command
     from .datagateway.data_gateway import DataGateway
     from .datagateway.player import Player
     from .modules import Module
@@ -64,6 +72,9 @@ class Pipeline:
         bus: The in-process bus everything on this pipeline publishes to.
         player: Paces the gateway stream onto the bus.
         modules: Started as one task each, before the player.
+
+    Raises ``ValueError`` when two receivers answer the same command class
+    under the same name, since no ``target`` could then tell them apart.
     """
 
     def __init__(
@@ -79,10 +90,26 @@ class Pipeline:
         self.bus = bus
         self.player = player
         self.modules = list(modules)
+        #: Everything here that takes commands: the player, then the modules
+        #: that declare any.
+        self.receivers: list[CommandReceiver] = [player] + [m for m in self.modules if m.commands]
+        names = [r.name for r in self.receivers]
+        if len(names) != len(set(names)):
+            raise ValueError(f"two command receivers share a name in pipeline {key}: {names}")
         #: The newest message of each class on this bus; attached at start().
         self.latest: Latest | None = None
         self._tasks: list[asyncio.Task] = []
+        self._inboxes: list[CommandInbox] = []
         self._started = False
+
+    def dispatch(self, command: Command) -> None:
+        """Route ``command`` to its receiver, check it, and publish it.
+
+        Synchronous, so the caller learns before anything happens: raises
+        ``CommandRefused`` when the receiver refuses it now and ``RoutingError``
+        when nothing here takes it; publishes nothing in either case.
+        """
+        dispatch(self.bus, self.receivers, command)
 
     async def start(self) -> None:
         if self._started:
@@ -90,6 +117,12 @@ class Pipeline:
         self._started = True
         self.bus.bind(asyncio.get_running_loop())
         self.latest = Latest(self.bus)
+        # Inboxes first: each subscribes as it is built, so a command published
+        # the moment start() returns reaches its receiver.
+        self._inboxes = [
+            CommandInbox(self.bus, receiver) if receiver is self.player else receiver.command_inbox(self.bus)
+            for receiver in self.receivers
+        ]
         await self.gateway.open()
         for module in self.modules:
             await module.setup(self.gateway, self.bus)
@@ -97,10 +130,15 @@ class Pipeline:
                 asyncio.create_task(module.run(self.bus), name=f"{self.key}.{module.name}")
             )
         await self.player.start()
+        for inbox in self._inboxes:
+            inbox.start()
 
     async def stop(self) -> None:
         if not self._started:
             return
+        for inbox in self._inboxes:
+            await inbox.stop()
+        self._inboxes = []
         await self.player.stop()
         for task in self._tasks:
             task.cancel()

@@ -20,7 +20,7 @@ Legend for the flowcharts, mirroring Louis's three arrow kinds:
 |---|---|---|
 | bold solid "Pydantic Model Data Flux" | `==>` thick | a `DataModel` (or a pydantic view of one) moving between two pieces |
 | dashed "Client Specific Data Flux" | `-->` thin | a provider- or deployment-specific protocol: a file read, a REST call, a Kafka record |
-| dash-dot "Orchestrator Command" | `-.->` dotted | a `Command` on a bus, or a POST that becomes one |
+| dash-dot "Orchestrator Command" | `-.->` dotted | a typed command on a bus, or a POST that becomes one |
 
 ## 1. The pipeline, conceptually
 
@@ -54,7 +54,7 @@ flowchart TB
     subgraph fastapi["FastAPI backend — the OpenAPI contract<br/>(app package router per page; both directions published in doc/api/openapi.json)"]
         direction LR
         socket["WebSocket endpoint<br/>pushes state down"]:::edge
-        post["REST POST endpoint<br/>turns a request into a Command"]:::cmd
+        post["REST POST endpoint<br/>turns a request into a typed command"]:::cmd
     end
     browser["Browser<br/>renders state; types generated from the contract"]:::edge
 
@@ -72,9 +72,9 @@ flowchart TB
     remote -.->|"results"| bus
 
     browser -.->|"POST, answered with a CommandAck"| post
-    post -.->|"Command on the client's bus"| bus
-    bus -.->|"Command"| player
-    bus -.->|"Command (targeted)"| modules
+    post -.->|"pipeline.dispatch: route by class, validate, publish"| bus
+    bus -.->|"PlayerCommand"| player
+    bus -.->|"a module's own command class"| modules
     player -->|"consume(start, end): a pull, not a command"| gateway
     modules -->|"consume(start, end): a pull, not a command"| gateway
 ```
@@ -94,9 +94,11 @@ Reading it:
   ordinary paths, the socket channels as schemas plus an extension. The
   browser's TypeScript types are generated from it.
 - **Commands travel up**: a browser action is a REST POST, answered only with
-  an acknowledgement; the endpoint turns it into a `Command` on the same bus, and the player or a targeted module acts
-  on it. Only the player and a module whose input class is `Command` subscribe
-  to commands; a frame-driven module never sees one. A command never reaches
+  an acknowledgement; the endpoint builds one typed command (`SeekCommand`,
+  `CountRangeCommand`, …) and the pipeline routes it by its class to the one
+  receiver that declared it -- the player, or a module listing it in
+  `commands` -- which checks it before it is published (a refusal is the
+  POST's 409) and applies it off the bus. A frame-driven module never sees one. A command never reaches
   the gateway or a data client: the gateway has no bus. The player or the
   module calls `consume(start, end)` on it, the planner picks a client by
   coverage and capability, and that client's own `consume(range)` is how it
@@ -111,7 +113,7 @@ Reading it:
 ```mermaid
 flowchart BT
     browser["React frontend<br/>one page folder per app · types generated from the contract"]
-    edge["FastAPI backend · one app package per page<br/>POST /api/app/… → Command on that client's bus<br/>socket ← one state model per change (send_state)<br/>errors socket ← ErrorEvent from every pipeline"]
+    edge["FastAPI backend · one app package per page<br/>POST /api/app/… → typed command, dispatched into that client's pipeline<br/>socket ← one state model per change (send_state)<br/>errors socket ← ErrorEvent from every pipeline"]
     browser -.->|"REST POST, CommandAck"| edge
     edge ==>|"WS: pydantic state models"| browser
 
@@ -126,9 +128,9 @@ flowchart BT
         transport["L7 · Transport<br/>InMemoryTransport · KafkaTransport<br/>RemoteModule (in the server) ↔ ModuleHost (in a worker)<br/>one topic per class, record key = pipeline key"]
     end
 
-    edge -.->|"Command (verb, args, target, request_id)"| bus
-    bus -.->|"Command → Player.apply()"| player
-    bus -.->|"Command, target = module"| modules
+    edge -.->|"typed command (fields, request_id), routed by class"| bus
+    bus -.->|"PlayerCommand → Player.handle()"| player
+    bus -.->|"a module's command → Module.handle()"| modules
     gateway ==>|"PmuFrame stream"| player
     player ==> bus
     bus ==>|"PmuFrame"| modules
@@ -212,7 +214,7 @@ concrete data clients on the left of his drawing.
 | Louis's box | What is built | Status |
 |---|---|---|
 | **Namespace / Branch** holding **StateEstimator**, **IslandingDetector** | The module list of each app's `build_pipeline`, and the worker services in compose/k8s: `FrameStatsModule` (stats-worker), `IslandingModule` over `detect_islands` (islanding-worker), N4SID `ModeEstimationModule` (mode-estimation-worker), `RowCountModule` and `FrequencyModule` in-process. | The *set* of modules exists; the *namespace* does not. Isolation comes from the pipeline key and a per-app topic prefix, not from a namespace object. |
-| **DataModel / CommandModel / ResultModel** arrows into each module | Exactly this, as bus subscriptions: `PmuFrame` in, `ResultEnvelope[T]` out, `Command` addressed by `Command.target` (the explorer's `RowCountModule` is the worked example). | Built in-process. A command to a module **in a worker** is not: the transport carries it, but `ModuleHost` hands the module an empty gateway. |
+| **DataModel / CommandModel / ResultModel** arrows into each module | Exactly this, as bus subscriptions: `PmuFrame` in, `ResultEnvelope[T]` out, a command routed by its class to the module that lists it in `commands` (the explorer's `RowCountModule` is the worked example). | Built, in-process and in a worker: a `RemoteModule` forwards its module's commands over the transport. A module that reads the gateway itself cannot be hosted yet: `ModuleHost` hands the module an empty gateway. |
 | **ServiceManager** with **Start / Deploy / ManageLifeCycle** | `docker-compose.yml` and `k8s/p-swamp-local.yaml`: six containers from one image, workers are plain processes with no port. `ModuleHost` manages module *instances* per key; nothing manages *processes*. | Not built. Lifecycle is the orchestrator's (compose, k8s), not a p-SWAMP service. |
 | **Prometheus** | None. What exists instead is the **error topic**: `ErrorEvent` from the player, a module, a transport queue, or the keep-up check, forwarded per client into `/api/errors/ws` and the layout's error tray. Throughput numbers so far are hand-measured. | Not built. A metrics endpoint is an open point. |
 
@@ -220,7 +222,7 @@ concrete data clients on the left of his drawing.
 
 | Louis's box | What is built | Status |
 |---|---|---|
-| **FastAPI Backend** | `server.py` mounting one router per app package under `/api/<app>/`; commands are POSTs that become a `Command` on that client's bus and answer with a `CommandAck` that never carries state; the socket pushes one pydantic state model per change through `send_state`. | Built. Plus a generated OpenAPI contract including the socket channels (`doc/api/openapi.json`, `schema.ts`). |
+| **FastAPI Backend** | `server.py` mounting one router per app package under `/api/<app>/`; commands are POSTs that build one typed command, dispatched into that client's pipeline (404 without one, 409 when refused), and answer with a `CommandAck` that never carries state; the socket pushes one pydantic state model per change through `send_state`. | Built. Plus a generated OpenAPI contract including the socket channels (`doc/api/openapi.json`, `schema.ts`). |
 | **React Frontend** | One folder per page, wire types generated from the contract, commands through `postCommand`. | Built. |
 | **WS / RestAPI** | As drawn: state down the socket, commands up as REST. | Built. |
 
@@ -289,10 +291,14 @@ classDiagram
     class Command {
         +request_id: str  (generated)
         +client_id: str, optional
-        +target: str, optional  (a module name; none = the player)
-        +verb: str
-        +args: dict
+        +target: str, optional  (a receiver's name; only to tell two apart)
+        +name: derived from the class  (seek, go.live, count.range)
     }
+    class PlayerCommand {
+        subclasses: Play, Pause, Step(n), Seek(to or offset_s),
+        Speed(speed), GoLive, Replay(start, end, play), Refresh
+    }
+    Command <|-- PlayerCommand
     class PlayerStatus {
         +mode: live or replay
         +cursor, speed, paused, loop, ended
@@ -346,7 +352,7 @@ classDiagram
 | `DataFrame` with `values`, `header`, `headerId` | `PmuFrame` with `values`, `header: PmuHeader`, and `header_id` as a content hash **on the header**, computed and cached. `quality` added as a place for the C37.118 STAT word. | Kept in spirit; PMU-specific by name. |
 | `DataFrameValues` and `DataFrameHeader` as two separate models | **Not split.** The header rides inside every frame (~1 KB repeated per frame for the sample, a few bytes more for the CIM reference; about 1.2x on the wire once Kafka batch compression collapses the repeats). In return any single frame is self-describing: a late worker, a live source and a changed layout all work off the frame in hand, with no priming message. | Decided the other way, with the measurement in the docstring of `messages/pmu.py`. Revisit if the wire cost ever dominates. |
 | `Measurement` | No generic `Measurement` class. `PmuFrame` is the one measurement shape: one instant of every channel plus its layout. The core's own tests run the chain on a non-PMU `DataModel` to prove nothing is PMU-specific below the messages. | Different. Louis's per-PMU-per-quantity objects were dropped in favour of the frame. |
-| `Command` | `Command` with `request_id`, `client_id`, `target`, `verb`, `args`. | Kept, with the routing fields the pipeline needed. |
+| `Command` | A typed `Command` base with `request_id`, `client_id`, an optional `target`; one subclass per operation, whose fields are its arguments. | Kept as a base; the draft's verb-and-args shape became one class per command, routed by class. |
 | *(none)* | `PlayerStatus`, `StreamChanged`, `ResultEnvelope[T]`, `AppIdentity`, `AppStatusMessage`, `ErrorEvent`, `RemoteDataQuery`, `RemoteDataResult`. | Added. Everything a bus, a topic or a socket carries is one of these. |
 
 ## 6. Not built, in one list
@@ -358,7 +364,7 @@ RDFLib/KGraphPy, Validator, GraphDB, Apache Jena); `PMUC37Client`;
 `Measurement` model.
 
 From the core's own open list: `request_id` returned to the browser in the acknowledgement; a
-`Command` to a module in a worker (needs a gateway factory in `ModuleHost`);
+module that reads the gateway running in a worker (needs a gateway factory in `ModuleHost`);
 proxy settings for `RemoteDataClient`'s long-lived streamed responses; a broker as history; a
 `PmuFrameAssembler` for per-PMU ingest; the throughput fixes the first load tests point at
 (cheaper frames, producer batching, keyed partitions, sub-millisecond pacing).

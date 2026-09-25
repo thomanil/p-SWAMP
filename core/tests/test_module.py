@@ -8,10 +8,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 
-from support import Measurement, Number, NumberResult, at, measurement, take
+from support import Halver, HalveCommand, Measurement, Number, NumberResult, at, measurement, take
 
 from pswamp_core.bus import InProcessBus
-from pswamp_core.messages import AppStatus, Command, ErrorEvent, ResultEnvelope
+from pswamp_core.messages import AppStatus, ErrorEvent, ResultEnvelope
 from pswamp_core.modules import Module
 
 
@@ -57,32 +57,39 @@ async def test_module_publishes_an_envelope_per_input():
     assert NumberResult.topic == "number.result"
 
 
-class Refuser(Module):
-    """A module addressed by commands, whose process always fails."""
-
-    name = "refuser"
-    input_model = Command
-    output_model = NumberResult
-
-    async def process(self, message: Command) -> Number | None:
-        raise RuntimeError("cannot " + message.verb)
-
-
-async def test_a_failing_process_publishes_an_error_event_with_the_request_id():
+async def test_a_command_is_answered_in_the_output_model_with_its_request_id():
     bus = InProcessBus()
-    module = Refuser()
-    task = asyncio.create_task(module.run(bus))
-    await asyncio.sleep(0)
+    module = Halver()
+    inbox = module.command_inbox(bus)
+    inbox.start()
     try:
-        with bus.subscribe(ErrorEvent) as errors:
-            command = Command(target="refuser", verb="frobnicate")
+        with bus.subscribe(NumberResult) as results:
+            command = HalveCommand(value=8)
             bus.publish(command)
-            (event,) = await take(errors, 1)
+            (result,) = await take(results, 1)
     finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-    assert event.source == "refuser"
-    assert event.request_id == command.request_id
-    assert event.detail == "RuntimeError: cannot frobnicate"
-    assert module.status is AppStatus.UNDEFINED
+        await inbox.stop()
+    assert result.result.value == 4
+    assert result.request_id == command.request_id
+    assert result.app == module.identity
+    assert module.status is AppStatus.OK and module.last_result is result
+    await module.run(bus)  # no input_model: nothing to read, returns at once
+
+
+async def test_a_refused_or_failing_command_publishes_an_error_event_with_the_request_id():
+    bus = InProcessBus()
+    module = Halver()
+    inbox = module.command_inbox(bus)
+    inbox.start()
+    try:
+        with bus.subscribe(ErrorEvent) as errors, bus.subscribe(NumberResult) as results:
+            refused, failing = HalveCommand(value=-1), HalveCommand(value=0)
+            bus.publish(refused)
+            bus.publish(failing)
+            first, second = await take(errors, 2)
+            assert results.get_nowait() is None
+    finally:
+        await inbox.stop()
+    assert (first.source, first.request_id, first.detail) == ("halver", refused.request_id, "no negatives")
+    assert first.message == "halver refused halve"
+    assert (second.request_id, second.detail) == (failing.request_id, "RuntimeError: cannot halve zero")

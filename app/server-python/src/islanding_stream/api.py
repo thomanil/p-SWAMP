@@ -24,8 +24,8 @@ pipeline here carries.
 (``worker.py``) exactly as the streamer's variable does for its stats module;
 unset -- the tests, CI's bare ``docker run`` -- it runs in-process.
 
-Commands: play, stop, speed -- each a POST that becomes a ``Command`` on the
-client's bus. The socket carries the result and the throughput, never the
+Commands: play, stop, speed -- each a POST that builds one typed player command
+and dispatches it into the client's pipeline (``shared.dispatch_command``). The socket carries the result and the throughput, never the
 frames: at 50x the page would otherwise be the bottleneck it is meant to watch.
 """
 
@@ -38,12 +38,14 @@ import time
 from collections.abc import AsyncIterator
 from typing import Literal
 
-from fastapi import APIRouter, FastAPI, HTTPException, WebSocket
+from fastapi import APIRouter, FastAPI, WebSocket
 from pydantic import BaseModel, Field
 from shared import (
+    COMMAND_RESPONSES,
     ClientId,
     CommandAck,
     ErrorForwarderModule,
+    dispatch_command,
     get_logger,
     read_client_id,
     send_state,
@@ -52,7 +54,14 @@ from shared import (
 
 from pswamp_core.bus import InProcessBus, Overflow, Subscription
 from pswamp_core.datagateway import CimReferenceEnricher, DataGateway, Player, gateway_from_env
-from pswamp_core.messages import Command, PlayerStatus, PmuFrame, StreamChanged
+from pswamp_core.messages import (
+    PauseCommand,
+    PlayCommand,
+    PlayerStatus,
+    PmuFrame,
+    SpeedCommand,
+    StreamChanged,
+)
 from pswamp_core.modules import Module
 from pswamp_core.pipeline import CapacityError, Pipeline, PipelineRegistry
 from pswamp_core.remote import RemoteModule
@@ -272,46 +281,26 @@ def state_message(pipeline: IslandingPipeline, meter: RateMeter) -> IslandingStr
 router = APIRouter()
 
 
-def live_pipeline(client_id: str) -> IslandingPipeline:
-    """The pipeline a command applies to, or 404 -- "you have no page open"."""
-    pipeline = REGISTRY.peek(client_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"no live pipeline for client {client_id}; open the page (and its WebSocket) first",
-        )
-    return pipeline
-
-
-def dispatch(client_id: str, verb: str, **args: object) -> CommandAck:
-    """Publish one command on the client's bus and acknowledge it."""
-    pipeline = live_pipeline(client_id)
-    command = Command(client_id=client_id, verb=verb, args=dict(args))
-    pipeline.bus.publish(command)
-    logger.info("client %s: %s %s", client_id, verb, args or "")
-    return CommandAck(applied=verb)
-
-
-@router.post("/playback/play", operation_id="islanding_stream_play")
+@router.post("/playback/play", operation_id="islanding_stream_play", responses=COMMAND_RESPONSES)
 async def play(client_id: ClientId) -> CommandAck:
     """Resume this client's replay."""
-    return dispatch(client_id, "play")
+    return dispatch_command(REGISTRY, PlayCommand(client_id=client_id), logger)
 
 
-@router.post("/playback/stop", operation_id="islanding_stream_stop")
+@router.post("/playback/stop", operation_id="islanding_stream_stop", responses=COMMAND_RESPONSES)
 async def stop(client_id: ClientId) -> CommandAck:
     """Pause this client's replay where it is."""
-    return dispatch(client_id, "stop")
+    return dispatch_command(REGISTRY, PauseCommand(client_id=client_id), logger)
 
 
 class SpeedBody(BaseModel):
     speed: float = Field(gt=0, le=MAX_SPEED, description="Replay speed multiplier; 1 is real time (50 frames/s).")
 
 
-@router.post("/playback/speed", operation_id="islanding_stream_speed")
+@router.post("/playback/speed", operation_id="islanding_stream_speed", responses=COMMAND_RESPONSES)
 async def speed(client_id: ClientId, body: SpeedBody) -> CommandAck:
     """Change the replay speed: the load on the module and its topic."""
-    return dispatch(client_id, "speed", speed=body.speed)
+    return dispatch_command(REGISTRY, SpeedCommand(client_id=client_id, speed=body.speed), logger)
 
 
 # --- websocket endpoint (downstream only) ---------------------------------------

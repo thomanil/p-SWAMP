@@ -14,11 +14,12 @@ import asyncio
 import contextlib
 
 import pytest
-from support import Measurement, Number, NumberResult, at, measurement, take
+from support import Halver, HalveCommand, Measurement, Number, NumberResult, at, measurement, take
 
 from pswamp_core.bus import InProcessBus, Overflow
 from pswamp_core.datagateway import DataGateway, MissingSettingError
 from pswamp_core.datagateway.clients import InMemoryClient
+from pswamp_core.messages import Command, ErrorEvent
 from pswamp_core.modules import Module
 from pswamp_core.remote import ModuleHost, RemoteModule, main
 from pswamp_core.transport import InMemoryTransport, transport_from_env
@@ -160,3 +161,46 @@ def test_worker_main_exits_2_without_a_transport(monkeypatch, capsys):
     monkeypatch.delenv("X_MODULE_TRANSPORT", raising=False)
     assert main(Doubler, "X_MODULE_TRANSPORT") == 2
     assert "X_MODULE_TRANSPORT is unset" in capsys.readouterr().err
+
+
+# --- commands to a module in the worker -------------------------------------------
+
+
+async def test_a_command_crosses_to_the_worker_and_its_answer_or_refusal_comes_back():
+    transport = InMemoryTransport()
+    async with hosting(Halver, transport):
+        remote = RemoteModule(Halver, transport, "42")
+        assert remote.commands == (HalveCommand,)
+        async with pipeline_side(remote) as bus:
+            inbox = remote.command_inbox(bus)
+            inbox.start()
+            try:
+                with bus.subscribe(NumberResult) as results, bus.subscribe(ErrorEvent) as errors:
+                    ok, refused = HalveCommand(value=8), HalveCommand(value=-1)
+                    # The stand-in accepts both: the module's state is in the worker.
+                    remote.validate(refused)
+                    bus.publish(ok)
+                    bus.publish(refused)
+                    (result,) = await take(results, 1)
+                    (error,) = await take(errors, 1)
+            finally:
+                await inbox.stop()
+    assert result.result.value == 4 and result.request_id == ok.request_id
+    assert (error.source, error.request_id, error.detail) == ("halver", refused.request_id, "no negatives")
+
+
+def test_a_module_that_reads_the_gateway_or_declares_a_base_command_cannot_be_hosted():
+    class Reader(Halver):
+        name = "reader"
+        reads_gateway = True
+
+    class Broad(Halver):
+        name = "broad"
+        commands = (Command,)
+
+    transport = InMemoryTransport()
+    for build in (lambda m: RemoteModule(m, transport, "1"), lambda m: ModuleHost(m, transport)):
+        with pytest.raises(ValueError, match="reads the gateway"):
+            build(Reader)
+        with pytest.raises(ValueError, match="concrete command classes"):
+            build(Broad)

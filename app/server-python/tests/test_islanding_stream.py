@@ -19,7 +19,7 @@ from islanding_stream.n44_client import EPOCH, N44RecordingClient
 from pswamp_core.bus import InProcessBus, Overflow
 from pswamp_core.datagateway import CimReferenceEnricher, DataGateway
 from pswamp_core.datagateway.conformance import DataClientConformance
-from pswamp_core.messages import PmuFrame
+from pswamp_core.messages import PmuFrame, SpeedCommand
 from pswamp_core.remote import ModuleHost, RemoteModule
 from pswamp_core.transport import InMemoryTransport
 
@@ -144,7 +144,7 @@ async def test_the_pipeline_autoplays_and_the_socket_state_carries_result_and_th
     await pipeline.start()
     try:
         assert not pipeline.player.status().paused
-        pipeline.bus.publish(api.Command(client_id="42", verb="speed", args={"speed": 50}))
+        pipeline.dispatch(SpeedCommand(client_id="42", speed=50))
         meter = api.RateMeter(pipeline)
         with pipeline.bus.subscribe(IslandingStreamResult, overflow=Overflow.GROW) as results:
             result = await asyncio.wait_for(results.get(), 5)

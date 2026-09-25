@@ -27,7 +27,7 @@ from pswamp_core.bus import InProcessBus, Overflow  # noqa: E402
 from pswamp_core.datagateway import DataGateway, Player  # noqa: E402
 from pswamp_core.datagateway.clients.remote_data import RemoteDataClient  # noqa: E402
 from pswamp_core.datagateway.conformance import DataClientConformance  # noqa: E402
-from pswamp_core.messages import Command, PlayerStatus, PmuFrame  # noqa: E402
+from pswamp_core.messages import PlayerStatus, PmuFrame, ReplayCommand  # noqa: E402
 from remote_data_stub.app import create_app  # noqa: E402
 from remote_data_stub.recording import TiledRecording, load_frames  # noqa: E402
 from remote_data_stub.service import QueryService  # noqa: E402
@@ -92,7 +92,7 @@ async def test_a_bounded_replay_runs_through_the_remote_store():
         await player.start()
         try:
             t0 = player.status().coverage_start
-            bus.publish(Command(verb="replay", args={"offset_s": 1.0, "end_offset_s": 1.25, "play": True}))
+            await player.handle(ReplayCommand(offset_s=1.0, end_offset_s=1.25, play=True))
             got = [await asyncio.wait_for(frames.get(), 2) for _ in range(5)]
             ended = await _wait_status(statuses, lambda s: s.ended)
         finally:

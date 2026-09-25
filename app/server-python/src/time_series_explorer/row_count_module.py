@@ -4,24 +4,24 @@
 """The row-count module: a *batch* module, driven by a command rather than by frames.
 
 The other example modules (the streamer's stats, frequency peek) read every
-``PmuFrame`` the player paces onto the bus. This one reads nothing until a
-``Command`` addressed to it arrives -- ``target="row-count"``, ``verb="count"``,
-``args={"start", "end"}`` -- and then asks the *gateway* for that range itself,
-unpaced, counts what comes back, and publishes one ``RowCountResult`` carrying
-the command's ``request_id``. That is the "query a chunk" case of STEP 1 A5:
-a bounded read that never goes through the player, answered as a message.
+``PmuFrame`` the player paces onto the bus. This one reads nothing off the bus
+(``input_model = None``): it answers a ``CountRangeCommand`` -- defined here,
+beside the module, as its result is -- by asking the *gateway* for that range
+itself, unpaced, and counting what comes back. That is the "query a chunk"
+case: a bounded read that never goes through the player, answered as a
+message.
 
-Two things it shows that ``Module.run`` does not do for a module today:
+It is the worked example of a module that takes commands, and all of it is
+declaration: ``commands`` names the class, ``handle`` returns the body, and the
+pipeline routes the command here by its class and publishes the answer in a
+``RowCountResult`` stamped now and carrying the command's ``request_id``
+(``Module.command_inbox``). ``reads_gateway`` says it reads the gateway
+itself, which is why it cannot run in a worker.
 
-* **A command as input.** ``Module.run`` wraps a result in an envelope stamped
-  with the *input's* timestamp, and a ``Command`` has none -- so this module
-  overrides ``run`` and stamps its result with the wall clock. It also filters
-  on ``target``: every command on the bus reaches every subscriber, and the
-  player's are not for us.
-* **Failure as a result and as an error event.** A provider that fails mid-count
-  produces a result with ``error`` set (the page shows it beside the count) and
-  an ``ErrorEvent`` on the bus (the layout shows it wherever the person is),
-  both carrying the ``request_id``. The module itself stays up.
+**Failure is a result and an error event.** A provider that fails mid-count
+produces a result with ``error`` set (the page shows it beside the count) and
+an ``ErrorEvent`` on the bus (the layout shows it wherever the person is),
+both carrying the ``request_id``. The module itself stays up.
 
 The count is the whole analysis, on purpose: what is being demonstrated is a
 module that pulls a range on demand, not what it computes over it.
@@ -33,20 +33,34 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
-from typing import Any, ClassVar, Literal
+from typing import ClassVar, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from pswamp_core.bus import Bus, Overflow
+from pswamp_core.bus import Bus
 from pswamp_core.datagateway import DataGateway
 from pswamp_core.log import get_logger
 from pswamp_core.messages import AppStatus, Command, ErrorEvent, PmuFrame, ResultEnvelope
 from pswamp_core.modules import Module
 from pswamp_core.util.time import ensure_utc, utcnow
 
-__all__ = ["RowCount", "RowCountModule", "RowCountResult"]
+__all__ = ["CountRangeCommand", "RowCount", "RowCountModule", "RowCountResult"]
 
 logger = get_logger("time-series-explorer.row-count")
+
+
+class CountRangeCommand(Command):
+    """Count the frames in ``[start, end)``: the row-count module's one command."""
+
+    start: datetime = Field(description="Inclusive start of the range to count.")
+    end: datetime = Field(description="Exclusive end of the range to count.")
+
+    @model_validator(mode="after")
+    def _ordered(self) -> CountRangeCommand:
+        self.start, self.end = ensure_utc(self.start), ensure_utc(self.end)
+        if self.end <= self.start:
+            raise ValueError("end must be after start")
+        return self
 
 
 class RowCount(BaseModel):
@@ -71,70 +85,49 @@ class RowCountModule(Module):
     """Count the frames in ``[start, end)`` when told to, straight off the gateway."""
 
     name = "row-count"
-    #: The ``Command.target`` that addresses this module. A fixed name, not the
-    #: per-instance uuid: the edge that POSTs knows the name and nothing else.
-    target: ClassVar[str] = "row-count"
-    input_model = Command
+    input_model = None
     output_model = RowCountResult
-    overflow = Overflow.GROW  # a command is never dropped for being late
+    commands: ClassVar[tuple[type[Command], ...]] = (CountRangeCommand,)
+    reads_gateway = True
 
     def __init__(self) -> None:
         super().__init__()
         self._gateway: DataGateway | None = None
+        self._bus: Bus | None = None
 
     async def setup(self, gateway: DataGateway, bus: Bus) -> None:
-        """Keep the gateway: the count reads the range from it, not from the bus."""
+        """Keep the gateway, which the count reads, and the bus, for its errors."""
         self._gateway = gateway
+        self._bus = bus
 
-    async def process(self, message: Command) -> BaseModel | None:
-        """Unused: ``run`` is overridden below, because a command needs the result
-        stamped with the wall clock and tagged with its ``request_id``."""
-        return None
-
-    async def run(self, bus: Bus) -> None:
-        with bus.subscribe(Command, overflow=self.overflow) as commands:
-            async for command in commands:
-                if command.target != self.target or command.verb != "count":
-                    continue
-                result = await self.count_from_args(command.args)
-                envelope = RowCountResult(
-                    timestamp=utcnow(),
-                    app=self.identity,
-                    parameters=self.parameters,
-                    request_id=command.request_id,
-                    result=result,
+    async def handle(self, command: CountRangeCommand) -> RowCount:
+        result = await self.count(command.start, command.end)
+        if result.error is None:
+            logger.info(
+                "request %s: %d frame(s) in [%s, %s) in %.3fs",
+                command.request_id, result.count, result.start.isoformat(),
+                result.end.isoformat(), result.elapsed_s,
+            )
+        else:
+            logger.error("request %s: count failed: %s", command.request_id, result.error)
+            if self._bus is not None:
+                self._bus.publish(
+                    ErrorEvent(
+                        timestamp=utcnow(),
+                        source=self.name,
+                        message="the row count did not complete: its provider failed",
+                        detail=result.error,
+                        request_id=command.request_id,
+                    )
                 )
-                if result.error is None:
-                    self.status = AppStatus.OK
-                    logger.info(
-                        "request %s: %d frame(s) in [%s, %s) in %.3fs",
-                        command.request_id, result.count, result.start.isoformat(),
-                        result.end.isoformat(), result.elapsed_s,
-                    )
-                else:
-                    self.status = AppStatus.UNDEFINED
-                    logger.error("request %s: count failed: %s", command.request_id, result.error)
-                    bus.publish(
-                        ErrorEvent(
-                            timestamp=utcnow(),
-                            source=self.name,
-                            message="the row count did not complete: its provider failed",
-                            detail=result.error,
-                            request_id=command.request_id,
-                        )
-                    )
-                self.last_result = envelope
-                bus.publish(envelope)
+        return result
 
-    async def count_from_args(self, args: dict[str, Any]) -> RowCount:
-        """The count for a command's ``args``; bad arguments are a result with ``error``."""
-        try:
-            start = _instant(args["start"])
-            end = _instant(args["end"])
-        except (KeyError, TypeError, ValueError) as error:
-            now = utcnow()
-            return RowCount(start=now, end=now, count=0, elapsed_s=0.0, error=f"bad range: {error}")
-        return await self.count(start, end)
+    def wrap(self, body: BaseModel, *, timestamp: datetime, request_id: str | None = None) -> ResultEnvelope:
+        """The base envelope, with the status saying whether the count completed."""
+        envelope = super().wrap(body, timestamp=timestamp, request_id=request_id)
+        if getattr(body, "error", None) is not None:
+            self.status = AppStatus.UNDEFINED
+        return envelope
 
     async def count(self, start: datetime, end: datetime) -> RowCount:
         """Read ``[start, end)`` from the gateway and count it. Never raises."""
@@ -154,7 +147,3 @@ class RowCountModule(Module):
         except Exception as failure:
             error = f"{type(failure).__name__}: {failure}"
         return RowCount(start=start, end=end, count=n, elapsed_s=time.monotonic() - began, error=error)
-
-
-def _instant(value: Any) -> datetime:
-    return ensure_utc(value if isinstance(value, datetime) else datetime.fromisoformat(str(value)))

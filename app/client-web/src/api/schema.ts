@@ -2089,6 +2089,20 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -2125,6 +2139,20 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -2156,6 +2184,20 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["CommandAck"];
                 };
+            };
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -2295,6 +2337,20 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -2331,6 +2387,20 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -2362,6 +2432,20 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["CommandAck"];
                 };
+            };
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -2395,7 +2479,14 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
-            /** @description The command does not apply in the player's current mode. */
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2434,7 +2525,14 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
-            /** @description The command does not apply in the player's current mode. */
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2473,7 +2571,14 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
-            /** @description The command does not apply in the player's current mode. */
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2512,7 +2617,14 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
-            /** @description The command does not apply in the player's current mode. */
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2551,7 +2663,14 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
-            /** @description The command does not apply in the player's current mode. */
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2594,7 +2713,14 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
-            /** @description The command does not apply in the player's current mode. */
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2637,7 +2763,14 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
-            /** @description The command does not apply in the player's current mode. */
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2676,7 +2809,14 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
-            /** @description The command does not apply in the player's current mode. */
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2783,7 +2923,14 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
-            /** @description The range lies outside the provider's coverage, or there is none. */
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2826,7 +2973,14 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
-            /** @description The range lies outside the provider's coverage, or there is none. */
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2865,7 +3019,14 @@ export interface operations {
                     "application/json": components["schemas"]["CommandAck"];
                 };
             };
-            /** @description The range lies outside the provider's coverage, or there is none. */
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2903,6 +3064,20 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["CommandAck"];
                 };
+            };
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

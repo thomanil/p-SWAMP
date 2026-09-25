@@ -17,9 +17,11 @@ from typing import Literal
 from pydantic import BaseModel
 
 from pswamp_core.bus import Subscription
+from pswamp_core.command_routing import CommandRefused
 from pswamp_core.datagateway import Capability, EnvSetting
 from pswamp_core.datagateway.clients import InMemoryClient
-from pswamp_core.messages import DataModel, ResultEnvelope
+from pswamp_core.messages import Command, DataModel, ResultEnvelope
+from pswamp_core.modules import Module
 from pswamp_core.util.time import UTC
 
 
@@ -38,6 +40,31 @@ class NumberResult(ResultEnvelope[Number]):
     """A module output, for the bus and module tests."""
 
     version: Literal["v1"] = "v1"
+
+
+class HalveCommand(Command):
+    """Answer with half of ``value``: the command the ``Halver`` takes."""
+
+    value: float
+
+
+class Halver(Module):
+    """A module that reads nothing off the bus and answers a command: refuses a
+    negative value when checked, fails on zero when applied."""
+
+    name = "halver"
+    input_model = None
+    output_model = NumberResult
+    commands = (HalveCommand,)
+
+    def validate(self, command: HalveCommand) -> None:
+        if command.value < 0:
+            raise CommandRefused("no negatives")
+
+    async def handle(self, command: HalveCommand) -> Number:
+        if command.value == 0:
+            raise RuntimeError("cannot halve zero")
+        return Number(value=command.value / 2)
 
 
 #: Fixed anchor well in the past, so history tests never touch live logic.

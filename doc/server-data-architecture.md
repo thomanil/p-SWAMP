@@ -27,7 +27,7 @@ module move to another process without touching its neighbours.
 
 | | Layer | What it is | Where |
 |---|---|---|---|
-| L1 | Messages | The wire models: `DataModel` and every message derived from it -- `PmuFrame` (carrying its `PmuHeader`), `Command`, `PlayerStatus`, `ResultEnvelope`, `ErrorEvent`. pydantic only; what every arrow carries | `messages/` |
+| L1 | Messages | The wire models: `DataModel` and every message derived from it -- `PmuFrame` (carrying its `PmuHeader`), the typed commands, `PlayerStatus`, `ResultEnvelope`, `ErrorEvent`. pydantic only; what every arrow carries | `messages/` |
 | L2 | Gateway | The provider contract (`DataClient`, its capabilities) and the `DataGateway` that stitches providers into one time-addressed stream | `datagateway/` |
 | L3 | Player | Paces a gateway stream and owns the transport controls: play, pause, step, seek, speed, replay, live | `datagateway/player.py` |
 | L4 | Bus | In-process publish/subscribe typed on message classes; one per pipeline | `bus/` |
@@ -66,12 +66,12 @@ flowchart TB
     bus --> ws
     ws -- "down the socket" --> browser
     browser -.-> post
-    post -. "Command on the bus" .-> bus
-    bus -. "Command → Player.apply() / go_live()" .-> player
+    post -. "GoLiveCommand, SeekCommand, … via pipeline.dispatch" .-> bus
+    bus -. "the player's inbox → Player.handle() → go_live()" .-> player
 ```
 
 **Every arrow carries a pydantic model** (`PmuFrame`, `PlayerStatus`,
-`Command`, …) -- that is L1: JSON with a schema version end to end, and the
+`SeekCommand`, …) -- that is L1: JSON with a schema version end to end, and the
 browser's TypeScript types are generated from the same classes. **Nothing
 above the bus knows what is below it**: the endpoint and the module subscribe
 to message classes, the player writes to the bus. Swapping a provider (top
@@ -110,8 +110,9 @@ without an adapter. The set of `DataModel` subclasses *is* the topic catalogue,
 with the schema attached to each entry.
 
 *Where.* `core/src/pswamp_core/messages/`: `data_model.py` (the base),
-`pmu.py` (measurements), `results.py` (what modules emit), `control.py`
-(commands and player state).
+`pmu.py` (measurements), `results.py` (what modules emit), `commands.py`
+(the typed commands: the `Command` base and the player's), `control.py`
+(player state).
 
 The measurement shape is **one instant of every channel, carrying its layout**:
 
@@ -247,12 +248,12 @@ await player.replay(t0, t1)   # a BOUNDED replay of [t0, t1): ends paused at t1,
 player.status()               # PlayerStatus: mode, cursor, speed, paused, can_seek, can_go_live, coverage, range_end, error…
 ```
 
-A bounded replay (the `replay` verb with `end`, and `play: true` to start it)
+A bounded replay (a `ReplayCommand` with `end`, and `play=True` to start it)
 ends paused at `end` even on a looping player. A provider that raises mid-stream
 -- or whose coverage call fails, at start or later -- ends the stream paused
 with `PlayerStatus.error` set to the client's own error and an `ErrorEvent` on
 the bus naming that client; the pipeline still starts, so the page connects and
-shows why. The `refresh` verb asks the gateway again; a play or seek that finds
+shows why. A `RefreshCommand` asks the gateway again; a play or seek that finds
 the source clears the error.
 
 *Why.* The gateway yields as fast as the provider reads; a human watching a
@@ -267,8 +268,10 @@ disturbance needs real time, and needs to scrub. The decisions made here, once:
   seekable (`can_seek`) and offers the switch (`can_go_live`), so a page
   renders no dead buttons.
 - **Pacing drops time rather than bursting** when the loop falls behind.
-- **Commands come from the bus** (below), so a POST, a test and a future Qt
-  widget drive the player the same way.
+- **Commands come from the bus, typed** (see "Commands" below), so a POST, a
+  test and a future Qt widget drive the player the same way. Its `validate`
+  says synchronously whether a command applies in the current mode, which is
+  where every 409 about playback comes from.
 - **The next-frame read is a task awaited outside the lock** (learned the hard
   way), so a live feed gone quiet never blocks the switch back to replay.
 
@@ -345,6 +348,12 @@ subscribes, calls, wraps in the envelope (`timestamp`, `app` identity,
 desktop package's thread-based `SnapshotApp`s are bridged to the same bus and
 the same envelope when `GatewayIO` lands (deferred; see the last section).
 
+A module may also **answer commands**: it lists the command classes in
+`commands` and implements `handle` (and `validate`, if it can refuse one);
+what `handle` returns is published in its `output_model`, carrying the
+command's `request_id`. A module that only answers commands sets
+`input_model = None`. See "Commands" below.
+
 *Where.* `core/src/pswamp_core/modules.py`;
 `app/server-python/src/pmu_test_streamer/stats_module.py` (a module that
 *reduces* a frame; it derives its column indexes from `frame.header` on the
@@ -380,11 +389,51 @@ nothing is reclaimable. See "What is per client, what is shared" below.
 
 *Where.* `core/src/pswamp_core/pipeline.py`.
 
+### Commands — `pswamp_core.command_routing`
+
+*What.* An operator's action as a typed message, routed by its class to the
+one receiver that declared it, checked before it is published, applied in order.
+
+```python
+class SeekCommand(PlayerCommand):             # topic: seek.command; name: "seek"
+    to: datetime | None = None
+    offset_s: float | None = None              # exactly one of the two, validated on construction
+
+pipeline.dispatch(SeekCommand(client_id=id, offset_s=12))
+#   resolve: which receiver declared SeekCommand?   the player (commands = (PlayerCommand,))
+#   player.validate(cmd)                            raises CommandRefused -> the POST's 409
+#   bus.publish(cmd)                                only once both passed
+# ... the player's CommandInbox: validate again, then await player.handle(cmd)
+```
+
+A **receiver** is the player or a module: a `name`, the `commands` it handles,
+`validate` (synchronous, in-memory state only) and `handle`. The pipeline's
+receivers are the player and every module that declares commands; it opens one
+`CommandInbox` per receiver at start. Two receivers of one class are told
+apart by the command's optional `target` (a receiver's name); otherwise
+dispatch refuses the ambiguity.
+
+*Why.* A command used to be one `Command(verb, args)` broadcast to every
+listener, each filtering for itself: no one owned "no such receiver" or
+"unknown verb", and a refusal arrived after the acknowledgement, in the log.
+Now the class is the address and the arguments are validated fields; the
+check made at dispatch gives the POST an honest 409; and what the inbox still
+refuses -- the state moved between the two, say a seek queued behind a switch
+to live -- is an `ErrorEvent` with the command's `request_id`, on the error
+tray. The inbox subscribes when it is built, so a command published the moment
+a pipeline has started is never lost.
+
+*Where.* `core/src/pswamp_core/command_routing.py` (routing, the inbox,
+`CommandRefused`); `core/src/pswamp_core/messages/commands.py` (the base and
+the player's commands). A module's own commands live beside the module, as its
+result does: `CountRangeCommand` in `time_series_explorer/row_count_module.py`.
+
 ### The web edge — the app package
 
 *What.* What is left in `pmu_test_streamer/api.py` once the core does the rest:
-which messages to forward down the socket, and which POSTs become which
-`Command`. The browser contract is unchanged: commands up as `POST`, state
+which messages to forward down the socket, and which POSTs build which typed
+command -- each handed to `shared.dispatch_command`, which maps "no pipeline"
+to 404 and `CommandRefused` to 409. The browser contract is unchanged: commands up as `POST`, state
 down one socket, an acknowledgement that never carries state, everything
 generated into `doc/api/openapi.json`.
 
@@ -459,32 +508,35 @@ failure. Nothing on the page waits for the reply: the effect arrives on the
 socket like any other change.
 
 **3. The route.** `server.py` mounts the streamer's `router` under
-`/api/pmu-test-streamer`. The handler `live()` in `pmu_test_streamer/api.py` is
-one line: `return await dispatch(client_id, "live")`.
+`/api/pmu-test-streamer`. The handler `live()` in `pmu_test_streamer/api.py`
+builds the command and hands it on: `dispatch(GoLiveCommand(client_id=client_id))`.
+Building it generates its `request_id`.
 
-**4. Dispatch: find, check, publish, acknowledge.** `dispatch()` in `api.py`:
+**4. Dispatch: find, route, check, publish, acknowledge.** `shared.dispatch_command`:
 
-- `live_pipeline(client_id)` asks `REGISTRY.peek()` for this client's pipeline.
-  A command never *builds* one -- no page open, no pipeline, 404.
-- `refusal(pipeline.player.status(), "live")` asks whether the player's current
-  mode can apply the verb. `live` without a live source, or any transport verb
-  while live, is a **409** with the reason, and nothing is published.
-- Otherwise it builds a `Command(client_id=…, verb="live", args={})` -- which
-  generates a `request_id` -- publishes it on **that pipeline's bus**, logs it
-  with the roster, and returns `CommandAck(applied="live")`. The ack means
-  *dispatched*: the player has not run yet.
+- `REGISTRY.peek(client_id)` finds this client's pipeline. A command never
+  *builds* one -- no page open, no pipeline, 404.
+- `pipeline.dispatch(command)` (`core/…/command_routing.py`) routes it by its
+  class: `GoLiveCommand` is a `PlayerCommand`, which only the player declared.
+  It calls `player.validate(command)`, which refuses `GoLiveCommand` without a
+  live source, and any transport command while live, with `CommandRefused` --
+  a **409** with the player's reason, and nothing is published.
+- Otherwise the command is published on **that pipeline's bus** and the reply
+  is `CommandAck(applied="go.live")`. The ack means *dispatched*: the player
+  has not run yet. The streamer then logs the roster.
 
-**5. The bus.** `InProcessBus.publish` delivers the `Command` synchronously to
-every subscription whose class matches. The only subscriber to `Command` is
-the player's command task, subscribed with `Overflow.GROW` so no command is
-ever dropped. The bus is per pipeline, so the command reaches this client's
-player and no other.
+**5. The bus.** `InProcessBus.publish` delivers the command synchronously to
+every subscription whose class matches: the player's `CommandInbox`, which
+subscribed to `PlayerCommand` with `Overflow.GROW` when the pipeline started,
+so no command is ever dropped. The bus is per pipeline, so the command reaches
+this client's player and no other.
 
-**6. The player applies it.** `Player._commands` (`core/…/datagateway/player.py`)
-reads the command off its subscription and calls `apply()`, which maps the
-verb: `live` → `go_live()`, `replay` → `replay()`, `play` → `resume()`, and so
-on. A `PlayerError` here (a refusal the edge's check could not see) is logged
-and dropped.
+**6. The player applies it.** The inbox reads the command, calls
+`player.validate` again (the state may have moved since dispatch) and awaits
+`player.handle`, which picks the control by the command's class:
+`GoLiveCommand` → `go_live()`, `ReplayCommand` → `replay()`, `PlayCommand` →
+`resume()`, and so on. A refusal or failure here becomes an `ErrorEvent`
+carrying the `request_id`, which the error tray shows.
 
 **7. The switch.** `go_live()` takes the player's lock and calls
 `_switch_stream(utcnow(), live=True)`; `replay()` calls
@@ -558,11 +610,11 @@ sequenceDiagram
 
     Note over B: Live button → goLive()
     B->>A: POST /api/pmu-test-streamer/playback/live?client_id=…
-    Note over A: live() → dispatch()<br/>REGISTRY.peek (404) · refusal() (409)
-    A->>Bus: publish(Command, verb "live")
+    Note over A: live() → dispatch_command()<br/>REGISTRY.peek (404) · pipeline.dispatch:<br/>route by class · player.validate (409)
+    A->>Bus: publish(GoLiveCommand)
     A-->>B: CommandAck
-    Bus->>P: Command, on the player's command subscription (this pipeline only)
-    Note over P: _commands → apply("live") → go_live()<br/>→ _switch_stream(now, live=True)<br/>generation++ · cancel read · close stream · re-read coverage
+    Bus->>P: GoLiveCommand, on the player's inbox (this pipeline only)
+    Note over P: inbox → validate · handle → go_live()<br/>→ _switch_stream(now, live=True)<br/>generation++ · cancel read · close stream · re-read coverage
     P->>G: consume(PmuFrame, now, None)
     Note over P: _live = True
     P->>Bus: StreamChanged · PlayerStatus
@@ -581,7 +633,7 @@ sequenceDiagram
 ```
 
 The command carries a `request_id`, generated on the server and logged with
-the verb; a module answering a command copies it onto its `ResultEnvelope`, so a
+the command; a module answering a command copies it onto its `ResultEnvelope`, so a
 result on a shared bus can be routed back to the client that asked. (Returning
 it to the browser in the acknowledgement is the one edge change still pending;
 see the last section.)
@@ -663,7 +715,10 @@ piece of `pmu_test_streamer/` to copy.
    `process`. Read the layout off `frame.header` when it matters, re-deriving
    on a changed `header_id` (`stats_module.py` does); `setup` only for
    something a module needs from the gateway itself (`row_count_module.py`
-   keeps the gateway). Import only `pswamp_core`.
+   keeps the gateway, and says so with `reads_gateway = True`). A module that
+   answers a command declares its command class beside it and lists it in
+   `commands`, with a `handle` returning the result body
+   (`row_count_module.py`). Import only `pswamp_core`.
 3. **The pipeline**, copied from the streamer's `build_pipeline`, `REGISTRY`
    and `lifespan`. The module list there is the only registry a module has.
    Name the provider in the `gateway_from_env` spec string and give the app its
@@ -684,8 +739,11 @@ piece of `pmu_test_streamer/` to copy.
    it (`read_client_id`, `accept`, `REGISTRY.acquire`, 1013 on
    `CapacityError`, `release`) is not shared yet -- copy the streamer's
    `connected_pipeline` and point it at your registry.
-5. **Commands**, if any: `POST`s that `REGISTRY.peek` (404 if none) and
-   `bus.publish(Command(...))`; `dispatch` in the streamer is the model.
+5. **Commands**, if any: one `POST` per operation, each building one typed
+   command and returning `dispatch_command(REGISTRY, command, logger)` from
+   `shared.py` (404 without a pipeline, 409 when refused); pass
+   `responses=COMMAND_RESPONSES` so the contract carries both. The explorer's
+   `api.py` is the model.
 6. **The page**: `useServerSocket<Wire['MyThingState']>(MY_THING_WS_PATH)`;
    the component reads the module's fields as written.
 7. `generate-api-contract.sh`, `error_check.sh`,
@@ -752,7 +810,7 @@ flowchart LR
     subgraph web["web process — one pipeline per client"]
         direction TB
         gw["gateway"] --> player["Player"] --> bus["InProcessBus"]
-        post["POST"] --> cmd["Command"] --> player
+        post["POST"] --> cmd["PlayerCommand"] --> player
         rm["RemoteModule(FrameStatsModule, key = client id)"]
         ws["socket<br/>subscribes FrameStatsResult as before"]
         bus -- "PmuFrame, via the outbox" --> rm
@@ -783,8 +841,21 @@ frames, not memory) and publishes what arrives on the result topic back onto
 the bus. `ModuleHost(FrameStatsModule,
 transport)` subscribes to the input topic across every key; the first input for
 a key builds that key's bus, module and forwarder, and a key idle for
-`idle_seconds` is evicted. One variable, read by both sides, is the whole
-switch:
+`idle_seconds` is evicted.
+
+**A module's commands cross too.** If the module declares `commands`, the
+`RemoteModule` is the pipeline's receiver for them: its `handle` publishes each
+command on its class's topic under the key, the host tails those topics and
+puts each on the key's bus, and the hosted module's own inbox checks and
+applies it; the answer comes back on the result topic, and a refusal as an
+`ErrorEvent` carrying the `request_id`. The stand-in's `validate` accepts
+everything, since the module's state is in the worker. Two things are refused
+when the `RemoteModule` or `ModuleHost` is built: a module that reads the
+gateway itself (`reads_gateway`; a worker has no providers), and a declared
+command class with subclasses (a topic carries one class, so list the concrete
+ones). The player never leaves the server, so its commands never cross.
+
+One variable, read by both sides, is the whole switch:
 
 ```
 PMU_TEST_STREAMER_MODULE_TRANSPORT=kafka:pswamp_core.transport.kafka:KafkaTransport
@@ -846,7 +917,7 @@ sequenceDiagram
     participant S as remote data service
     participant D as any store
 
-    A->>M: POST /count → Command(target "row-count", t0, t1), via the bus
+    A->>M: POST /count → CountRangeCommand(t0, t1), routed by class
     Note over M: the command stops here:<br/>the rest is a method call
     M->>G: consume(PmuFrame, t0, t1)
     G->>R: consume(PmuFrame, t0, t1)
@@ -892,8 +963,8 @@ three-second sample tiled to a minute, `python -m remote_data_stub` with
 deployment's service in compose and k8s, playing the part of a time-series
 store, so the whole path runs from this repo. `/time-series-explorer` drives
 it two ways: **play-range** (the player's bounded replay, above) and **count**
-(`RowCountModule`, the first `Command` addressed to a module,
-`target="row-count"`). The page keeps its time-series name because that is
+(`RowCountModule`, answering a `CountRangeCommand`: the worked example of a
+module that takes commands). The page keeps its time-series name because that is
 what is queried on the other end. Open points are in the last section.
 
 *Where.* Everything of the contract is under `core/`: `messages/remote_data.py`
@@ -1019,12 +1090,10 @@ Absent from this slice, on purpose:
   prefix by default rather than by configuration;
 - proxy settings for the Remote Data Client's long-lived streamed responses
   (buffering off, idle timeouts past the longest pause), and models beyond
-  `PmuFrame` in it; `Module.run` carrying a `Command` natively (the row-count
-  module overrides it);
-- a `Command` addressed to a module *in the worker* (in-process, the explorer
-  has one). The transport already carries the command. What is missing is a
-  gateway: `ModuleHost` hands every module `DataGateway([])`, so it would
-  need a gateway factory built from the same environment as the pipeline's.
-  `RemoteModule` would also need to filter on `target`, since it forwards
-  every `Command` on the bus;
+  `PmuFrame` in it;
+- a module that reads the gateway (`reads_gateway`, like the explorer's row
+  count) running *in the worker*. Its commands would cross already; what is
+  missing is a gateway there: `ModuleHost` hands every module
+  `DataGateway([])`, so it would need a gateway factory built from the same
+  environment as the pipeline's. Until then such a module is refused;
 - a `PmuFrameAssembler` for deployments that ingest per-PMU messages.

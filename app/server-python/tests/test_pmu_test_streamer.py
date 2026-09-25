@@ -31,7 +31,7 @@ from pswamp_core.bus import InProcessBus, Overflow
 from pswamp_core.datagateway import Capability, DataGateway, Player, gateway_from_env
 from pswamp_core.datagateway.clients import InMemoryClient
 from pswamp_core.datagateway.conformance import DataClientConformance
-from pswamp_core.messages import Command, PlayerStatus, PmuFrame, PmuHeader
+from pswamp_core.messages import GoLiveCommand, PauseCommand, PlayCommand, PlayerStatus, PmuFrame, PmuHeader, ReplayCommand
 from pswamp_core.pipeline import Pipeline
 from pswamp_core.remote import ModuleHost, RemoteModule
 from pswamp_core.transport import InMemoryTransport
@@ -201,7 +201,7 @@ async def test_pipeline_streams_frames_and_stats_onto_the_bus(monkeypatch):
             FrameStatsResult, overflow=Overflow.GROW
         ) as results:
             pipeline.player.paced = False
-            pipeline.bus.publish(Command(client_id="42", verb="play"))
+            pipeline.dispatch(PlayCommand(client_id="42"))
             got = [await asyncio.wait_for(frames.get(), 2) for _ in range(3)]
             stats = await asyncio.wait_for(results.get(), 2)
         assert [f.timestamp for f in got] == [f.timestamp for f in load_sample().frames[:3]]
@@ -231,12 +231,12 @@ async def test_default_pipeline_replays_then_goes_live_then_returns(monkeypatch)
             FrameStatsResult, overflow=Overflow.GROW
         ) as results, pipeline.bus.subscribe(PlayerStatus, overflow=Overflow.GROW) as statuses:
             pipeline.player.paced = False
-            pipeline.bus.publish(Command(client_id="43", verb="play"))
+            pipeline.dispatch(PlayCommand(client_id="43"))
             replayed = [await asyncio.wait_for(frames.get(), 2) for _ in range(3)]
             assert all(f.mRID == STREAM_ID for f in replayed)
             assert replayed[0].timestamp == EPOCH + timedelta(seconds=0.05)
 
-            pipeline.bus.publish(Command(client_id="43", verb="live"))
+            pipeline.dispatch(GoLiveCommand(client_id="43"))
             status = await _wait_status(statuses, lambda s: s.mode == "live")
             assert status.paused is False and status.can_seek is False and status.can_go_live
             # Drain whatever the replay still had queued, then read live frames.
@@ -259,7 +259,7 @@ async def test_default_pipeline_replays_then_goes_live_then_returns(monkeypatch)
             assert message.frame is not None and message.frame.mRID == LIVE_STREAM_ID
             assert message.stats is not None and message.stats.timestamp == message.frame.timestamp
 
-            pipeline.bus.publish(Command(client_id="43", verb="replay"))
+            pipeline.dispatch(ReplayCommand(client_id="43"))
             status = await _wait_status(statuses, lambda s: s.mode == "replay")
             assert status.paused is True and status.can_seek is True
             assert status.cursor == EPOCH + timedelta(seconds=0.05)
@@ -294,20 +294,24 @@ async def test_dispatch_answers_409_for_a_verb_the_mode_refuses(monkeypatch):
     pipeline = await api.REGISTRY.acquire("9")
     try:
         with pipeline.bus.subscribe(PlayerStatus, overflow=Overflow.GROW) as statuses:
-            ack = await api.dispatch("9", "live")
-            assert ack.applied == "live"
+            ack = await api.live("9")
+            assert ack.applied == "go.live"
             await _wait_status(statuses, lambda s: s.mode == "live")
             with pytest.raises(HTTPException) as refused:
-                await api.dispatch("9", "seek", offset_s=1.0)
+                await api.seek("9", api.SeekBody(offset_s=1.0))
             assert refused.value.status_code == 409
             assert "live mode" in refused.value.detail
             with pytest.raises(HTTPException) as refused:
-                await api.dispatch("9", "play")
+                await api.play("9")
             assert refused.value.status_code == 409
-            ack = await api.dispatch("9", "replay")
+            ack = await api.replay("9")
             assert ack.applied == "replay"
             await _wait_status(statuses, lambda s: s.mode == "replay")
-            assert (await api.dispatch("9", "play")).applied == "play"
+            assert (await api.play("9")).applied == "play"
+            assert (await api.stop("9")).applied == "pause"
+        with pytest.raises(HTTPException) as missing:
+            await api.play("no-such-client")
+        assert missing.value.status_code == 404
     finally:
         api.REGISTRY.release("9")
         await api.REGISTRY.stop_all()
@@ -321,8 +325,9 @@ async def test_dispatch_refuses_live_without_a_live_source(monkeypatch):
     try:
         assert pipeline.player.status().can_go_live is False
         with pytest.raises(HTTPException) as refused:
-            await api.dispatch("11", "live")
+            await api.live("11")
         assert refused.value.status_code == 409
+        assert "no live source" in refused.value.detail
     finally:
         api.REGISTRY.release("11")
         await api.REGISTRY.stop_all()
@@ -438,7 +443,7 @@ async def test_stats_module_runs_as_its_own_service_over_the_transport(monkeypat
             FrameStatsResult, overflow=Overflow.GROW
         ) as results:
             pipeline.player.paced = False
-            bus.publish(Command(client_id="42", verb="play"))
+            pipeline.dispatch(PlayCommand(client_id="42"))
             played = [await asyncio.wait_for(frames.get(), 2) for _ in range(3)]
             got = [await asyncio.wait_for(results.get(), 2) for _ in range(3)]
             assert [r.timestamp for r in got] == [f.timestamp for f in played]
@@ -457,7 +462,7 @@ async def test_stats_module_runs_as_its_own_service_over_the_transport(monkeypat
             assert wrapped
             assert remote.published > 60 and remote.dropped == 0 and remote.received > 60
 
-        pipeline.bus.publish(Command(client_id="42", verb="stop"))
+        pipeline.dispatch(PauseCommand(client_id="42"))
         await asyncio.sleep(0.05)
         message = api.state_message(pipeline)
         assert message.player.mode == "replay" and message.frame is not None

@@ -25,19 +25,30 @@ it publishes an ``ErrorEvent`` -- once when it falls behind, again at most every
 ``report_every_s`` while it stays there, and once more when it has caught up --
 so the person whose pipeline it is sees it on the error tray rather than only
 in a log.
+
+**A module may take commands, too.** It lists the ``Command`` subclasses it
+answers in ``commands`` and implements ``handle`` (and ``validate``, if some of
+them can be refused); the pipeline routes each to it by class and applies it
+through its :meth:`Module.command_inbox` (:mod:`pswamp_core.command_routing`).
+What ``handle`` returns is published the way ``process``'s result is, in the
+module's ``output_model``, stamped now and carrying the command's
+``request_id``. A module that *only* takes commands sets ``input_model =
+None`` and reads nothing off the bus.
 """
 
 from __future__ import annotations
 
 import time
-from abc import ABC, abstractmethod
+from abc import ABC
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import uuid4
 
 from pydantic import BaseModel
 
 from .bus import Overflow
+from .command_routing import CommandInbox
 from .log import get_logger
 from .messages.data_model import sent_at
 from .messages.errors import ErrorEvent
@@ -47,6 +58,7 @@ from .util.time import utcnow
 if TYPE_CHECKING:
     from .bus import Bus, Subscription
     from .datagateway.data_gateway import DataGateway
+    from .messages.commands import Command
     from .messages.data_model import DataModel
 
 __all__ = ["KeepUp", "KeepUpMonitor", "Module"]
@@ -203,9 +215,16 @@ class Module(ABC):
 
     Class attributes a subclass sets:
 
-    * ``name`` -- how the module identifies itself in ``AppIdentity``.
-    * ``input_model`` -- the message class to subscribe to.
+    * ``name`` -- how the module identifies itself in ``AppIdentity``, and
+      what a ``Command.target`` names it by.
+    * ``input_model`` -- the message class to subscribe to; ``None`` for a
+      module that only answers commands.
     * ``output_model`` -- the ``ResultEnvelope`` subclass to publish.
+    * ``commands`` -- the ``Command`` subclasses it answers through ``handle``;
+      empty for a module that takes none.
+    * ``reads_gateway`` -- ``True`` for a module that reads the gateway itself
+      (in ``setup``, or on a command) rather than only its input; such a module
+      cannot run in a worker, which has no providers.
     * ``overflow`` -- what to do when this module falls behind its input;
       ``DROP_OLDEST`` by default, since a module reading a live-rate stream
       should analyse the newest frame rather than an ever-older backlog.
@@ -219,8 +238,10 @@ class Module(ABC):
     """
 
     name: ClassVar[str] = "module"
-    input_model: ClassVar[type[DataModel]]
+    input_model: ClassVar[type[DataModel] | None]
     output_model: ClassVar[type[ResultEnvelope]]
+    commands: ClassVar[tuple[type[Command], ...]] = ()
+    reads_gateway: ClassVar[bool] = False
     overflow: ClassVar[Overflow] = Overflow.DROP_OLDEST
     maxsize: ClassVar[int] = 64
     keep_up: ClassVar[KeepUp | None] = KeepUp()
@@ -231,20 +252,58 @@ class Module(ABC):
         self.parameters: dict[str, Any] = {}
         self.last_result: ResultEnvelope | None = None
         self.monitor = KeepUpMonitor(
-            self.name, f"is not keeping up with {self.input_model.topic}", self.keep_up
+            self.name,
+            f"is not keeping up with {self.input_model.topic}" if self.input_model else "",
+            self.keep_up if self.input_model else None,
         )
 
     async def setup(self, gateway: DataGateway, bus: Bus) -> None:
         """Called once before ``run``: keep the gateway, prime a window, and so on."""
         return
 
-    @abstractmethod
     async def process(self, message: DataModel) -> BaseModel | None:
         """Analyse one input message. Return the result body to publish, or
-        ``None`` to publish nothing for this message."""
+        ``None`` to publish nothing for this message. Every module with an
+        ``input_model`` implements it."""
+        raise NotImplementedError(f"{type(self).__name__} has an input_model but no process()")
+
+    def validate(self, command: Command) -> None:
+        """Raise ``CommandRefused`` if ``command`` does not apply now. Runs inside
+        the request that dispatched it, so it reads in-memory state only."""
+        return
+
+    async def handle(self, command: Command) -> BaseModel | None:
+        """Answer one of ``commands``. Return the result body to publish (it
+        carries the command's ``request_id``), or ``None`` for nothing."""
+        raise NotImplementedError(f"{type(self).__name__} declares commands but no handle()")
+
+    def wrap(self, body: BaseModel, *, timestamp: datetime, request_id: str | None = None) -> ResultEnvelope:
+        """``body`` in this module's envelope, recorded as its latest result."""
+        envelope = self.output_model(
+            timestamp=timestamp,
+            app=self.identity,
+            parameters=self.parameters,
+            request_id=request_id,
+            result=body,
+        )
+        self.status = AppStatus.OK
+        self.last_result = envelope
+        return envelope
+
+    def command_inbox(self, bus: Bus) -> CommandInbox:
+        """This module's commands off ``bus``: each answer wrapped and published."""
+
+        def answer(command: Command, body: BaseModel) -> None:
+            bus.publish(self.wrap(body, timestamp=utcnow(), request_id=command.request_id))
+
+        return CommandInbox(bus, self, on_result=answer)
 
     async def run(self, bus: Bus) -> None:
-        """Subscribe and process until cancelled. What a pipeline runs as a task."""
+        """Subscribe and process until cancelled. What a pipeline runs as a task.
+        A module with no ``input_model`` has nothing to read and returns at once;
+        its commands come through its inbox."""
+        if self.input_model is None:
+            return
         with bus.subscribe(self.input_model, overflow=self.overflow, maxsize=self.maxsize) as inputs:
             async for message in inputs:
                 self.monitor.observe(inputs, message, bus)
@@ -267,12 +326,4 @@ class Module(ABC):
                     continue
                 if result is None:
                     continue
-                envelope = self.output_model(
-                    timestamp=message.timestamp,
-                    app=self.identity,
-                    parameters=self.parameters,
-                    result=result,
-                )
-                self.status = AppStatus.OK
-                self.last_result = envelope
-                bus.publish(envelope)
+                bus.publish(self.wrap(result, timestamp=message.timestamp))

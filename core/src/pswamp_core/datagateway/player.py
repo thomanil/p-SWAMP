@@ -49,10 +49,13 @@ due on a monotonic clock, and if the loop has fallen more than one frame
 interval behind, re-anchor and drop time rather than fire a catch-up burst.
 Every control change re-anchors.
 
-Commands arrive **on the bus**: the player subscribes to ``Command`` and applies
-those addressed to it (``target`` ``None`` or its name). That is what lets a
-``POST`` at the web edge, a test, or a future Qt widget all drive it the same
-way, without holding a reference to it.
+Commands arrive **on the bus**, typed: the player is a command receiver
+(:mod:`pswamp_core.command_routing`) for every ``PlayerCommand`` subclass
+(``SeekCommand``, ``PlayCommand``, ...). ``validate`` says synchronously whether
+one applies now -- which is what lets the edge answer a POST with a 409 before
+anything is published -- and ``handle`` applies it. A pipeline's inbox delivers
+them in order, so a ``POST`` at the web edge, a test, or a future Qt widget all
+drive the player the same way, without holding a reference to it.
 """
 
 from __future__ import annotations
@@ -61,10 +64,23 @@ import asyncio
 import contextlib
 import time
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
+from ..command_routing import CommandRefused
 from ..log import get_logger
-from ..messages.control import Command, PlayerStatus, StreamChanged
+from ..messages.commands import (
+    Command,
+    GoLiveCommand,
+    PauseCommand,
+    PlayCommand,
+    PlayerCommand,
+    RefreshCommand,
+    ReplayCommand,
+    SeekCommand,
+    SpeedCommand,
+    StepCommand,
+)
+from ..messages.control import PlayerStatus, StreamChanged
 from ..messages.errors import ErrorEvent
 from ..messages.pmu import PmuFrame
 from ..util.time import ensure_utc, utcnow
@@ -81,15 +97,20 @@ __all__ = ["PLAYER_TARGET", "Player", "PlayerError"]
 
 logger = get_logger("pswamp_core.datagateway.player")
 
-#: The ``Command.target`` that addresses a stream's player. ``None`` also does.
+#: The player's receiver name: what a ``Command.target`` names it by. An untargeted
+#: player command reaches it by its class alone.
 PLAYER_TARGET = "player"
 
 #: How much slower than real time the loop may fall before dropping time.
 _BEHIND_TOLERANCE = 1.0  # in frame intervals
 
 
-class PlayerError(RuntimeError):
+class PlayerError(CommandRefused):
     """A control was refused: seeking a live source, or a bad argument."""
+
+
+#: The commands that move or pace a replay; none of them applies while live.
+_TRANSPORT = (PlayCommand, PauseCommand, StepCommand, SeekCommand, SpeedCommand)
 
 
 class Player:
@@ -110,6 +131,9 @@ class Player:
         autoplay: Start playing at ``start()`` rather than paused.
         name: The ``Command.target`` this player answers to.
     """
+
+    #: Every player command; see :mod:`pswamp_core.messages.commands`.
+    commands: ClassVar[tuple[type[Command], ...]] = (PlayerCommand,)
 
     def __init__(
         self,
@@ -169,8 +193,6 @@ class Player:
         self._wake = asyncio.Event()
         self._lock = asyncio.Lock()
         self._run_task: asyncio.Task | None = None
-        self._command_task: asyncio.Task | None = None
-        self._command_subscription = None
 
     # -- state -----------------------------------------------------------------
 
@@ -247,16 +269,7 @@ class Player:
                 live = self._history is None
                 await self._switch_stream(None if live else self._start_at, live=live)
         self._paused = True if unreachable else (False if live else not self._autoplay)
-        # Subscribe *here*, synchronously, rather than inside the task: a command
-        # published right after start() returns must not be lost to a task that
-        # has not had its first turn on the loop yet.
-        from ..bus import Overflow
-
-        self._command_subscription = self._bus.subscribe(Command, overflow=Overflow.GROW)
         self._run_task = asyncio.create_task(self._run(), name=f"{self.name}.run")
-        self._command_task = asyncio.create_task(
-            self._commands(), name=f"{self.name}.commands"
-        )
         if unreachable:
             # One turn of the loop first: the pipeline's module tasks (the error
             # forwarder among them) were created just before this and have not
@@ -268,9 +281,7 @@ class Player:
 
     async def stop(self) -> None:
         """Cancel the tasks and close the stream."""
-        tasks = [
-            task for task in (self._run_task, self._command_task, self._read) if task is not None
-        ]
+        tasks = [task for task in (self._run_task, self._read) if task is not None]
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -282,10 +293,7 @@ class Player:
                 # A read that died of a provider failure holds its exception;
                 # stopping is not the place to re-raise it.
                 logger.exception("%s: task %s had failed", self.name, task.get_name())
-        self._run_task = self._command_task = self._read = None
-        if self._command_subscription is not None:
-            self._command_subscription.close()
-            self._command_subscription = None
+        self._run_task = self._read = None
         if self._stream is not None:
             await self._stream.aclose()
             self._stream = None
@@ -394,55 +402,83 @@ class Player:
         self._wake.set()
         self._publish_status()
 
-    async def apply(self, command: Command) -> None:
-        """Apply one command addressed to this player."""
-        verb = command.verb
-        args = command.args
-        if verb in ("play", "resume"):
-            self.resume()
-        elif verb in ("stop", "pause"):
-            self.pause()
-        elif verb == "step":
-            await self.step(int(args.get("n", 1)))
-        elif verb == "seek":
-            await self.seek(self._seek_target(args))
-        elif verb == "speed":
-            self.set_speed(float(args["speed"]))
-        elif verb == "live":
-            await self.go_live()
-        elif verb == "refresh":
-            await self.refresh()
-        elif verb == "replay":
-            await self.replay(
-                self._seek_target(args) if _names_an_instant(args) else None,
-                self._range_end_target(args),
+    # -- commands --------------------------------------------------------------
+
+    def validate(self, command: Command) -> None:
+        """Refuse ``command`` if it cannot apply now; synchronous, state only.
+
+        What the edge's 409 comes from. The controls below still refuse on
+        their own (the command may have been checked against an older state
+        than the one it is applied in); this is the check made first.
+        """
+        if isinstance(command, _TRANSPORT):
+            self._refuse_in_live(command.name)
+        if isinstance(command, GoLiveCommand) and not self._live_available:
+            raise PlayerError("no live source is configured for this pipeline")
+        needs_history = isinstance(command, (SeekCommand, ReplayCommand)) or (
+            isinstance(command, StepCommand) and command.n < 0
+        )
+        if needs_history and self._history is None:
+            raise PlayerError(
+                f"cannot {command.name}: the source reports no history; refresh once it is back"
             )
-            if args.get("play"):
-                # One POST, one Command: "play this range" lands paused and is
+        if isinstance(command, SeekCommand):
+            self._refuse_outside_history(self._position(command.to, command.offset_s))
+        if isinstance(command, ReplayCommand):
+            start = self._position(command.start, command.offset_s)
+            end = self._position(command.end, command.end_offset_s)
+            if start is not None:
+                self._refuse_outside_history(start)
+            if end is not None and end <= (start or self._history.range.start):
+                raise PlayerError("replay range is empty")
+
+    async def handle(self, command: Command) -> None:
+        """Apply one command addressed to this player."""
+        if isinstance(command, PlayCommand):
+            self.resume()
+        elif isinstance(command, PauseCommand):
+            self.pause()
+        elif isinstance(command, StepCommand):
+            await self.step(command.n)
+        elif isinstance(command, SeekCommand):
+            await self.seek(self._position(command.to, command.offset_s))
+        elif isinstance(command, SpeedCommand):
+            self.set_speed(command.speed)
+        elif isinstance(command, GoLiveCommand):
+            await self.go_live()
+        elif isinstance(command, RefreshCommand):
+            await self.refresh()
+        elif isinstance(command, ReplayCommand):
+            await self.replay(
+                self._position(command.start, command.offset_s),
+                self._position(command.end, command.end_offset_s),
+            )
+            if command.play:
+                # One POST, one command: "play this range" lands paused and is
                 # resumed here, rather than needing a second command.
                 self.resume()
         else:
-            logger.warning("unknown player command %r (request %s)", verb, command.request_id)
-            return
-        logger.info("applied %s %s (request %s)", verb, args or "", command.request_id)
+            raise PlayerError(f"the player does not handle {type(command).__name__}")
 
     # -- internals -------------------------------------------------------------
 
-    def _seek_target(self, args: dict[str, Any]) -> datetime:
-        if "to" in args:
-            return _instant(args["to"])
-        if "offset_s" in args:
-            return self._from_coverage_start(float(args["offset_s"]), "seek by offset")
-        raise PlayerError("seek needs 'to' (an instant) or 'offset_s' (seconds from start)")
-
-    def _range_end_target(self, args: dict[str, Any]) -> datetime | None:
-        """The optional exclusive end of a bounded replay: ``end`` (an instant)
-        or ``end_offset_s`` (seconds from the coverage start); ``None`` if neither."""
-        if args.get("end") is not None:
-            return _instant(args["end"])
-        if args.get("end_offset_s") is not None:
-            return self._from_coverage_start(float(args["end_offset_s"]), "bound by offset")
+    def _position(self, at: datetime | None, offset_s: float | None) -> datetime | None:
+        """An instant given as itself or as seconds from the history start."""
+        if at is not None:
+            return ensure_utc(at)
+        if offset_s is not None:
+            return self._from_coverage_start(offset_s, "position by offset")
         return None
+
+    def _refuse_outside_history(self, at: datetime | None) -> None:
+        coverage = self._history
+        if at is None or coverage is None:
+            return
+        if not coverage.range.start <= at < coverage.range.end:
+            raise PlayerError(
+                f"{at.isoformat()} lies outside the history "
+                f"[{coverage.range.start.isoformat()}, {coverage.range.end.isoformat()})"
+            )
 
     def _from_coverage_start(self, seconds: float, what: str) -> datetime:
         start = self._coverage_start()
@@ -759,32 +795,6 @@ class Player:
             self._pending = None
             self._emit(frame)
 
-    async def _commands(self) -> None:
-        commands = self._command_subscription
-        if commands is None:
-            return
-        async for command in commands:
-            if command.target not in (None, self.name):
-                continue
-            try:
-                await self.apply(command)
-            except PlayerError as error:
-                logger.warning(
-                    "refused %s (request %s): %s", command.verb, command.request_id, error
-                )
-            except Exception:
-                logger.exception(
-                    "command %s (request %s) failed", command.verb, command.request_id
-                )
-
     def _publish_status(self) -> None:
         self._bus.publish(self.status())
 
-
-def _instant(value: Any) -> datetime:
-    """A command argument as a UTC instant: a datetime, or an ISO 8601 string."""
-    return ensure_utc(value if isinstance(value, datetime) else datetime.fromisoformat(value))
-
-
-def _names_an_instant(args: dict[str, Any]) -> bool:
-    return "to" in args or "offset_s" in args

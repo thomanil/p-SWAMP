@@ -10,7 +10,7 @@ list and tick an index, it now owns nothing but the edge::
     sample_data.txt ──SampleRecordingClient (history)──┐
                                                         ├─ DataGateway ──Player──▶ bus ──▶ this socket
     the same rows, now ──LiveSyntheticClient (live)────┘             ├──FrameStatsModule──▶ bus ──▶ this socket
-    POST /playback/…  ──Command on the bus──▶ Player
+    POST /playback/…  ──typed command, pipeline.dispatch──▶ Player
 
 Everything between the sources and this module is ``pswamp_core``; the pieces
 this package adds are two providers (``sample_client.py``, the recording;
@@ -43,14 +43,13 @@ the same module code, one instance per client key, in its own container. See
 The player, and so every command, stays in this process either way.
 
 Commands come up over REST and state goes down over the socket, as everywhere
-in this backend (AGENTS.md, doc/the-client-server-api.md). A command's reply is
-an acknowledgement that it was *dispatched* -- published on the client's bus,
-where the player applies it on its next turn; the resulting ``PlayerStatus``
-and frames arrive on the socket like any other change. A command the current
-mode cannot apply -- seek while live, live without a live source -- is refused
-here with a **409** before anything is published, so the ack never claims a
-command the player would only log and drop. The player's own refusal remains
-the backstop for the race between that check and the apply.
+in this backend (AGENTS.md, doc/the-client-server-api.md). Each POST builds one
+typed player command (``SeekCommand``, ``StepCommand``, ...) and hands it to
+``shared.dispatch_command``, which asks the pipeline to route and check it: a
+command the player's current mode cannot apply -- seek while live, live without
+a live source -- is a **409** before anything is published, with the player's
+own reason. Otherwise the reply acknowledges that it was *dispatched*, and the
+resulting ``PlayerStatus`` and frames arrive on the socket like any other change.
 
 server.py mounts this ``router`` under /api/pmu-test-streamer. Nothing here
 knows about that prefix.
@@ -63,12 +62,14 @@ import contextlib
 from collections.abc import AsyncIterator
 from typing import Literal
 
-from fastapi import APIRouter, FastAPI, HTTPException, WebSocket
+from fastapi import APIRouter, FastAPI, WebSocket
 from pydantic import BaseModel, Field
 from shared import (
+    COMMAND_RESPONSES,
     ClientId,
     CommandAck,
     ErrorForwarderModule,
+    dispatch_command,
     get_logger,
     read_client_id,
     send_state,
@@ -77,7 +78,19 @@ from shared import (
 
 from pswamp_core.bus import InProcessBus, Overflow, Subscription
 from pswamp_core.datagateway import DataGateway, Player, gateway_from_env
-from pswamp_core.messages import Command, PlayerStatus, PmuFrame, StreamChanged
+from pswamp_core.messages import (
+    Command,
+    GoLiveCommand,
+    PauseCommand,
+    PlayCommand,
+    PlayerStatus,
+    PmuFrame,
+    ReplayCommand,
+    SeekCommand,
+    SpeedCommand,
+    StepCommand,
+    StreamChanged,
+)
 from pswamp_core.modules import Module
 from pswamp_core.pipeline import CapacityError, Pipeline, PipelineRegistry
 from pswamp_core.remote import RemoteModule
@@ -308,115 +321,76 @@ def log_event(action: str, client_id: str) -> None:
 
 # --- REST commands ----------------------------------------------------------------
 #
-# One POST per operation. Each finds the client's live pipeline (a command never
-# builds one), checks the command applies in the player's current mode (409 if
-# not), publishes a Command on that pipeline's bus and acknowledges. The player
-# picks the command up there; the effect arrives on the socket.
+# One POST per operation, each building one typed player command. The routing,
+# the 404 (no pipeline) and the 409 (the player's mode refuses it) are
+# shared.dispatch_command's; the effect arrives on the socket.
 
 router = APIRouter()
 
-#: The verbs that reposition or pace the replay; none of them applies while live.
-_TRANSPORT = frozenset({"play", "stop", "step", "seek", "speed"})
 
-#: Documents the refusal on every command, so the contract carries it.
-_REFUSED = {409: {"description": "The command does not apply in the player's current mode."}}
-
-
-def refusal(status: PlayerStatus, verb: str) -> str | None:
-    """Why ``verb`` cannot be applied right now, or ``None`` if it can."""
-    if verb in _TRANSPORT and status.mode == "live":
-        return f"{verb} does not apply in live mode; switch to the recording first"
-    if verb == "live" and not status.can_go_live:
-        return "no live source is configured for this pipeline"
-    if verb == "replay" and status.coverage_start is None:
-        return "no recording to replay: the pipeline has no history source"
-    return None
+def dispatch(command: Command) -> CommandAck:
+    """Dispatch one command into its client's pipeline, then log the roster."""
+    ack = dispatch_command(REGISTRY, command, logger)
+    log_event(f"{command.name} (request {command.request_id})", command.client_id or "?")
+    return ack
 
 
-def live_pipeline(client_id: str) -> Pipeline:
-    """The pipeline a command applies to, or 404 -- "you have no page open"."""
-    pipeline = REGISTRY.peek(client_id)
-    if pipeline is None:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"no live pipeline for client {client_id}; "
-                "open the page (and its WebSocket) before sending commands"
-            ),
-        )
-    return pipeline
-
-
-async def dispatch(client_id: str, verb: str, **args: object) -> CommandAck:
-    """Publish one command on the client's bus and acknowledge it -- or refuse
-    it with a 409 when the player's mode cannot apply it."""
-    pipeline = live_pipeline(client_id)
-    reason = refusal(pipeline.player.status(), verb)
-    if reason is not None:
-        logger.info("client %s: refused %s: %s", client_id, verb, reason)
-        raise HTTPException(status_code=409, detail=reason)
-    command = Command(client_id=client_id, verb=verb, args=dict(args))
-    pipeline.bus.publish(command)
-    log_event(f"{verb} {args or ''} (request {command.request_id})", client_id)
-    return CommandAck(applied=verb)
-
-
-@router.post("/playback/play", operation_id="pmu_test_streamer_play", responses=_REFUSED)
+@router.post("/playback/play", operation_id="pmu_test_streamer_play", responses=COMMAND_RESPONSES)
 async def play(client_id: ClientId) -> CommandAck:
     """Start (or resume) this client's replay."""
-    return await dispatch(client_id, "play")
+    return dispatch(PlayCommand(client_id=client_id))
 
 
-@router.post("/playback/stop", operation_id="pmu_test_streamer_stop", responses=_REFUSED)
+@router.post("/playback/stop", operation_id="pmu_test_streamer_stop", responses=COMMAND_RESPONSES)
 async def stop(client_id: ClientId) -> CommandAck:
     """Pause this client's replay where it is."""
-    return await dispatch(client_id, "stop")
+    return dispatch(PauseCommand(client_id=client_id))
 
 
-@router.post("/playback/forward", operation_id="pmu_test_streamer_forward", responses=_REFUSED)
+@router.post("/playback/forward", operation_id="pmu_test_streamer_forward", responses=COMMAND_RESPONSES)
 async def forward(client_id: ClientId) -> CommandAck:
     """Play one frame, independently of the play/pause state."""
-    return await dispatch(client_id, "step", n=1)
+    return dispatch(StepCommand(client_id=client_id, n=1))
 
 
-@router.post("/playback/back", operation_id="pmu_test_streamer_back", responses=_REFUSED)
+@router.post("/playback/back", operation_id="pmu_test_streamer_back", responses=COMMAND_RESPONSES)
 async def back(client_id: ClientId) -> CommandAck:
     """Step one frame back: the player reopens its stream one interval earlier."""
-    return await dispatch(client_id, "step", n=-1)
+    return dispatch(StepCommand(client_id=client_id, n=-1))
 
 
 class SeekBody(BaseModel):
     offset_s: float = Field(ge=0, description="Seconds from the start of the recording.")
 
 
-@router.post("/playback/seek", operation_id="pmu_test_streamer_seek", responses=_REFUSED)
+@router.post("/playback/seek", operation_id="pmu_test_streamer_seek", responses=COMMAND_RESPONSES)
 async def seek(client_id: ClientId, body: SeekBody) -> CommandAck:
     """Jump the replay to an offset into the recording. 409 while live."""
-    return await dispatch(client_id, "seek", offset_s=body.offset_s)
+    return dispatch(SeekCommand(client_id=client_id, offset_s=body.offset_s))
 
 
 class SpeedBody(BaseModel):
     speed: float = Field(gt=0, le=10, description="Replay speed multiplier; 1 is real time.")
 
 
-@router.post("/playback/speed", operation_id="pmu_test_streamer_speed", responses=_REFUSED)
+@router.post("/playback/speed", operation_id="pmu_test_streamer_speed", responses=COMMAND_RESPONSES)
 async def speed(client_id: ClientId, body: SpeedBody) -> CommandAck:
     """Change the replay speed. 409 while live."""
-    return await dispatch(client_id, "speed", speed=body.speed)
+    return dispatch(SpeedCommand(client_id=client_id, speed=body.speed))
 
 
-@router.post("/playback/live", operation_id="pmu_test_streamer_live", responses=_REFUSED)
+@router.post("/playback/live", operation_id="pmu_test_streamer_live", responses=COMMAND_RESPONSES)
 async def live(client_id: ClientId) -> CommandAck:
     """Switch this client to the live feed: frames from now, as they arrive, no
     transport controls. 409 when no live source is configured."""
-    return await dispatch(client_id, "live")
+    return dispatch(GoLiveCommand(client_id=client_id))
 
 
-@router.post("/playback/replay", operation_id="pmu_test_streamer_replay", responses=_REFUSED)
+@router.post("/playback/replay", operation_id="pmu_test_streamer_replay", responses=COMMAND_RESPONSES)
 async def replay(client_id: ClientId) -> CommandAck:
     """Switch this client back to the recording, paused at its start. 409 when
     no history source is configured."""
-    return await dispatch(client_id, "replay")
+    return dispatch(ReplayCommand(client_id=client_id))
 
 
 # --- websocket endpoint (downstream only) ---------------------------------------

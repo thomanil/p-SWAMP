@@ -15,10 +15,23 @@ import pytest
 from support import HISTORY, Measurement, at, measurement, take
 
 from pswamp_core.bus import InProcessBus, Overflow
+from pswamp_core.command_routing import CommandInbox
 from pswamp_core.datagateway import Capability, Coverage, DataGateway, Player, TimeRange
 from pswamp_core.datagateway.clients import InMemoryClient
 from pswamp_core.datagateway.player import PlayerError
-from pswamp_core.messages import Command, ErrorEvent, PlayerStatus, StreamChanged
+from pswamp_core.messages import (
+    ErrorEvent,
+    GoLiveCommand,
+    PauseCommand,
+    PlayCommand,
+    PlayerStatus,
+    RefreshCommand,
+    ReplayCommand,
+    SeekCommand,
+    SpeedCommand,
+    StepCommand,
+    StreamChanged,
+)
 from pswamp_core.util.time import utcnow
 
 
@@ -34,13 +47,17 @@ def live_only_client(name: str = "live") -> InMemoryClient:
 
 @pytest.fixture
 async def rig(history_client):
-    """A bus, a gateway over ten one-second-apart frames, and an unpaced player.
-    Yields the pieces and stops the player afterwards."""
+    """A bus, a gateway over ten one-second-apart frames, and an unpaced player
+    whose commands arrive off the bus, as in a pipeline. Yields the pieces and
+    stops the player afterwards."""
     bus = InProcessBus()
     bus.bind(asyncio.get_running_loop())
     gateway = DataGateway([history_client])
     player = Player(gateway, bus, model=Measurement, paced=False)
+    inbox = CommandInbox(bus, player)
+    inbox.start()
     yield bus, gateway, player
+    await inbox.stop()
     await player.stop()
 
 
@@ -53,7 +70,10 @@ async def mixed_rig(history_client):
     live = live_only_client()
     gateway = DataGateway([history_client, live])
     player = Player(gateway, bus, model=Measurement, paced=False)
+    inbox = CommandInbox(bus, player)
+    inbox.start()
     yield bus, live, player
+    await inbox.stop()
     await player.stop()
 
 
@@ -174,8 +194,8 @@ async def test_seek_by_offset_command(rig):
     bus, _, player = rig
     await player.start()
     with bus.subscribe(Measurement) as frames:
-        bus.publish(Command(verb="seek", args={"offset_s": 7}))
-        bus.publish(Command(verb="step"))
+        bus.publish(SeekCommand(offset_s=7))
+        bus.publish(StepCommand())
         (frame,) = await take(frames, 1)
     assert frame.mRID == "m7"
 
@@ -201,17 +221,16 @@ async def test_commands_over_the_bus_drive_the_player(rig):
     with bus.subscribe(Measurement, overflow=Overflow.GROW) as frames, bus.subscribe(
         PlayerStatus
     ) as statuses:
-        bus.publish(Command(verb="speed", args={"speed": 2.0}))
+        bus.publish(SpeedCommand(speed=2.0))
         status = await wait_status(statuses, lambda s: s.speed == 2.0)
         assert status.paused is True
-        bus.publish(Command(verb="play"))
+        bus.publish(PlayCommand())
         await wait_status(statuses, lambda s: not s.paused)
         got = await take(frames, 3)
         assert [m.mRID for m in got] == ["m0", "m1", "m2"]
-        bus.publish(Command(verb="stop"))
+        bus.publish(PauseCommand())
         await wait_status(statuses, lambda s: s.paused)
-        bus.publish(Command(target="someone-else", verb="play"))
-        bus.publish(Command(verb="teleport"))  # unknown verb: logged, ignored
+        bus.publish(PlayCommand(target="someone-else"))  # not for this player
         await asyncio.sleep(0.02)
         assert player.paused is True
 
@@ -367,7 +386,7 @@ async def test_go_live_switches_mode_and_delivers_published_records(mixed_rig):
     ) as statuses, bus.subscribe(StreamChanged, overflow=Overflow.GROW) as changes:
         await player.start()
         await take(changes, 1)
-        bus.publish(Command(verb="live"))
+        bus.publish(GoLiveCommand())
         status = await wait_status(statuses, lambda s: s.mode == "live")
         assert status.paused is False
         assert status.can_seek is False
@@ -396,11 +415,15 @@ async def test_live_mode_refuses_the_transport_controls(mixed_rig):
             await player.step()
         with pytest.raises(PlayerError):
             await player.seek(at(1))
-        # Over the bus a refusal is logged and changes nothing.
+        # Over the bus a refusal changes nothing, and is reported with its request id.
         cursor = player.cursor
-        bus.publish(Command(verb="seek", args={"offset_s": 1.0}))
-        bus.publish(Command(verb="stop"))
-        await asyncio.sleep(0.02)
+        with bus.subscribe(ErrorEvent, overflow=Overflow.GROW) as errors:
+            seek, pause = SeekCommand(offset_s=1.0), PauseCommand()
+            bus.publish(seek)
+            bus.publish(pause)
+            reports = await take(errors, 2)
+        assert [e.request_id for e in reports] == [seek.request_id, pause.request_id]
+        assert all(e.source == "player" and "live mode" in e.detail for e in reports)
         assert player.mode == "live"
         assert player.paused is False
         assert player.cursor == cursor
@@ -422,7 +445,7 @@ async def test_replay_returns_to_the_history_start_paused(mixed_rig):
         await player.start()
         await player.go_live()
         await wait_status(statuses, lambda s: s.mode == "live")
-        bus.publish(Command(verb="replay"))
+        bus.publish(ReplayCommand())
         status = await wait_status(statuses, lambda s: s.mode == "replay")
         assert status.paused is True
         assert status.can_seek is True
@@ -430,7 +453,7 @@ async def test_replay_returns_to_the_history_start_paused(mixed_rig):
         await player.step()
         (frame,) = await take(frames, 1)
         assert frame.mRID == "m0"
-        bus.publish(Command(verb="replay", args={"offset_s": 5.0}))
+        bus.publish(ReplayCommand(offset_s=5.0))
         await wait_status(statuses, lambda s: s.cursor == at(5))
         await player.step()
         (frame,) = await take(frames, 1)
@@ -447,7 +470,7 @@ async def test_replay_over_a_bounded_range_plays_exactly_the_range_then_ends_pau
     with bus.subscribe(Measurement, overflow=Overflow.GROW) as frames, bus.subscribe(
         PlayerStatus, overflow=Overflow.GROW
     ) as statuses:
-        bus.publish(Command(verb="replay", args={"to": at(2), "end": at(5), "play": True}))
+        bus.publish(ReplayCommand(start=at(2), end=at(5), play=True))
         running = await wait_status(statuses, lambda s: not s.paused and s.range_end == at(5))
         assert running.error is None
         got = await take(frames, 3)
@@ -465,7 +488,7 @@ async def test_range_end_past_the_history_is_clamped_and_offsets_work(rig):
     with bus.subscribe(Measurement, overflow=Overflow.GROW) as frames, bus.subscribe(
         PlayerStatus, overflow=Overflow.GROW
     ) as statuses:
-        bus.publish(Command(verb="replay", args={"offset_s": 8, "end_offset_s": 50, "play": True}))
+        bus.publish(ReplayCommand(offset_s=8, end_offset_s=50, play=True))
         status = await wait_status(statuses, lambda s: not s.paused)
         assert status.range_end is None  # clamped to the history end: an ordinary replay
         got = await take(frames, 2)
@@ -561,7 +584,7 @@ async def test_a_history_source_that_stops_answering_coverage_is_an_error_not_a_
         assert player.paused and player.mode == "replay" and frames.get_nowait() is None
         assert player._run_task is not None and not player._run_task.done()
         # Still down: a refresh re-asks, finds nothing, and the error stands.
-        bus.publish(Command(verb="refresh"))
+        bus.publish(RefreshCommand())
         await asyncio.sleep(0.02)
         assert player.status().error is not None and player.status().coverage_start is None
         # Back: a refresh finds the coverage again and clears the error, playing nothing.

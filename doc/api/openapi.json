@@ -2708,6 +2708,12 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
+          "409": {
+            "description": "The command does not apply in the pipeline's current state."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2764,6 +2770,12 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
+          "409": {
+            "description": "The command does not apply in the pipeline's current state."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2809,6 +2821,12 @@
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
+          "409": {
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {
@@ -3031,6 +3049,12 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
+          "409": {
+            "description": "The command does not apply in the pipeline's current state."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -3087,6 +3111,12 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
+          "409": {
+            "description": "The command does not apply in the pipeline's current state."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -3132,6 +3162,12 @@
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
+          "409": {
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {
@@ -3179,8 +3215,11 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
           "409": {
-            "description": "The command does not apply in the player's current mode."
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {
@@ -3228,8 +3267,11 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
           "409": {
-            "description": "The command does not apply in the player's current mode."
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {
@@ -3277,8 +3319,11 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
           "409": {
-            "description": "The command does not apply in the player's current mode."
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {
@@ -3326,8 +3371,11 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
           "409": {
-            "description": "The command does not apply in the player's current mode."
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {
@@ -3375,8 +3423,11 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
           "409": {
-            "description": "The command does not apply in the player's current mode."
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {
@@ -3434,8 +3485,11 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
           "409": {
-            "description": "The command does not apply in the player's current mode."
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {
@@ -3493,8 +3547,11 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
           "409": {
-            "description": "The command does not apply in the player's current mode."
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {
@@ -3542,8 +3599,11 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
           "409": {
-            "description": "The command does not apply in the player's current mode."
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {
@@ -3693,8 +3753,11 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
           "409": {
-            "description": "The range lies outside the provider's coverage, or there is none."
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {
@@ -3752,8 +3815,11 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
           "409": {
-            "description": "The range lies outside the provider's coverage, or there is none."
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {
@@ -3801,8 +3867,11 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
           "409": {
-            "description": "The range lies outside the provider's coverage, or there is none."
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {
@@ -3849,6 +3918,12 @@
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
+          "409": {
+            "description": "The command does not apply in the pipeline's current state."
           },
           "422": {
             "content": {

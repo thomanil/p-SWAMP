@@ -36,6 +36,12 @@ unchanged: the core bus kept `add_listener(topic, fn)`, with a message class as
 the topic, so a page over `pswamp_core` wakes on its result class the same way
 a monitor page wakes on a store topic.
 
+`dispatch_command` is the one way an app over a core pipeline turns a POST
+into a command: find the client's pipeline (404 without one -- a command never
+builds a pipeline), `pipeline.dispatch` it (409 when its receiver refuses it
+now), acknowledge. `COMMAND_RESPONSES` documents those two answers on the
+route, so the published contract carries them.
+
 `ErrorForwarderModule` and `HUB` come from the `errors` app package: every app
 that builds a core pipeline appends one forwarder to its module list, so a
 pipeline's `ErrorEvent`s reach the layout's error tray with the app's slug on
@@ -45,9 +51,10 @@ is what keeps this from being a cycle.
 """
 
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 
-from fastapi import WebSocket
+from fastapi import HTTPException, WebSocket
 from pydantic import BaseModel
 
 from errors.forwarder import ErrorForwarderModule
@@ -63,13 +70,19 @@ from pswamp_web.wire import (
     send_state,
 )
 
+from pswamp_core.command_routing import CommandRefused
+from pswamp_core.messages import Command
+from pswamp_core.pipeline import PipelineRegistry
+
 __all__ = [
     "CLIENT_ID_PATTERN",
+    "COMMAND_RESPONSES",
     "HUB",
     "ClientId",
     "CommandAck",
     "ErrorForwarderModule",
     "SocketRegistry",
+    "dispatch_command",
     "event_queue",
     "get_logger",
     "read_client_id",
@@ -134,3 +147,39 @@ class SocketRegistry(SessionRegistry[WebSocket]):
         for ws in self.of(client_id):
             with contextlib.suppress(Exception):
                 await send_state(ws, message)
+
+
+#: The answers a command route gives besides its ack; pass as ``responses=``.
+COMMAND_RESPONSES: dict[int | str, dict] = {
+    404: {"description": "The client has no live pipeline: its page is not open."},
+    409: {"description": "The command does not apply in the pipeline's current state."},
+}
+
+
+def dispatch_command(
+    registry: PipelineRegistry, command: Command, logger: logging.Logger
+) -> CommandAck:
+    """Send one command into its client's pipeline and acknowledge it.
+
+    404 when the client has no pipeline (a command never builds one); 409 when
+    the receiver refuses it in its current state, with its reason as the
+    detail. Otherwise the command is on the pipeline's bus and the ack says so:
+    the effect arrives on the socket, never in this reply.
+    """
+    client_id = command.client_id or ""
+    pipeline = registry.peek(client_id)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no live pipeline for client {client_id}; "
+                "open the page (and its WebSocket) before sending commands"
+            ),
+        )
+    try:
+        pipeline.dispatch(command)
+    except CommandRefused as refused:
+        logger.info("client %s: refused %s: %s", client_id, command.name, refused)
+        raise HTTPException(status_code=409, detail=str(refused)) from refused
+    logger.info("client %s: %s (request %s)", client_id, command.name, command.request_id)
+    return CommandAck(applied=command.name)
