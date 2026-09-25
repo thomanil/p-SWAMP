@@ -129,3 +129,93 @@ server's `TIME_SERIES_EXPLORER_DATA_CLIENTS` / `TSDB_URL` /
    topic; it lands when the monitor is re-pointed at the core.
 7. **Auth on `TSDB_URL`**: none; a bearer token setting is the obvious first
    addition when a real store sits behind it.
+
+## Addendum (2026-09-25): results come back on the response, not a topic
+
+The reply-channel decision above is reversed. `POST /v1/queries` now answers
+`200` with a streamed NDJSON body: one `RemoteDataResult` line per record, then
+one `end` (or `error`) line. Kafka is gone from the remote data path entirely:
+no results topic, no `KafkaResultFeed`/`InMemoryResultFeed`, no stub sink, no
+`DELETE /v1/queries/{id}`, no `REMOTE_DATA_BOOTSTRAP_SERVERS`/`_TOPIC` on
+either side, and aiokafka out of the `[remote-data]` extra.
+
+**Why.** "The service pushes at its own pace" turned out to be the cost, not
+the benefit. The topic had no backpressure (open point 1), so the per-query
+queue grew with the range. Every pipeline ran its own consumer decoding every
+other pipeline's envelopes (open point 2). The deployment had to implement a
+producer and agree on a topic, a partition count and topic creation (open
+point 4) on top of the HTTP api. Answering on the connection that asked
+removes the correlation (`query_id`/`seq` on each line, subscribe-before-POST),
+makes closing the connection the cancel, and gets flow control from TCP: the
+client reads a line only when the player wants the next frame. Decided in a
+plan round: a slim envelope (`kind`, `model`, `record`, `count`, `error`)
+rather than bare frames, because the status code is spent before the first
+record, so failure has to be said in the body. No prefetch buffer.
+
+**What the code forced.**
+
+- **The timeout moved into the client.** `REMOTE_DATA_TIMEOUT` is enforced with
+  `asyncio.timeout` around the response start and each `anext` on the lines,
+  and the stream request sets httpx's read timeout to `None`. That way it only
+  runs while the client is actually waiting. A paused replay reads nothing for
+  as long as it is paused, and must not time out for it.
+- **The stub yields to the loop every 50 records.** Its records come from
+  memory, and a write to an unpaused socket does not suspend. Without the
+  yield, one long query would run to the socket buffer's limit before another
+  got a turn.
+- **`httpx.ASGITransport` buffers the whole body** before it returns, so the
+  in-process tests prove the contract but not the streaming. The lazy pull and
+  cancel-by-closing are pinned in `core/tests/test_remote_data_client.py` over
+  an `httpx.AsyncByteStream` that hands out one line at a time and records how
+  many it handed out and whether it was closed. The broker-gated round-trip
+  test went with the topic.
+- **Measured on a real socket** (the stub under uvicorn, repeat 200, a
+  ten-minute range): the client read five frames slowly, and the stub stopped
+  writing after 1100 records, which is what fits in the socket buffers. It
+  logged "client went away after 1100 record(s)" when the stream was closed.
+
+**Open.** Open points 1, 2 and 4 above are closed. Point 3 (coverage asked
+often) and point 7 (auth) stand. One new point: a replay holds its connection
+open for as long as it plays, paused included. A proxy between p-SWAMP and a
+real service must neither buffer the response (the stub sends
+`X-Accel-Buffering: no`) nor cut an idle one short. Otherwise a long pause ends
+in a `ConnectionError` on resume, which the next play recovers from.
+
+**Tech-agnostic, and the stub held to it (same day).** The service is a black
+box behind a REST api and may be built on any stack, so
+`doc/remote-data-integration-contract.md` is now the normative contract, in
+HTTP terms only: no `Content-Length`, lines are the only unit (chunk
+boundaries, `\r\n` and negotiated gzip mean nothing), a flush per line,
+backpressure through the server's own blocking writes, and a hang-up as the
+cancel. It includes a table of how the main stacks flush and see a hang-up.
+The client's docstring only summarises it. `core/examples/check_remote_data_service.py`
+(standard library `http.client`, nothing from p-SWAMP), run through
+`scripts/check-remote-data-service.sh [URL]`, checks a running service over
+plain HTTP. With no URL it checks the stub, and CI's unit-tests job runs it
+that way, so the stub cannot quietly lean on being Python.
+
+Verified outside the repo against a raw-socket server with no HTTP framework:
+- The client read the same frames from bodies that were chunked, cut into
+  7-byte chunks, CRLF, fixed-length, connection-close and gzip.
+- The client rejected a body with no end line.
+- The check passed the conforming framings and failed a pre-sized body and a
+  body with no end line.
+The chunk-cut, CRLF and gzip cases are pinned in the core tests.
+
+**The stub moved into the core (same day).** Everything of the remote data
+contract now lives under `core/`. The client and line model are in the package.
+`core/examples/` holds the stub `remote_data_stub/` and
+`check_remote_data_service.py`, both outside the built package because the stub
+is a FastAPI service and not library code. Their tests are in `core/tests/`.
+
+What the move forced:
+- **Data.** The stub imported the streamer's sample and parser from `app/`,
+  which the core may never do. It now keeps `sample_frames.ndjson`: the same
+  sixty frames as `pmu.frame` lines, so no parser is needed.
+- **Dependencies.** FastAPI and uvicorn are declared in a core `examples`
+  dependency group, which puts only metadata in the lock.
+- **Import path.** `core/examples` reaches one through `PYTHONPATH` on the
+  stub's container in compose and k8s and in the check script, and through
+  pytest's `pythonpath` in both manifests.
+- **Tests.** The moved tests `importorskip` FastAPI and httpx.
+- **Image.** No change: the Dockerfile already copies `core/` whole.

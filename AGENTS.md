@@ -71,19 +71,31 @@ which exist to keep the "adding a page" path honest:
   *queries*, and of a module driven by a command.** Its provider is the core's
   `RemoteDataClient` (`core/src/pswamp_core/datagateway/clients/remote_data.py`,
   behind the `pswamp-core[remote-data]` extra): a range request goes **up as a
-  REST `POST`** to a configured URL, and the answer comes **down on a configured
-  Kafka topic** as correlated envelopes — the shape a deployment implements once,
-  as a remote data service in front of whatever store it runs. **The name is
+  REST `POST`** to a configured URL, and the answer comes **back as that call's
+  streamed response**, one NDJSON line per record, read only as fast as the
+  player consumes it — the shape a deployment implements once, as a remote data
+  service in front of whatever store it runs. There is no broker on this path
+  and no cancel route: closing the connection is the cancel. **The name is
   about decoupling, not storage**: the client never talks to a database, so the
   deployment chooses (and can change) its store without a change here. A
   time-series database is the typical case, and the page keeps its time-series
   name because that is what is queried on the other end — but it is a detail of
-  the deployment. **The contract is that class's docstring**; read it there, not
-  here (`doc/remote-data-integration-contract.md` spells it out for the team
-  implementing the service). Beside it, `src/remote_data_stub/` is the dummy
-  implementation of that service (`python -m remote_data_stub`, the same image
-  as a separate container, playing a time-series store by serving the sample
-  recording tiled to a minute), rigged in compose and the local k8s manifest. The page asks
+  the deployment. **The contract is `doc/remote-data-integration-contract.md`**,
+  written in HTTP terms alone: the service is a black box behind a REST api and
+  may be built on any stack, so nothing in the contract may assume Python or
+  a framework. The class docstring summarises it from the client's side.
+  `./scripts/check-remote-data-service.sh [URL]` checks a running service
+  against it over plain HTTP (standard library only); with no URL it checks
+  the stub, which CI does on every pull request, so the stub is held to
+  exactly what a deployment's service is. Beside it, `core/examples/remote_data_stub/`
+  is the dummy implementation of that service (`python -m remote_data_stub`
+  with `core/examples` on `PYTHONPATH`, the same image as a separate container,
+  playing a time-series store by serving a three-second sample tiled to a
+  minute), rigged in compose and the local k8s manifest. **Everything of the
+  remote data contract lives under `core/`**: the client and line model in the
+  package, the stub and the black-box check in `core/examples/`, their tests in
+  `core/tests/`. The stub imports nothing from `app/` and keeps its own
+  fixture (`sample_frames.ndjson`) for that reason. The page asks
   one range two ways, each a `POST` that becomes a `Command` on the client's
   bus: **play-range** (the *stream* case — the player replays exactly
   `[start, end)` paced and ends paused there, a bounded replay the player grew
@@ -165,15 +177,21 @@ either manifest to the other's level.
 
 The third is **`core/` — the shared data architecture, `pswamp-core`, imported
 as `pswamp_core`** (`core/pyproject.toml`, `core/src/pswamp_core/`,
-`core/tests/`): the wire messages, the provider contract and gateway, the player,
+`core/tests/`, and `core/examples/` beside them): the wire messages, the provider contract and gateway, the player,
 the in-process bus, the module base, the pipeline registry, and the transport
 and remote-module pieces that let a module run as its own service. pydantic is
 its only dependency by default, so a provider written outside this repo can
 import the contract and nothing else; two extras add what two optional pieces
 need, both imported lazily — `pswamp-core[kafka]` adds aiokafka for the Kafka
-transport (`transport/kafka.py`), `pswamp-core[remote-data]` adds httpx beside
-it for the Remote Data Client (`datagateway/clients/remote_data.py`)
-— and the web backend takes both. It has **no lockfile of its own**: it is a library, consumed by
+transport (`transport/kafka.py`), `pswamp-core[remote-data]` adds httpx
+for the Remote Data Client (`datagateway/clients/remote_data.py`)
+— and the web backend takes both. `core/examples/` sits *outside* the
+package: runnable examples that are not library code, today the remote data
+stub (a FastAPI service) and the contract's black-box check. Nothing installs
+them; what they need beyond the core is the `examples` dependency group, which
+the web backend's environment already covers, and they reach an import path
+through `PYTHONPATH` (compose, k8s, the check script) or pytest's `pythonpath`.
+It has **no lockfile of its own**: it is a library, consumed by
 the web backend as a second editable path dependency, and its tests run in that
 backend's environment (below). `doc/server-data-architecture.md` describes it;
 the `STEP*` files at the repo root are the working notes behind it, and STEP 4
@@ -224,7 +242,8 @@ Consequences worth knowing before touching anything:
   desktop package (its manifest is copied before the dependency resolve, its
   source after; `--no-emit-package pswamp-core` keeps it out of the wheel layer),
   synced by compose watch and named in `--reload-dir`. `core/tests/` is kept out
-  by `.dockerignore`. Nothing in the Dockerfile names a module, so a new module
+  by `.dockerignore`; `core/examples/` comes along, which is how the stub's
+  container runs from the same image. Nothing in the Dockerfile names a module, so a new module
   under `core/src/pswamp_core/` needs no build change.
 - **The web backend takes p-swamp with no extras.** `[full]` is what carries
   PySide6, pyqtgraph, kafka-python, nqkafka and tops-rt; none of that belongs in a
@@ -250,7 +269,7 @@ module only, a worker container from the same image and the Apache Kafka broker
 it is reached through (`docker-compose.yml`'s `stats-worker` and `kafka`; the
 matching Deployments in `k8s/`), and, for the Time Series Explorer only, the
 dummy remote data service from the same image (`remote-data-stub`) that the
-explorer's provider queries over REST and reads back over that same broker,
+explorer's provider queries over REST, reading each answer back as the streamed response,
 and, for the Islanding stream and the Mode estimation page, one more worker
 each from the same image (`islanding-worker`, `mode-estimation-worker`), each
 on its own prefixed topics.
@@ -894,7 +913,7 @@ underlying tech). Start the server first, then the client:
                                                      # also live-syncs root src/, so desktop-package edits hot-reload too
                                                      # brings up six containers: kafka, the server, the streamer's stats-worker,
                                                      # the islanding-worker and mode-estimation-worker (those pages' modules),
-                                                     # and the explorer's remote-data-stub (a dummy remote data service behind the REST + Kafka contract)
+                                                     # and the explorer's remote-data-stub (a dummy remote data service behind the REST contract)
 ./scripts/start-local-hotloaded-pswamp-web-client.sh  # Vite/React web client w/ HMR on http://localhost:5173
 ```
 
@@ -1026,12 +1045,14 @@ separate envs and are hermetic to very different degrees:
   module as its own service over the portless `InMemoryTransport`. The Kafka
   transport's own round trip in `core/tests/test_kafka_transport.py` is
   **skipped unless a broker is named**: `KAFKA_TEST_BOOTSTRAP_SERVERS=127.0.0.1:19092`
-  runs it against the compose stack's Kafka (its EXTERNAL listener). The same
-  variable gates the Remote Data Client's round trip through a real topic in
-  `tests/test_remote_data_service.py`; the rest of that file — the
-  conformance suite over the client wired to the stub service in-process
-  (`httpx.ASGITransport` for the REST half, the client's `InMemoryResultFeed`
-  as the stub's sink) — needs neither a port nor a broker.
+  runs it against the compose stack's Kafka (its EXTERNAL listener).
+  `core/tests/test_remote_data_service.py` runs the conformance suite over the
+  Remote Data Client wired to the stub service in-process over
+  `httpx.ASGITransport`, with no port. That transport collects the whole body
+  before returning it, so it proves the contract, not the streaming: the lazy
+  pull and cancel-by-closing are pinned in `core/tests/test_remote_data_client.py`
+  over a line-by-line body, and the real socket is
+  `scripts/check-remote-data-service.sh`'s and the e2e smoke test's.
 - **`./scripts/run-core-python-tests.sh`** — the desktop package's tests
   (repo-root `tests/`), in the root project's `[full]` env. A **starting point,
   not a gate**: most need external infrastructure (Kafka / NQKafka / MQTT brokers,
@@ -1047,6 +1068,7 @@ automated:
 ```
 ./scripts/e2e-smoke-test.sh                                # start a server, drive the Reference example, stop it
 SMOKETEST_URL=http://host:port ./scripts/e2e-smoke-test.sh # test a server already running; manages no lifecycle
+./scripts/check-remote-data-service.sh [URL]               # a remote data service against its HTTP contract (no URL: the stub)
 ```
 
 `error_check.sh` never starts the app; this only starts it. Run both. Without
@@ -1410,9 +1432,8 @@ What has to hold in the `static-errorcheck` job:
   frame it emits. The ConfigMap is configuration, not storage: the
   "no persistent volume" rule stands. The same env block is **the worked
   example of pointing a page at a remote data service**: `TIME_SERIES_EXPLORER_DATA_CLIENTS`
-  names the Remote Data Client, `REMOTE_DATA_URL` the stub's Service and
-  `REMOTE_DATA_BOOTSTRAP_SERVERS` the broker — a deployment with its own service keeps
-  those three lines and changes the URL.
+  names the Remote Data Client and `REMOTE_DATA_URL` the stub's Service — a
+  deployment with its own service keeps those two lines and changes the URL.
 
 ## Workflow rules
 

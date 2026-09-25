@@ -29,8 +29,8 @@
 #   7. the streamer flow               — play, and the stats MODULE's result comes down the
 #                                        socket: over the broker from the stats-worker container
 #                                        under compose, in-process under a bare `docker run` (CI)
-#   8. the explorer flow               — count a range, play a bounded range: over REST and the
-#                                        broker from the remote-data-stub container under compose,
+#   8. the explorer flow               — count a range, play a bounded range: over REST, streamed
+#                                        back from the remote-data-stub container under compose,
 #                                        over the sample recording under a bare `docker run` (CI)
 #
 # Steps 1-5 are curl; steps 6-8 are tools/smoketest_*.py, since bash can't speak

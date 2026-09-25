@@ -23,6 +23,10 @@ is the `test_pswamp` draft by Louis Pauchet; see
 `STEP4-WIP-data-integration-impl-for-single-module.md` for what was lifted
 verbatim, what was adapted, and what is still deferred.
 
+Beside the package, `examples/` holds runnable examples that are not library
+code and are never installed with it. Today that is the remote data contract's
+reference service and its black-box check; see `examples/README.md`.
+
 The web backend in `app/server-python/` consumes this package as an editable
 path dependency (`pswamp-core = { path = "../../core" }`). Its tests under
 `core/tests/` run in that backend's environment via

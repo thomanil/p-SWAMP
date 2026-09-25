@@ -8,8 +8,8 @@
 The third wire-level smoke test: open the explorer's socket, read the coverage
 the provider reports, count one second of it, and play half a second of it to
 the end. Under compose the provider is the ``RemoteDataClient`` over
-the stub service and the broker (``TIME_SERIES_EXPLORER_DATA_CLIENTS``), so
-the count and the frames crossed REST and a Kafka topic; under a bare
+the stub service (``TIME_SERIES_EXPLORER_DATA_CLIENTS``), so the count and
+the frames crossed REST and came back as its streamed response; under a bare
 ``docker run`` (CI) it is the sample recording in-process. The socket cannot
 tell which -- that is the property under test -- and the numbers are the same
 because both are the same 20 Hz recording.
@@ -31,7 +31,7 @@ from websockets.asyncio.client import connect
 WS_PATH = "/api/time-series-explorer/ws"
 API_PATH = "/api/time-series-explorer"
 
-#: Over the stub the count crosses REST and the broker; generous, so a wedged
+#: Over the stub the count crosses REST and another container; generous, so a wedged
 #: path fails here rather than being masked.
 RESULT_TIMEOUT = 15.0
 RECV_TIMEOUT = 5.0

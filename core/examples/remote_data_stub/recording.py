@@ -1,7 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""The stub's "database": the sample recording, tiled to a longer timeline."""
+"""The stub's "database": a recording of ``pmu.frame`` records, tiled to a
+longer timeline.
+
+The recording is ``sample_frames.ndjson`` beside this file: one ``pmu.frame``
+per line, the same JSON a record line of the contract carries. It holds sixty
+frames, three seconds of five stations at 20 Hz, from the Nordic 44 simulation.
+They are the PMU test streamer's committed sample, converted once. The stub
+keeps its own copy so it needs nothing from ``app/``. Any file of ``pmu.frame``
+lines in time order serves (``REMOTE_DATA_STUB_PATH``).
+"""
 
 from __future__ import annotations
 
@@ -10,17 +19,28 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from pmu_test_streamer.sample_client import DEFAULT_PATH, load_sample
 from pswamp_core.messages import DataModel, PmuFrame, PmuHeader
 
-__all__ = ["TiledRecording"]
+__all__ = ["DEFAULT_PATH", "TiledRecording", "load_frames"]
+
+#: The committed sample: sixty frames, five stations, 20 Hz.
+DEFAULT_PATH = Path(__file__).parent / "sample_frames.ndjson"
+
+
+def load_frames(path: Path | str = DEFAULT_PATH) -> tuple[PmuFrame, ...]:
+    """The ``pmu.frame`` lines of ``path``, validated, in file order."""
+    with Path(path).open(encoding="utf-8") as lines:
+        frames = tuple(PmuFrame.model_validate_json(line) for line in lines if line.strip())
+    if not frames:
+        raise ValueError(f"{path}: no frames")
+    return frames
 
 
 @dataclass(frozen=True)
 class TiledRecording:
-    """The sample file's frames repeated ``repeat`` times back to back, each
+    """The recording's frames repeated ``repeat`` times back to back, each
     copy shifted by the recording's span so the timeline is continuous at the
-    recording's own rate. Every frame carries the recording's layout.
+    recording's own rate. Every frame carries its layout.
 
     Serves one model by topic string: ``pmu.frame``. Anything else is unknown.
     """
@@ -33,14 +53,15 @@ class TiledRecording:
     def load(cls, path: Path | str = DEFAULT_PATH, repeat: int = 1) -> TiledRecording:
         if repeat < 1:
             raise ValueError("repeat must be at least 1")
-        sample = load_sample(Path(path))
-        span = sample.coverage.end - sample.coverage.start
+        sample = load_frames(path)
+        interval = timedelta(seconds=1.0 / sample[0].header.data_rate)
+        span = sample[-1].timestamp - sample[0].timestamp + interval
         frames = tuple(
             frame.model_copy(update={"timestamp": frame.timestamp + span * copy})
             for copy in range(repeat)
-            for frame in sample.frames
+            for frame in sample
         )
-        return cls(header=sample.header, frames=frames, repeat=repeat)
+        return cls(header=sample[0].header, frames=frames, repeat=repeat)
 
     @property
     def frame_interval(self) -> timedelta:

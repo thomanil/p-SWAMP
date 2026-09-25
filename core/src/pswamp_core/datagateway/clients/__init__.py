@@ -5,7 +5,7 @@
 
 Two: the reference ``InMemoryClient`` (re-exported here), and
 ``RemoteDataClient`` in ``remote_data`` -- a deployment's own data service
-behind a REST api, answering on a Kafka topic -- which is *not* re-exported,
+behind a REST api, answering with a streamed response -- which is *not* re-exported,
 so that importing this package pulls in nothing the ``remote-data`` extra
 provides; name it by module in a ``PSWAMP_DATA_CLIENTS`` spec. The draft's
 ``CsvClient`` and a broker-as-history ``KafkaClient`` are still deferred (see

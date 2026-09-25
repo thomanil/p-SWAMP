@@ -5,8 +5,9 @@
 
 The example beside the streamer for a provider that answers *queries* -- in the
 deployments this is written for, the ``RemoteDataClient``, which sends each
-query to a deployment's own data service and reads the answers off a Kafka
-topic (see its docstring in ``pswamp_core.datagateway.clients.remote_data``).
+query to a deployment's own data service and reads each answer back as that
+call's streamed response (see its docstring in
+``pswamp_core.datagateway.clients.remote_data``).
 The page is named for what is queried on the other end: a time series, kept in
 whatever store the deployment runs, which this page never sees.
 

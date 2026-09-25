@@ -19,10 +19,7 @@ from pmu_test_streamer.sample_client import SampleRecordingClient, load_sample
 from pswamp_core.bus import InProcessBus, Overflow
 from pswamp_core.datagateway import Capability, DataGateway
 from pswamp_core.datagateway.clients import InMemoryClient
-from pswamp_core.datagateway.clients.remote_data import (
-    InMemoryResultFeed,
-    RemoteDataClient,
-)
+from pswamp_core.datagateway.clients.remote_data import RemoteDataClient
 from pswamp_core.messages import Command, ErrorEvent, PlayerStatus, PmuFrame
 from time_series_explorer import api
 from time_series_explorer.row_count_module import RowCountModule, RowCountResult
@@ -203,17 +200,16 @@ async def _wait_status(subscription, predicate, timeout: float = 2.0) -> PlayerS
 
 class HermeticRemoteDataClient(RemoteDataClient):
     """The Remote Data Client wired to the stub in-process -- what a deployment
-    names in TIME_SERIES_EXPLORER_DATA_CLIENTS, minus the port and the broker."""
+    names in TIME_SERIES_EXPLORER_DATA_CLIENTS, minus the port."""
 
     services: list[QueryService] = []
     env_settings = ()  # nothing to read: the wiring is in-process
 
     def __init__(self, name: str) -> None:
-        feed = InMemoryResultFeed()
-        service = QueryService(TiledRecording.load(repeat=2), feed)
+        service = QueryService(TiledRecording.load(repeat=2))
         HermeticRemoteDataClient.services.append(service)
         http = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(service)), base_url="http://stub")
-        super().__init__(name, url="http://stub", http_client=http, feed=feed)
+        super().__init__(name, url="http://stub", http_client=http)
 
 
 class UnreachableClient(SampleRecordingClient):
@@ -272,7 +268,7 @@ async def test_provider_is_swapped_by_environment_alone(monkeypatch):
             result = await asyncio.wait_for(results.get(), 3)
         assert result.result.count == 20 and result.result.error is None
         service = HermeticRemoteDataClient.services[-1]
-        assert service.completed == 1  # the count crossed REST and the envelope
+        assert service.completed == 1  # the count crossed REST and the streamed answer
         assert HUB.recent("24") == []
     finally:
         await pipeline.stop()

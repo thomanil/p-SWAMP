@@ -20,7 +20,8 @@
 # dummy remote data service the Time Series Explorer queries
 # (p-swamp-remote-data-stub, the same image again, with a Service since the
 # server calls it over HTTP);
-# and the Apache Kafka broker between all of them. The module runs in the
+# and the Apache Kafka broker between the server and the workers (the stub is
+# reached over HTTP alone). The module runs in the
 # worker because the server's env block says so
 # (PMU_TEST_STREAMER_MODULE_TRANSPORT); drop those two variables and the module
 # runs in the server pod, with nothing else changed. Likewise the explorer reads
@@ -124,9 +125,9 @@ spec:
               value: mode-estimation
             # The Time Series Explorer's provider is the Remote Data Client:
             # it POSTs range queries to REMOTE_DATA_URL (the
-            # p-swamp-remote-data-stub Service below) and reads the answers off
-            # a Kafka topic on REMOTE_DATA_BOOTSTRAP_SERVERS. A deployment with
-            # its own data service keeps these three lines and changes the URL;
+            # p-swamp-remote-data-stub Service below) and reads each answer back
+            # as that call's streamed response. A deployment with its own data
+            # service keeps these two lines and changes the URL;
             # what store sits behind that service is its own choice -- the
             # contract is the client's docstring (core/src/pswamp_core/
             # datagateway/clients/remote_data.py).
@@ -134,8 +135,6 @@ spec:
               value: remote_data:pswamp_core.datagateway.clients.remote_data:RemoteDataClient
             - name: REMOTE_DATA_URL
               value: http://p-swamp-remote-data-stub:8100
-            - name: REMOTE_DATA_BOOTSTRAP_SERVERS
-              value: p-swamp-kafka:9092
           volumeMounts:
             - name: pmu-data
               mountPath: /etc/p-swamp/pmu
@@ -371,11 +370,12 @@ spec:
               memory: "768Mi"
 ---
 # The dummy remote data service the explorer queries: the same image with a
-# different command (src/remote_data_stub/), standing where a deployment's own
+# different command (core/examples/remote_data_stub/, outside the installed
+# core package, hence the PYTHONPATH), standing where a deployment's own
 # service over its own store would stand. It serves HTTP -- the server's
-# Remote Data Client POSTs range queries to it -- so it gets a Service and
-# /healthz probes; its answers go out on the broker's results topic. Its
-# "database" is the sample recording tiled twenty times.
+# Remote Data Client POSTs range queries to it and reads the streamed
+# answers back -- so it gets a Service and /healthz probes, and needs no
+# broker. Its "database" is the sample recording tiled twenty times.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -403,8 +403,8 @@ spec:
           imagePullPolicy: Never
           command: ["python", "-m", "remote_data_stub"]
           env:
-            - name: REMOTE_DATA_STUB_BOOTSTRAP_SERVERS
-              value: p-swamp-kafka:9092
+            - name: PYTHONPATH
+              value: /workspace/p-SWAMP/core/examples
             - name: REMOTE_DATA_STUB_REPEAT
               value: "20"
           ports:

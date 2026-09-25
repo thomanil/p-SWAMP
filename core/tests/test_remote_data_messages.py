@@ -2,7 +2,7 @@
 # Copyright Contributors to the p-SWAMP Project.
 
 """The wire shapes a remote data service speaks: the query going up and
-the result envelope coming down, and the error event any pipeline may raise."""
+the line envelope coming down, and the error event any pipeline may raise."""
 
 from __future__ import annotations
 
@@ -21,20 +21,22 @@ def test_query_round_trips_as_json_with_utc_bounds():
     assert RemoteDataQuery(query_id="q", model="pmu.frame").start is None
 
 
-def test_result_envelope_carries_a_record_as_json_and_round_trips():
+def test_result_line_carries_a_record_as_json_and_round_trips():
     record = measurement(3, at(3))
-    result = RemoteDataResult.for_record("q1", 0, record, timestamp=at(10))
-    again = RemoteDataResult.model_validate_json(result.model_dump_json())
-    assert again.kind == "record" and again.model == "measurement" and again.query_id == "q1"
+    line = RemoteDataResult.for_record(record).to_line()
+    assert line.endswith(b"\n") and line.count(b"\n") == 1
+    again = RemoteDataResult.model_validate_json(line)
+    assert again.kind == "record" and again.model == "measurement"
     assert Measurement.model_validate(again.record) == record
-    assert RemoteDataResult.topic == "remote.data.result"
 
 
-def test_end_and_error_envelopes():
-    end = RemoteDataResult.ended("q1", 7, 7, timestamp=at(10))
+def test_end_and_error_lines_carry_only_their_own_fields():
+    end = RemoteDataResult.ended(7)
     assert end.kind == "end" and end.count == 7 and end.record is None
-    failed = RemoteDataResult.failed("q1", 0, "no such model", timestamp=at(10))
+    assert end.to_line() == b'{"kind":"end","count":7}\n'
+    failed = RemoteDataResult.failed("no such model")
     assert failed.kind == "error" and failed.error == "no such model"
+    assert failed.to_line() == b'{"kind":"error","error":"no such model"}\n'
 
 
 @pytest.mark.parametrize(
@@ -49,7 +51,7 @@ def test_end_and_error_envelopes():
 )
 def test_an_envelope_must_match_its_kind(fields):
     with pytest.raises(ValidationError):
-        RemoteDataResult(timestamp=at(0), query_id="q", seq=0, **fields)
+        RemoteDataResult(**fields)
 
 
 def test_error_event_topic_and_shape():

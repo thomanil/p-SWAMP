@@ -40,14 +40,12 @@ services:
       # Data Client (core/src/pswamp_core/datagateway/clients/remote_data.py)
       # POSTs each range query to REMOTE_DATA_URL -- the remote-data-stub below,
       # a dummy of the service a deployment puts in front of whatever store it
-      # runs -- and reads the answers off a Kafka topic on
-      # REMOTE_DATA_BOOTSTRAP_SERVERS.
+      # runs -- and reads each answer back as that call's streamed response.
       # Unset the first variable and the page runs over the sample recording
       # in this process, unchanged (what CI's bare `docker run` exercises).
       # The stub reads the matching REMOTE_DATA_STUB_* block.
       TIME_SERIES_EXPLORER_DATA_CLIENTS: "remote_data:pswamp_core.datagateway.clients.remote_data:RemoteDataClient"
       REMOTE_DATA_URL: "http://remote-data-stub:8100"
-      REMOTE_DATA_BOOTSTRAP_SERVERS: "kafka:9092"
     # The broker is reached lazily, on the first streamer socket, not at
     # startup -- but a publish to a broker that is still booting is dropped
     # (and logged), so wait for kafka to be healthy rather than race it. The
@@ -242,12 +240,13 @@ services:
         - path: core/pyproject.toml
           action: rebuild
 
-  # A dummy remote data service behind the REST + Kafka provider contract
-  # (src/remote_data_stub/): the SAME image, a different command, standing
-  # where a deployment's own service -- over its own store -- would stand.
+  # A dummy remote data service behind the Remote Data Client's REST contract
+  # (core/examples/remote_data_stub/, outside the installed core package, hence
+  # the PYTHONPATH): the SAME image, a different command, standing where a
+  # deployment's own service -- over its own store -- would stand.
   # The server's Remote Data Client POSTs range queries to it on :8100 and
-  # reads the answers off the results topic on the broker below. Its
-  # "database" is the streamer's sample recording tiled twenty times (a
+  # reads each answer back as the streamed response. It needs no broker. Its
+  # "database" is a three-second sample recording tiled twenty times (a
   # minute of timeline). It serves HTTP, so unlike the worker it has a
   # healthcheck, and the server waits for it. Not published to the host:
   # nothing outside the compose network needs it.
@@ -256,13 +255,10 @@ services:
     image: p-swamp:latest
     command: ["python", "-m", "remote_data_stub"]
     environment:
-      REMOTE_DATA_STUB_BOOTSTRAP_SERVERS: "kafka:9092"
+      PYTHONPATH: "/workspace/p-SWAMP/core/examples"
       REMOTE_DATA_STUB_REPEAT: "20"
     expose:
       - "8100"
-    depends_on:
-      kafka:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8100/healthz"]
       interval: 10s
@@ -272,9 +268,8 @@ services:
     restart: unless-stopped
     develop:
       watch:
-        - path: app/server-python/src
-          action: sync+restart
-          target: /workspace/p-SWAMP/app/server-python/src
+        # Everything it runs is under core/ (the stub and the pswamp_core it
+        # imports); the server manifest and lock still decide the image's deps.
         - path: core
           action: sync+restart
           target: /workspace/p-SWAMP/core

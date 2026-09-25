@@ -5,7 +5,7 @@ what each piece on the way is for. The PMU test streamer was its first slice;
 the last section lists what is still open.
 
 The code is the `pswamp_core` package under `core/`. Its only dependency is
-pydantic, plus aiokafka behind the `kafka` extra and httpx beside it behind
+pydantic, plus aiokafka behind the `kafka` extra and httpx behind
 `remote-data`. The PMU test streamer (`app/server-python/src/pmu_test_streamer/`,
 route `/pmu-test-streamer`) is the worked example of every piece and the source
 of the snippets below. "Adding things" is the recipe for your own module and
@@ -830,11 +830,12 @@ and the last cases of `app/server-python/tests/test_pmu_test_streamer.py`.
 the `pswamp-core[remote-data]` extra) is a `DataClient` over a deployment's own
 remote data service: a small REST api the deployment runs in front of whatever
 store holds its history. A range query goes up as `POST /v1/queries`; the
-records come back as `RemoteDataResult` envelopes on a Kafka topic, keyed by
-the query's id, closed by an `end` (or `error`) envelope; coverage is
-`GET /v1/coverage`. **The contract is the class's docstring**, and
-`doc/remote-data-integration-contract.md` spells it out for the team that
-implements the service. Configuration is the `REMOTE_DATA_*` block.
+records come back as that call's streamed response, one `RemoteDataResult`
+line each (NDJSON), closed by an `end` (or `error`) line; coverage is
+`GET /v1/coverage`. **The contract is `doc/remote-data-integration-contract.md`**,
+in HTTP terms alone, since the service may be built on any stack;
+`scripts/check-remote-data-service.sh` checks a running service against it,
+and CI runs it against the stub. Configuration is the `REMOTE_DATA_*` block.
 
 ```mermaid
 sequenceDiagram
@@ -842,7 +843,6 @@ sequenceDiagram
     participant M as RowCountModule
     participant G as gateway
     participant R as RemoteDataClient
-    participant K as Kafka topic
     participant S as remote data service
     participant D as any store
 
@@ -850,13 +850,14 @@ sequenceDiagram
     Note over M: the command stops here:<br/>the rest is a method call
     M->>G: consume(PmuFrame, t0, t1)
     G->>R: consume(PmuFrame, t0, t1)
-    R->>K: subscribe (key = query_id)
     R->>S: POST /v1/queries
     S->>D: the range
-    D-->>S: records
-    S->>K: remote.data.result envelopes, closed by kind "end"
-    K-->>R: envelopes for this query_id
-    R-->>G: PmuFrame, one per record
+    loop as fast as the reader pulls
+        D-->>S: a record
+        S-->>R: one NDJSON line on the open response
+        R-->>G: PmuFrame
+    end
+    S-->>R: kind "end", then the body closes
     G-->>M: PmuFrame, one per record
     M->>A: RowCountResult (request_id = the command's), via the bus and the socket
 ```
@@ -864,7 +865,8 @@ sequenceDiagram
 A command never reaches a data client: it stops at the player or a module,
 which asks the gateway for a range like anyone else. That keeps the
 `DataClient` contract free of commands and of the bus; the `request_id` stays
-in the pipeline, the `query_id` between the client and its service. Play-range
+in the pipeline, and the connection itself is what ties an answer to its
+query. Play-range
 takes the same path, with `Player.replay(t0, t1)` in the module's place. This
 holds only in-process for now: a module hosted in a worker gets an empty
 gateway, so the command would reach it but the count would find no provider.
@@ -875,11 +877,18 @@ call stays a method call (see the last section).
 *Why.* Decoupling. p-SWAMP asks for a range and gets it back; which store
 answers -- a time-series database, a historian, an archive -- is the
 deployment's choice, and it can change that choice without a change here.
-Results are messages end to end, and the service's owner can put anything
-behind the POST. The price is correlation -- a `query_id` on every envelope, an
-explicit `end`, an `error` envelope, subscribe-before-POST -- paid once, in the
-client. The dummy service `app/server-python/src/remote_data_stub/` (the sample
-recording tiled to a minute, `python -m remote_data_stub`) stands in for a
+The answer comes back on the connection that asked, which is what keeps the
+contract small: no correlation id on a line, no second channel to agree on, no
+cancel route (closing the connection is the cancel), and backpressure for
+free -- the client reads a line only when the player wants the next frame, so a
+service writing through socket flow control reads its store at replay speed.
+The price is a connection held open for as long as a replay plays, paused
+included, which a proxy in between must neither buffer nor cut short. (It was
+a Kafka topic at first; the correlation machinery, a consumer per pipeline
+decoding every other pipeline's answers, and the unbounded per-query queue
+were why it changed.) The dummy service `core/examples/remote_data_stub/` (a
+three-second sample tiled to a minute, `python -m remote_data_stub` with
+`core/examples` on `PYTHONPATH`) stands in for a
 deployment's service in compose and k8s, playing the part of a time-series
 store, so the whole path runs from this repo. `/time-series-explorer` drives
 it two ways: **play-range** (the player's bounded replay, above) and **count**
@@ -887,12 +896,16 @@ it two ways: **play-range** (the player's bounded replay, above) and **count**
 `target="row-count"`). The page keeps its time-series name because that is
 what is queried on the other end. Open points are in the last section.
 
-*Where.* `messages/remote_data.py`, `datagateway/clients/remote_data.py`,
-`transport/kafka.py:create_topic`; `remote_data_stub/`, `time_series_explorer/`;
+*Where.* Everything of the contract is under `core/`: `messages/remote_data.py`
+and `datagateway/clients/remote_data.py` in the package; outside it,
+`examples/remote_data_stub/` and `examples/check_remote_data_service.py`
+(driven by `scripts/check-remote-data-service.sh`). The page is
+`time_series_explorer/` in the web backend, and the stub runs as
 `remote-data-stub` in `docker-compose.yml` and `k8s/p-swamp-local.yaml`. Tests:
-`tests/test_remote_data_service.py` runs the conformance suite over the
-client wired to the stub in-process (`httpx.ASGITransport`, `InMemoryResultFeed`);
-`KAFKA_TEST_BOOTSTRAP_SERVERS` gates the round trip through a real topic.
+`core/tests/test_remote_data_service.py` runs the conformance suite over the
+client wired to the stub in-process (`httpx.ASGITransport`, which buffers the
+body, so it proves the contract); `core/tests/test_remote_data_client.py`
+pins the lazy pull and cancel-by-closing over a line-by-line body.
 
 ## The error topic
 
@@ -1004,7 +1017,8 @@ Absent from this slice, on purpose:
   once per layout), producer batching and a pipelined `RemoteModule` outbox,
   sub-millisecond pacing in the player, keyed partitions, and a per-app topic
   prefix by default rather than by configuration;
-- paging and backpressure in the Remote Data Client, and models beyond
+- proxy settings for the Remote Data Client's long-lived streamed responses
+  (buffering off, idle timeouts past the longest pause), and models beyond
   `PmuFrame` in it; `Module.run` carrying a `Command` natively (the row-count
   module overrides it);
 - a `Command` addressed to a module *in the worker* (in-process, the explorer

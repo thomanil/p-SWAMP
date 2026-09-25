@@ -104,8 +104,11 @@ package = false
 # deliberately isn't one (see the note above).
 # core/tests/ is the shared core's own suite; it runs in this environment (the
 # core is installed editable here and depends only on pydantic) so that one
-# runner and one CI job cover both. Paths are relative to this directory.
+# runner and one CI job cover both. core/examples/ is on the path for the remote
+# data stub, which lives there, outside the installed package, and which both
+# core/tests/ and tests/test_time_series_explorer.py drive in-process. Paths are
+# relative to this directory.
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "../../core/examples"]
 testpaths = ["tests", "../../core/tests"]
 asyncio_mode = "auto"

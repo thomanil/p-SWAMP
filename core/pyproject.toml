@@ -28,13 +28,20 @@ dependencies = [
 #   topics between processes over a Kafka-API broker (Apache Kafka locally).
 # - [remote-data]: `pswamp_core.datagateway.clients.remote_data`, the
 #   Remote Data Client, a provider over a deployment's own data service --
-#   httpx for the REST queries it sends, aiokafka for the results topic it reads.
+#   httpx for the REST queries it sends and the streamed responses it reads.
 # The web backend takes both (app/server-python/pyproject.toml): the PMU test
 # streamer's stats module runs as its own service, and the Time Series Explorer
 # queries a remote data service.
 [project.optional-dependencies]
 kafka = ["aiokafka>=0.14,<1"]
-remote-data = ["aiokafka>=0.14,<1", "httpx>=0.28,<1"]
+remote-data = ["httpx>=0.28,<1"]
+
+# What core/examples/ needs beyond the library: the remote data stub is a small
+# FastAPI service. A group, not an extra, because nothing that installs
+# pswamp-core should ever get it; examples/ is outside the built package too.
+# The web backend's environment, where the core's tests run, already has both.
+[dependency-groups]
+examples = ["fastapi>=0.141", "uvicorn>=0.52"]
 
 [build-system]
 requires = ["uv_build"]
@@ -51,5 +58,6 @@ module-name = "pswamp_core"
 # node id through scripts/run-python-server-tests.sh): pytest then takes THIS
 # file as its config rather than the server's. Same asyncio mode as there.
 [tool.pytest.ini_options]
+pythonpath = ["examples"]
 testpaths = ["tests"]
 asyncio_mode = "auto"

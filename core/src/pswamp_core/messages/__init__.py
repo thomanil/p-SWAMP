@@ -20,7 +20,7 @@ Two layers of message live here (STEP 1 A1, "two layers, not one"):
 
 Beside them, in ``remote_data``, the two shapes a remote data service
 speaks: ``RemoteDataQuery`` (a range query going up over REST) and
-``RemoteDataResult`` (the envelope each answer rides in on a Kafka topic).
+``RemoteDataResult`` (one line of the streamed response that answers it).
 """
 
 from .control import Command, PlayerStatus, StreamChanged

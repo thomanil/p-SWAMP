@@ -1090,16 +1090,20 @@ kafka = [
     { name = "aiokafka" },
 ]
 remote-data = [
-    { name = "aiokafka" },
     { name = "httpx" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "aiokafka", marker = "extra == 'kafka'", specifier = ">=0.14,<1" },
-    { name = "aiokafka", marker = "extra == 'remote-data'", specifier = ">=0.14,<1" },
     { name = "httpx", marker = "extra == 'remote-data'", specifier = ">=0.28,<1" },
     { name = "pydantic", specifier = ">=2.12" },
+]
+
+[package.metadata.requires-dev]
+examples = [
+    { name = "fastapi", specifier = ">=0.141" },
+    { name = "uvicorn", specifier = ">=0.52" },
 ]
 
 [[package]]

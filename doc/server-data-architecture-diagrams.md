@@ -38,7 +38,7 @@ flowchart TB
         direction LR
         rec["Recorded history<br/>any number of these: sample file, CSV, local DB …"]:::data
         live["Live feed<br/>frames as they arrive"]:::data
-        rds["Remote data service<br/>the deployment's store, behind REST + Kafka"]:::data
+        rds["Remote data service<br/>the deployment's store, behind REST"]:::data
     end
 
     subgraph pipeline["Pipeline (one per client)"]
@@ -143,7 +143,7 @@ flowchart BT
         rec["SampleRecordingClient<br/>HISTORY_CONSUME"]
         live["LiveSyntheticClient<br/>LIVE_CONSUME"]
         n44["N44 recording client<br/>HISTORY_CONSUME<br/>44 stations, 700 ch, 50 Hz"]
-        rdc["RemoteDataClient<br/>HISTORY_CONSUME<br/>POST /v1/queries up,<br/>RemoteDataResult envelopes down"]
+        rdc["RemoteDataClient<br/>HISTORY_CONSUME<br/>POST /v1/queries up,<br/>streamed NDJSON lines back"]
         mem["InMemoryClient<br/>reference / tests"]
     end
     rec ==> contract
@@ -162,9 +162,8 @@ flowchart BT
     f1 --> rec
     f1 --> live
     f2 --> n44
-    rdc -->|"REST"| rds
-    rds -->|"remote.data.result topic"| kafka
-    kafka --> rdc
+    rdc -->|"POST /v1/queries"| rds
+    rds -->|"streamed response"| rdc
 
     subgraph workers["Worker processes — same image, no port"]
         direction LR
@@ -200,7 +199,7 @@ concrete data clients on the left of his drawing.
 | **DataHub** (CIM graph + profile + gateway + converters) | Split in two: the *data* part is `DataGateway`; the *fan-out* part, which the draft did not have, is `InProcessBus` (typed on message classes, per pipeline, overflow policy per subscription, `Latest` for the newest message per class). No CIM graph connection anywhere. | Not built as one object, on purpose. The gateway is a pull facing the source with one reader; the bus is a push facing the consumers with many. Both are needed and they are not the same thing (see "Why not the gateway alone" in the doc). |
 | **LazyCIM / RDFLib / KGraphPy / Validator / GraphDB / Apache Jena** | Nothing yet. The seam is `CimReferenceEnricher.reference_for` in the gateway. | Not built. No CIM model, no triple store, no SPARQL, no CIM profile validation. Parked as a track of its own when the draft was evaluated. |
 | **PMUC37Client / C37.118** | No `DataClient` speaks C37.118. | Not built. Listed under "not here yet": a `PmuFrameAssembler` for deployments that ingest per-PMU messages. |
-| **ClickHouseClient / ClickHouse** | `RemoteDataClient`: a `DataClient` over a **remote data service** the deployment runs in front of *whatever* store it has. Range query up as `POST /v1/queries`, coverage as `GET /v1/coverage`, records back as `RemoteDataResult` envelopes on a Kafka topic keyed by `query_id`, closed by `end`/`error`. Contract in the class docstring and `doc/remote-data-integration-contract.md`. `remote_data_stub/` is the dummy service. | Different by design: no store-specific client in the repo. ClickHouse would be one implementation of the service, chosen and changed by the deployment. |
+| **ClickHouseClient / ClickHouse** | `RemoteDataClient`: a `DataClient` over a **remote data service** the deployment runs in front of *whatever* store it has. Range query up as `POST /v1/queries`, coverage as `GET /v1/coverage`, records back as that call's streamed response, one `RemoteDataResult` NDJSON line each, closed by `end`/`error`; closing the connection cancels. Contract in `doc/remote-data-integration-contract.md` (HTTP only). `core/examples/remote_data_stub/` is the dummy service. | Different by design: no store-specific client in the repo. ClickHouse would be one implementation of the service, chosen and changed by the deployment. |
 | **KafkaClient (as data source) / NAPS** | No broker-as-source. Kafka here is a **transport** behind the bus (`transport/kafka.py`), never a `DataClient`: a time-addressed `DataStream` would drop the timestamps a looping replay sends backwards. | Not built as a provider; "a broker as history" is on the open list. NAPS has no counterpart. |
 | *(no box)* | **Player** (`datagateway/player.py`): paces a gateway stream, owns replay/live/pause/step/seek/speed and bounded replay; seek is a new stream; mode is which stream is open; commands come off the bus; provider failure ends the stream paused with `PlayerStatus.error` and an `ErrorEvent`. | Built, missing from Louis's view. |
 | *(no box)* | **Module** (`modules.py`): `name`, `input_model`, `output_model`, `process()`; `run` subscribes, wraps the answer in a `ResultEnvelope` and publishes. `KeepUpMonitor` reports dropped or stale input on the error topic. | Built; this is what an `IslandingDetector` or `StateEstimator` box *is* here. |
@@ -235,7 +234,7 @@ flowchart LR
         sw["stats-worker<br/>ModuleHost(FrameStatsModule)"]
         iw["islanding-worker<br/>ModuleHost(IslandingModule)<br/>topic prefix islanding-stream"]
         mw["mode-estimation-worker<br/>ModuleHost(ModeEstimationModule)<br/>prefix mode-estimation, 2 CPUs"]
-        stub["remote-data-stub<br/>REST + Kafka producer<br/>plays a time-series store"]
+        stub["remote-data-stub<br/>REST, streamed answers<br/>plays a time-series store"]
     end
     kafka[("kafka<br/>KRaft, no volume<br/>~1 min retention, checked every 10 s")]
     server -->|"pmu.frame (keyed by client id)"| kafka
@@ -244,8 +243,7 @@ flowchart LR
     kafka --> iw --> kafka
     kafka --> mw --> kafka
     server -->|"POST /v1/queries, GET /v1/coverage"| stub
-    stub -->|"remote.data.result"| kafka
-    kafka -->|"envelopes for query_id"| server
+    stub -->|"NDJSON lines on the same response"| server
 ```
 
 Nothing here is a dependency of the server: unset `*_MODULE_TRANSPORT` and a
@@ -334,13 +332,12 @@ classDiagram
         +query_id, model (a topic string), start, end, mrid
     }
     class RemoteDataResult {
-        +query_id: also the Kafka record key
-        +seq: int
         +kind: record, end or error
         +model, record, count, error
+        one NDJSON line of the response
     }
     BaseModel <|-- RemoteDataQuery
-    DataModel <|-- RemoteDataResult
+    BaseModel <|-- RemoteDataResult
 ```
 
 | Louis's model | What is built | Status |
@@ -362,6 +359,6 @@ RDFLib/KGraphPy, Validator, GraphDB, Apache Jena); `PMUC37Client`;
 
 From the core's own open list: `request_id` returned to the browser in the acknowledgement; a
 `Command` to a module in a worker (needs a gateway factory in `ModuleHost`);
-paging and backpressure in `RemoteDataClient`; a broker as history; a
+proxy settings for `RemoteDataClient`'s long-lived streamed responses; a broker as history; a
 `PmuFrameAssembler` for per-PMU ingest; the throughput fixes the first load tests point at
 (cheaper frames, producer batching, keyed partitions, sub-millisecond pacing).
