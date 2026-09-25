@@ -17,7 +17,7 @@ from islanding_stream import api
 from islanding_stream.islanding_module import IslandingModule, IslandingStreamResult
 from islanding_stream.n44_client import EPOCH, N44RecordingClient
 from pswamp_core.bus import InProcessBus, Overflow
-from pswamp_core.datagateway import DataGateway
+from pswamp_core.datagateway import CimReferenceEnricher, DataGateway
 from pswamp_core.datagateway.conformance import DataClientConformance
 from pswamp_core.messages import PmuFrame
 from pswamp_core.remote import ModuleHost, RemoteModule
@@ -185,3 +185,89 @@ def test_the_error_forwarder_never_reports_itself():
 def test_coverage_is_the_recording_plus_one_interval():
     client = N44RecordingClient(measurements=["f"])
     assert client.time_range.end - client.time_range.start == timedelta(seconds=70.01 - 0.01 + 0.02)
+
+
+# --- the cimReferenceId, stamped in the gateway and read by the module ------------------
+
+
+def stamped_frames(reference: str = api.DEFAULT_CIM_REFERENCE):
+    """The recording's frequency frames as the gateway hands them on: each
+    header stamped by the stub enricher."""
+    enricher = CimReferenceEnricher(reference)
+    return (enricher.enrich(frame) for frame in N44RecordingClient(measurements=["f"]).frames())
+
+
+async def test_the_pipeline_stamps_the_reference_early_and_the_module_picks_it_up(monkeypatch):
+    monkeypatch.delenv(api.DATA_CLIENTS_VARIABLE, raising=False)
+    monkeypatch.delenv(api.CIM_REFERENCE_VARIABLE, raising=False)
+    monkeypatch.delenv(api.MODULE_TRANSPORT_VARIABLE, raising=False)
+    monkeypatch.setenv("N44_MEASUREMENTS", "f")
+    monkeypatch.setattr(api, "TRANSPORT", None)
+    pipeline = await api.build_pipeline("77")
+    await pipeline.start()
+    try:
+        with pipeline.bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames:
+            frame = await asyncio.wait_for(frames.get(), 5)
+    finally:
+        await pipeline.stop()
+    # Stamped by the gateway, so every frame on the bus already carries it.
+    assert frame.header.cimReferenceId == api.DEFAULT_CIM_REFERENCE
+
+    # Later in the pipeline, the module reads it off the frames it evaluated.
+    results = {}
+    module = IslandingModule()
+    for f in stamped_frames():
+        if (f.timestamp - EPOCH).total_seconds() > 30:
+            break
+        if (result := await module.process(f)) is not None:
+            results[round((f.timestamp - EPOCH).total_seconds())] = result
+    assert results[30].status == "Emergency" and results[30].cim_reference_id == api.DEFAULT_CIM_REFERENCE
+
+
+async def test_switched_off_the_reference_is_none(monkeypatch):
+    monkeypatch.delenv(api.DATA_CLIENTS_VARIABLE, raising=False)
+    monkeypatch.setenv(api.CIM_REFERENCE_VARIABLE, "none")
+    monkeypatch.setenv("N44_MEASUREMENTS", "f")
+    monkeypatch.setattr(api, "TRANSPORT", None)
+    pipeline = await api.build_pipeline("78")
+    await pipeline.start()
+    try:
+        with pipeline.bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames:
+            frame = await asyncio.wait_for(frames.get(), 5)
+    finally:
+        await pipeline.stop()
+    assert frame.header.cimReferenceId is None
+    results = await run_module(IslandingModule(), N44RecordingClient(measurements=["f"]), 30)
+    assert results[30].status == "Emergency" and results[30].cim_reference_id is None
+
+
+async def test_the_reference_crosses_the_worker_hop_with_the_frames():
+    broker = InMemoryTransport()
+    remote = RemoteModule(IslandingModule, broker, "8")
+    host = ModuleHost(IslandingModule, broker)  # no configuration: the reference rides in the frame
+    served = asyncio.create_task(host.serve())
+    bus = InProcessBus()
+    bus.bind(asyncio.get_running_loop())
+    await remote.setup(DataGateway([]), bus)
+    running = asyncio.create_task(remote.run(bus))
+    await asyncio.sleep(0.01)
+    try:
+        with bus.subscribe(IslandingStreamResult, overflow=Overflow.GROW) as results:
+            for index, frame in enumerate(stamped_frames("worker-hop-ref")):
+                if index >= 30 * 50:
+                    break
+                bus.publish(frame)
+                if index % 50 == 0:
+                    await asyncio.sleep(0)
+            await asyncio.sleep(0.2)
+            got = []
+            while (result := results.get_nowait()) is not None:
+                got.append(result)
+    finally:
+        for task in (running, served):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+    assert got, "no result came back from the worker side"
+    assert {s for island in got[-1].result.islands for s in island} == ISLANDED
+    assert got[-1].result.cim_reference_id == "worker-hop-ref"

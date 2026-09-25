@@ -24,12 +24,15 @@ from .data_client_model import (
     ModelSelector,
 )
 from .data_gateway import DataGateway, ProduceError
+from .enrich import CimReferenceEnricher, Enricher
 from .planner import DataGapError, GapPolicy, Segment, SegmentPlanner
 from .player import Player
 from .stream import DataStream
 from .time_range import Coverage, TimeRange
 
 __all__ = [
+    "CimReferenceEnricher",
+    "Enricher",
     "DATA_CLIENTS_VARIABLE",
     "Capability",
     "Coverage",

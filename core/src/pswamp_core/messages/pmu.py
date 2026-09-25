@@ -70,6 +70,14 @@ class PmuHeader(BaseModel):
     (``get_col_idx(measurement="f")``), so an application selects its inputs the
     same way over a wire frame as over a decoded config frame. It travels
     inside every ``PmuFrame``.
+
+    ``cimReferenceId`` identifies the grid (CIM) data that applies to this
+    layout, without carrying it. It is optional and never set by a provider:
+    the gateway's enrichment step (:mod:`pswamp_core.datagateway.enrich`) stamps
+    it early in the pipeline, once per layout, and anything later in the
+    pipeline reads it off the frame. ``header_id`` does not cover it -- the
+    layout is the same with or without it, so a module that derives column
+    indexes does not re-derive when a reference arrives.
     """
 
     station: list[str] = Field(description="Per column: the station (PMU) the value is from.")
@@ -82,6 +90,10 @@ class PmuHeader(BaseModel):
     freq_encoding: Literal["absolute_hz"] = Field(
         default="absolute_hz",
         description="How frequency columns are encoded. Only absolute Hz today.",
+    )
+    cimReferenceId: str | None = Field(
+        default=None,
+        description="Identifies the grid (CIM) data that applies to this layout; stamped by the gateway when configured to, never by a provider.",
     )
 
     @model_validator(mode="after")

@@ -22,6 +22,12 @@ its input was and how much of it was dropped -- so the page can show how close
 to the edge it is running before the keep-up reports (``Module.run``) say it
 went over.
 
+When the gateway stamped a CIM reference on the frames
+(``PmuHeader.cimReferenceId``), each result carries the reference of the
+frames it was computed from (``cim_reference_id``): the id is picked up again
+here, later in the pipeline, off the frame itself. So it works the same in the
+worker, where the reference arrived with the frame over the topic.
+
 Imports only ``numpy``, ``pydantic`` and ``pswamp_core`` -- nothing from the web
 stack or the desktop package -- so it is the same code in the server and in
 the worker (``worker.py``).
@@ -120,6 +126,10 @@ class Islands(BaseModel):
         description="How long the last input had been in flight when it was read; null in-process."
     )
     input_dropped: int = Field(description="Input dropped by this module's queue so far.")
+    cim_reference_id: str | None = Field(
+        default=None,
+        description="The cimReferenceId of the frames this evaluation used; null when the gateway stamped none.",
+    )
 
 
 class IslandingStreamResult(ResultEnvelope[Islands]):
@@ -147,6 +157,7 @@ class IslandingModule(Module):
         self._last_time: datetime | None = None
         self._next_eval: float | None = None
         self._frames_in = 0
+        self._cim_reference_id: str | None = None
         self.parameters = {
             "window_s": WINDOW_SECONDS,
             "eval_interval_s": EVAL_INTERVAL_S,
@@ -181,6 +192,8 @@ class IslandingModule(Module):
             self._reset()
         self._last_time = frame.timestamp
         self._frames_in += 1
+        # Not part of the layout (header_id ignores it), so read on every frame.
+        self._cim_reference_id = frame.header.cimReferenceId
 
         t = frame.timestamp.timestamp()
         row = np.array([frame.values[i] for i in self._columns], dtype=float)  # None -> nan
@@ -227,4 +240,5 @@ class IslandingModule(Module):
             detect_ms=round(detect_ms, 3),
             input_age_s=None if self.monitor.input_age_s is None else round(self.monitor.input_age_s, 3),
             input_dropped=self.monitor.input_dropped,
+            cim_reference_id=self._cim_reference_id,
         )

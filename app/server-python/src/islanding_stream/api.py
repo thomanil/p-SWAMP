@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import time
 from collections.abc import AsyncIterator
 from typing import Literal
@@ -50,7 +51,7 @@ from shared import (
 )
 
 from pswamp_core.bus import InProcessBus, Overflow, Subscription
-from pswamp_core.datagateway import DataGateway, Player, gateway_from_env
+from pswamp_core.datagateway import CimReferenceEnricher, DataGateway, Player, gateway_from_env
 from pswamp_core.messages import Command, PlayerStatus, PmuFrame, StreamChanged
 from pswamp_core.modules import Module
 from pswamp_core.pipeline import CapacityError, Pipeline, PipelineRegistry
@@ -64,6 +65,12 @@ logger = get_logger("islanding-stream")
 #: The providers a deployment gets unless ISLANDING_STREAM_DATA_CLIENTS names others.
 DEFAULT_DATA_CLIENTS = "n44:islanding_stream.n44_client:N44RecordingClient"
 DATA_CLIENTS_VARIABLE = "ISLANDING_STREAM_DATA_CLIENTS"
+
+#: The placeholder ``cimReferenceId`` the gateway's stub enricher stamps on
+#: every frame; ISLANDING_STREAM_CIM_REFERENCE sets another, or ``none`` for
+#: no enrichment.
+DEFAULT_CIM_REFERENCE = "n44-stub"
+CIM_REFERENCE_VARIABLE = "ISLANDING_STREAM_CIM_REFERENCE"
 
 #: A transport spec, e.g. ``islanding:pswamp_core.transport.kafka:KafkaTransport``
 #: (with ``ISLANDING_BOOTSTRAP_SERVERS`` and ``ISLANDING_TOPIC_PREFIX`` beside
@@ -116,11 +123,21 @@ class IslandingPipeline(Pipeline):
         return self.modules[0]
 
 
+def cim_reference_enrichers() -> list[CimReferenceEnricher]:
+    """The gateway's stub CIM reference enricher, unless switched off."""
+    reference = os.environ.get(CIM_REFERENCE_VARIABLE, "").strip() or DEFAULT_CIM_REFERENCE
+    return [] if reference.lower() == "none" else [CimReferenceEnricher(reference)]
+
+
 async def build_pipeline(client_id: str) -> IslandingPipeline:
     """One client's pipeline: the recording, a looping autoplaying player, the
     islanding module (here, or its stand-in for the worker) and the error
     forwarder. Called by the registry, never directly."""
-    gateway: DataGateway = gateway_from_env(DEFAULT_DATA_CLIENTS, variable=DATA_CLIENTS_VARIABLE)
+    gateway: DataGateway = gateway_from_env(
+        DEFAULT_DATA_CLIENTS,
+        variable=DATA_CLIENTS_VARIABLE,
+        enrichers=cim_reference_enrichers(),
+    )
     bus = InProcessBus()
     player = Player(gateway, bus, model=PmuFrame, autoplay=True, loop=True)
     transport = module_transport()

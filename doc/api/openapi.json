@@ -1083,6 +1083,19 @@
       "Islands": {
         "description": "What one evaluation found, and how the module was keeping up when it did.",
         "properties": {
+          "cim_reference_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The cimReferenceId of the frames this evaluation used; null when the gateway stamped none.",
+            "title": "Cim Reference Id"
+          },
           "detect_ms": {
             "description": "Wall-clock milliseconds this evaluation took.",
             "title": "Detect Ms",
@@ -1942,7 +1955,7 @@
         "type": "object"
       },
       "PmuHeader": {
-        "description": "The channel layout of a PMU stream: one entry per column of a frame.\n\nThe three label rows are exactly the ones p-SWAMP's ``Indexer`` queries\n(``get_col_idx(measurement=\"f\")``), so an application selects its inputs the\nsame way over a wire frame as over a decoded config frame. It travels\ninside every ``PmuFrame``.",
+        "description": "The channel layout of a PMU stream: one entry per column of a frame.\n\nThe three label rows are exactly the ones p-SWAMP's ``Indexer`` queries\n(``get_col_idx(measurement=\"f\")``), so an application selects its inputs the\nsame way over a wire frame as over a decoded config frame. It travels\ninside every ``PmuFrame``.\n\n``cimReferenceId`` identifies the grid (CIM) data that applies to this\nlayout, without carrying it. It is optional and never set by a provider:\nthe gateway's enrichment step (:mod:`pswamp_core.datagateway.enrich`) stamps\nit early in the pipeline, once per layout, and anything later in the\npipeline reads it off the frame. ``header_id`` does not cover it -- the\nlayout is the same with or without it, so a module that derives column\nindexes does not re-derive when a reference arrives.",
         "properties": {
           "channel": {
             "description": "Per column: the phasor or signal name.",
@@ -1951,6 +1964,19 @@
             },
             "title": "Channel",
             "type": "array"
+          },
+          "cimReferenceId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Identifies the grid (CIM) data that applies to this layout; stamped by the gateway when configured to, never by a provider.",
+            "title": "Cimreferenceid"
           },
           "data_rate": {
             "description": "Frames per second.",

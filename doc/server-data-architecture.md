@@ -959,6 +959,33 @@ so that worker runs with one BLAS thread per identification.
 `k8s/p-swamp-local.yaml`; `core/tests/test_keep_up.py`,
 `app/server-python/tests/test_islanding_stream.py`, `test_mode_estimation.py`.
 
+## A CIM reference on the frame
+
+*What.* The gateway stamps every PMU frame with an optional
+`PmuHeader.cimReferenceId`: an id for the grid (CIM) data that applies to the
+frame. An **enricher** passed to `DataGateway` runs on every payload
+`DataStream` yields; `CimReferenceEnricher` decides the reference once per
+layout (`reference_for`) and stamps it on every frame with that layout.
+Anything later in the pipeline reads it off the frame: the islanding module
+returns it with its result. **It is a stub:** `reference_for` returns one
+configured placeholder (`ISLANDING_STREAM_CIM_REFERENCE`, or `none`). A
+lookup against a CIM model overrides that one method.
+
+*Why.* The gateway is where every reader's frames pass, so stamping there
+means every reader sees the same reference, decided once, early. As an
+optional field it is additive: providers, player, bus and transport are
+untouched, a provider's frame arrives with `None`, old readers ignore it, and
+`header_id` (the layout's hash) does not change. It travels with the frame,
+so a module in a worker gets it with no configuration of its own. It carries
+a reference rather than the grid data itself, which would cost several KB a
+frame on every hop.
+
+*Where.* `messages/pmu.py` (`PmuHeader.cimReferenceId`);
+`datagateway/enrich.py` (`Enricher`, `CimReferenceEnricher`);
+`DataGateway(enrichers=...)`; `app/server-python/src/islanding_stream/api.py`
+(the wiring) and the islanding module's `cim_reference_id`;
+`core/tests/test_enrich.py`.
+
 ## What is deliberately not here yet
 
 Absent from this slice, on purpose:

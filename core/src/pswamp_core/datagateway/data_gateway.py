@@ -27,6 +27,7 @@ later (STEP 2 §4); ``typing.Self`` became string annotations; loguru became
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
 
     from ..messages.data_model import DataModel
     from .data_client_model import MRIDFilter
+    from .enrich import Enricher
 
 __all__ = ["DataGateway", "ProduceError"]
 
@@ -72,6 +74,9 @@ class DataGateway:
             covers.
         live_handoff_margin: How close to ``now`` a replay must get before the
             gateway switches to a live-capable client.
+        enrichers: Applied to every payload a stream yields, in order
+            (:mod:`~pswamp_core.datagateway.enrich`: a ``cimReferenceId`` on
+            PMU frames); opened and closed with the clients.
 
     Raises:
         ValueError: When two clients share the same name.
@@ -83,8 +88,10 @@ class DataGateway:
         *,
         on_gap: GapPolicy = "skip",
         live_handoff_margin: timedelta = DEFAULT_LIVE_HANDOFF_MARGIN,
+        enrichers: Sequence[Enricher] = (),
     ):
         self.clients: dict[str, DataClient] = {}
+        self.enrichers: tuple[Enricher, ...] = tuple(enrichers)
         #: The last failure of each client's ``coverage`` call, by client name,
         #: cleared when it answers again. ``coverage`` below skips a failing
         #: client rather than raising, so this is where the *reason* survives
@@ -159,7 +166,7 @@ class DataGateway:
         if self._planner is None:
             raise RuntimeError("DataGateway is disabled: no data clients registered")
 
-        return DataStream(self._planner, model, TimeRange(start, end), mRID)
+        return DataStream(self._planner, model, TimeRange(start, end), mRID, self.enrichers)
 
     async def coverage(
         self,
@@ -274,11 +281,18 @@ class DataGateway:
             raise ProduceError(model.__name__, failures)
 
     async def open(self) -> None:
-        """Open every registered client."""
+        """Open every registered client, then the enrichers."""
         await self._lifecycle("open")
+        for enricher in self.enrichers:
+            await enricher.open()
 
     async def close(self) -> None:
-        """Close every registered client."""
+        """Close the enrichers, then every registered client."""
+        for enricher in self.enrichers:
+            try:
+                await enricher.close()
+            except Exception as error:
+                logger.error("enricher %s failed to close: %s", enricher.name, error)
         await self._lifecycle("close")
 
     async def __aenter__(self) -> "DataGateway":

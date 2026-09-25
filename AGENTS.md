@@ -108,6 +108,15 @@ which exist to keep the "adding a page" path honest:
   and must keep them: the stats-worker tails the unprefixed `pmu.frame` under
   the same client ids. What broke first, with numbers, is in
   `STEP7-WIP-data-integration-heavy-module-load-test.md`.
+  It is also **the worked example of a CIM reference on the frame**: its
+  gateway has the stub enricher (`CimReferenceEnricher`,
+  `core/.../datagateway/enrich.py`) that stamps the optional
+  `PmuHeader.cimReferenceId` early in the pipeline, a configured placeholder
+  for now (`ISLANDING_STREAM_CIM_REFERENCE`, `none` to switch off). Providers
+  never set it. The module picks it up again later off the frames it
+  evaluated and returns it as `cim_reference_id`; the reference rides in the
+  frame, so the worker needs no configuration for it. See
+  `STEP8-WIP-data-integration-grid-metadata-enrichment.md`.
 - **`/mode-estimation` is the load test for a heavy *algorithm*.** p-SWAMP's
   N4SID mode estimation (the desktop `N4SID` class copied into
   `mode_estimation/n4sid_module.py`, over the `nfoursid` library) identifies
