@@ -14,6 +14,7 @@ export type PmuHeader = Wire['PmuHeader']
 export type PmuFrame = Wire['PmuFrame']
 export type PlayerStatus = Wire['PlayerStatus']
 export type FrameStats = Wire['FrameStats']
+export type Source = PmuStreamState['source']
 
 /**
  * The PMU test streamer: state arrives on the socket, commands go up as POSTs
@@ -37,7 +38,7 @@ export function usePmuStreamSocket() {
   const seen = message?.frame?.header
   if (seen && seen.header_id !== header?.header_id) setHeader(seen)
 
-  const fire = (action: 'play' | 'stop' | 'forward' | 'back' | 'live' | 'replay') =>
+  const fire = (action: 'play' | 'stop' | 'forward' | 'back') =>
     fireCommand(
       'pmu-test-streamer',
       postCommand(`${PMU_STREAM_API_PATH}/playback/${action}`),
@@ -47,10 +48,16 @@ export function usePmuStreamSocket() {
   const stop = useCallback(() => fire('stop'), [])
   const forward = useCallback(() => fire('forward'), [])
   const back = useCallback(() => fire('back'), [])
-  /** Switch to the live feed: frames from now, no transport controls. */
-  const goLive = useCallback(() => fire('live'), [])
-  /** Switch back to the recording, paused at its start. */
-  const replay = useCallback(() => fire('replay'), [])
+  /** Watch another source: a recording (this browser's own, restarted from its
+   *  beginning) or the live stream every viewer shares. */
+  const chooseSource = useCallback(
+    (source: Source) =>
+      fireCommand(
+        'pmu-test-streamer',
+        postCommand(`${PMU_STREAM_API_PATH}/source`, { body: { source } }),
+      ),
+    [],
+  )
   /** A command to the stats *module*, not the player: zero its running count. */
   const resetStats = useCallback(
     () => fireCommand('pmu-test-streamer', postCommand(`${PMU_STREAM_API_PATH}/stats/reset`)),
@@ -84,8 +91,7 @@ export function usePmuStreamSocket() {
     back,
     seek,
     setSpeed,
-    goLive,
-    replay,
+    chooseSource,
     resetStats,
   }
 }

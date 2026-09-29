@@ -53,10 +53,10 @@ which exist to keep the "adding a page" path honest:
   generate a new subapp for those.
 - **`/pmu-test-streamer` is the worked example of the server data
   architecture** (`core/`, `doc/server-data-architecture.md`): the committed
-  sample recording and a synthetic live feed as two providers in one gateway, a
-  player paced by POSTed commands, a stats module on the bus (in-process, or in
-  the `stats-worker` over Kafka), a module command (reset), and the gateway's
-  stub CIM enricher. Copy it for a new module and its page; it is *not* the
+  sample recording replayed in a pipeline per client, a synthetic live feed in
+  **one pipeline shared by every viewer**, a player paced by POSTed commands, a
+  stats module on the bus (in-process, or in the `stats-worker` over Kafka), a
+  module command (reset), and the gateway's stub CIM enricher. Copy it for a new module and its page; it is *not* the
   example of a bare subapp — that stays `/reference-subapp`.
 
 **The client-server stack is stateless on purpose.** There is no database and no
@@ -232,8 +232,10 @@ Key invariants to preserve:
   the reference app keeps one small model per id in its own module-level
   `states: dict[str, …]` (`ReferenceSubappModel`), never evicted (a bounded,
   acceptable leak here, since the value is a couple of integers and not a
-  pipeline); the streamer keeps one core `Pipeline` per id in a
-  `PipelineRegistry`, capped and idle-evicted. Nothing is persisted, so a process/pod
+  pipeline); the streamer keeps a recorded core `Pipeline` per id in a
+  `PipelineRegistry`, capped and idle-evicted — and one *live* pipeline keyed by
+  stream name, shared by every viewer, with only the client's chosen source
+  kept per id. Nothing is persisted, so a process/pod
   restart puts every client back at the start. That reset is expected behavior,
   not a bug. Note the id
   became stable per browser rather than per page mount when the grid monitor

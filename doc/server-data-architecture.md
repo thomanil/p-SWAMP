@@ -441,7 +441,7 @@ frame. An **enricher** passed to the gateway runs on every payload a stream
 yields:
 
 ```python
-gateway = gateway_from_env(DEFAULT_DATA_CLIENTS, enrichers=[CimReferenceEnricher("n44-stub")])
+gateway = gateway_from_env(default, variable=variable, enrichers=[CimReferenceEnricher("n44-stub")])
 ```
 
 `CimReferenceEnricher` decides the reference once per layout
@@ -470,7 +470,7 @@ browser. It is the only piece that knows about HTTP, and it has three parts:
 
 | Part | In `pmu_test_streamer/api.py` |
 |---|---|
-| a `PipelineRegistry` over the pipeline definition, bound in `lifespan` | `REGISTRY = PipelineRegistry(build_client_pipeline, ...)` |
+| a `PipelineRegistry` per source over the pipeline definition, bound in `lifespan` | `REGISTRIES`; see "What is per client, what is shared" |
 | one `POST` per operation, each building one typed command | `SeekCommand(client_id=..., offset_s=...)` → `shared.dispatch_command` (404 without a pipeline, 409 when refused) |
 | one socket pushing one state message, built from the bus | `PmuStreamState`: the frame at the cursor, `PlayerStatus`, the module's result, the latest `ErrorEvent` |
 
@@ -506,3 +506,34 @@ command the player would refuse.
 7. **Optional, its own service**: a `worker.py` with `main(MyModule, VAR)`, the
    `RemoteModule` switch in the pipeline definition (copy `stats_modules`), and
    the worker in compose and `k8s/` (copy `stats-worker`).
+
+## What is per client, what is shared
+
+*What.* The streamer builds one kind of pipeline per **source**. A source is
+nothing but the providers its variable names:
+
+| | Local recording | Live |
+|---|---|---|
+| providers | `PMU_TEST_STREAMER_LOCAL_CLIENTS` (default: the image's recording) | `PMU_TEST_STREAMER_LIVE_CLIENTS` (default: the synthetic feed) |
+| pipeline key | `local-<client id>` | `live`, the stream name |
+| player | one per client: its own cursor, speed and transport controls | one for everyone, always live, no transport |
+| modules | run once per client | **run once for all viewers**; one worker key |
+| commands | the client's POSTs, to its own pipeline | none from a viewer: a POST on the shared stream is a 409 |
+
+What stays per client is the **source**: which pipeline a browser watches.
+`POST /source {source}` switches it. The client's socket re-subscribes to the
+other pipeline's bus. A recording restarts at its beginning, paused, and the
+one left behind pauses. The socket holds a pipeline (a watcher in its
+registry) only while it watches it, and the page shows how many are watching
+live. Set a source's variable to `none` to switch it off; the page disables
+its button.
+
+*Why.* A recorded stream is something a visitor explores: they want their own
+clock. A live stream is the grid now: every operator must see the same
+instant, and the analysis must run once, not once per viewer. **Same
+`Pipeline` class, different key.** Nothing in the core distinguishes the two;
+the edge decides which registry and which key.
+
+*Where.* `pmu_test_streamer/pipeline.py` (`SOURCES`, `pipeline_key`,
+`build_pipeline`), `api.py` (`REGISTRIES`, `CLIENT_SOURCES`, `/source`,
+`serve_client`), and the edge tests in `app/server-python/tests/test_pmu_test_streamer.py`.

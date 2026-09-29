@@ -16,6 +16,10 @@ the in-process path. Then reset the module's running count -- a command to
 the *module*, which crosses to the worker the same way -- and see the count
 restart, with the gateway's CIM reference on every result. Then stop.
 
+Then the shared live stream: two clients switch their source to live and both
+see the same live frames, with the module's result, from one pipeline that
+counts them both as watching.
+
 Same shape and dependencies as smoketest_reference_subapp.py: websockets from
 the server's own environment, urllib for the POSTs, every step reported.
 """
@@ -65,8 +69,13 @@ def _instant(text: str | None) -> datetime:
     return datetime.fromisoformat(text or "1970-01-01T00:00:00+00:00")
 
 
-def post(base_url: str, path: str, client_id: str) -> tuple[int, dict]:
-    request = urllib.request.Request(f"{base_url}{path}?client_id={client_id}", method="POST", data=b"")
+def post(base_url: str, path: str, client_id: str, body: dict | None = None) -> tuple[int, dict]:
+    request = urllib.request.Request(
+        f"{base_url}{path}?client_id={client_id}",
+        method="POST",
+        data=json.dumps(body).encode() if body is not None else b"",
+        headers={"Content-Type": "application/json"} if body is not None else {},
+    )
     try:
         with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
             return response.status, json.loads(response.read() or b"{}")
@@ -170,6 +179,54 @@ async def stream_flow(base_url: str, ws_url: str) -> None:
         command(base_url, client_id, "stop", "pause")
 
 
+def choose(base_url: str, client_id: str, source: str) -> None:
+    status, body = post(base_url, f"{API_PATH}/source", client_id, {"source": source})
+    check(
+        f"POST {API_PATH}/source {{source: {source}}} -> 200",
+        status == 200 and body.get("applied") == f"source.{source}",
+        f"got {status} {body}",
+    )
+
+
+async def live_flow(base_url: str, ws_url: str) -> None:
+    a, b = (str(random.randrange(10**9, 10**10)) for _ in range(2))
+    print(f"\n  Shared live flow (client_ids={a}, {b})")
+    async with connect(f"{ws_url}{WS_PATH}?client_id={a}") as ws_a, connect(
+        f"{ws_url}{WS_PATH}?client_id={b}"
+    ) as ws_b:
+        for ws in (ws_a, ws_b):
+            await asyncio.wait_for(ws.recv(), RECV_TIMEOUT)
+        for client_id in (a, b):
+            choose(base_url, client_id, "live")
+
+        async def live_state(ws) -> dict:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + STATS_TIMEOUT
+            state: dict = {}
+            while loop.time() < deadline:
+                state = json.loads(await asyncio.wait_for(ws.recv(), RECV_TIMEOUT))
+                if state.get("source") == "live" and state.get("stats") and state.get("live_viewers") == 2:
+                    return state
+            return state
+
+        sa, sb = await live_state(ws_a), await live_state(ws_b)
+        check(
+            "both clients see the live stream, with the module's result, from one shared pipeline",
+            all(
+                s.get("source") == "live"
+                and s.get("player", {}).get("mode") == "live"
+                and (s.get("frame") or {}).get("mRID") == "n44-live"
+                and s.get("stats")
+                and s.get("live_viewers") == 2
+                for s in (sa, sb)
+            ),
+            f"got {json.dumps(sa)[:200]} / {json.dumps(sb)[:200]}",
+        )
+        status, body = post(base_url, f"{API_PATH}/playback/play", a)
+        check("a transport command on the shared live stream -> 409", status == 409, f"got {status} {body}")
+        choose(base_url, a, "local")
+
+
 async def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print(f"usage: {argv[0]} <base-url>", file=sys.stderr)
@@ -180,6 +237,10 @@ async def main(argv: list[str]) -> int:
         await stream_flow(base_url, ws_url)
     except Exception as error:
         bad(f"streamer flow could not run: {type(error).__name__}: {error}")
+    try:
+        await live_flow(base_url, ws_url)
+    except Exception as error:
+        bad(f"shared live flow could not run: {type(error).__name__}: {error}")
     if failures:
         print(f"\n  \033[31m{len(failures)} step(s) failed\033[0m")
         return 1
