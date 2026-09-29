@@ -22,6 +22,13 @@ service without a change.
 ``process`` runs on the event loop, so it must be cheap or hand heavy work to
 a thread or process pool. A ``process`` that raises publishes an
 ``ErrorEvent``; the module carries on with the next message.
+
+**A module may take commands, too.** It lists the ``Command`` subclasses it
+answers in ``commands`` and implements ``handle`` (and ``validate``, if some
+can be refused); the pipeline routes each to it by class
+(:mod:`pswamp_core.command_routing`). What ``handle`` returns is published in
+the module's ``output_model``, carrying the command's ``request_id``. A module
+that *only* takes commands sets ``input_model = None``.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from .bus import Overflow
+from .command_routing import CommandInbox
 from .log import get_logger
 from .messages.errors import ErrorEvent
 from .messages.results import AppIdentity, AppStatus, ResultEnvelope
@@ -41,6 +49,7 @@ from .util.time import utcnow
 
 if TYPE_CHECKING:
     from .bus import Bus
+    from .messages.commands import Command
     from .messages.data_model import DataModel
 
 __all__ = ["Module"]
@@ -53,17 +62,21 @@ class Module(ABC):
 
     Class attributes a subclass sets:
 
-    * ``name`` -- how the module identifies itself in its results.
-    * ``input_model`` -- the message class to subscribe to.
+    * ``name`` -- how the module identifies itself in its results, and what a
+      ``Command.target`` names it by.
+    * ``input_model`` -- the message class to subscribe to; ``None`` for a
+      module that only answers commands.
     * ``output_model`` -- the ``ResultEnvelope`` subclass to publish.
+    * ``commands`` -- the ``Command`` subclasses it answers through ``handle``.
     * ``overflow`` / ``maxsize`` -- what to do when the module falls behind its
       input; ``DROP_OLDEST`` by default, so a module on a live stream analyses
       the newest frame rather than an ever-older backlog.
     """
 
     name: ClassVar[str] = "module"
-    input_model: ClassVar[type[DataModel]]
+    input_model: ClassVar[type[DataModel] | None]
     output_model: ClassVar[type[ResultEnvelope]]
+    commands: ClassVar[tuple[type[Command], ...]] = ()
     overflow: ClassVar[Overflow] = Overflow.DROP_OLDEST
     maxsize: ClassVar[int] = 64
 
@@ -78,6 +91,16 @@ class Module(ABC):
         ``None`` to publish nothing for this message."""
         raise NotImplementedError(f"{type(self).__name__} has no process()")
 
+    def validate(self, command: Command) -> None:
+        """Raise ``CommandRefused`` if ``command`` does not apply now. Runs inside
+        the request that dispatched it, so it reads in-memory state only."""
+        return
+
+    async def handle(self, command: Command) -> BaseModel | None:
+        """Answer one of ``commands``. Return the result body to publish (it
+        carries the command's ``request_id``), or ``None`` for nothing."""
+        raise NotImplementedError(f"{type(self).__name__} declares commands but no handle()")
+
     def wrap(self, body: BaseModel, *, timestamp: datetime, request_id: str | None = None) -> ResultEnvelope:
         """``body`` in this module's envelope, recorded as its latest result."""
         envelope = self.output_model(
@@ -91,8 +114,20 @@ class Module(ABC):
         self.last_result = envelope
         return envelope
 
+    def command_inbox(self, bus: Bus) -> CommandInbox:
+        """This module's commands off ``bus``: each answer wrapped and published."""
+
+        def answer(command: Command, body: BaseModel) -> None:
+            bus.publish(self.wrap(body, timestamp=utcnow(), request_id=command.request_id))
+
+        return CommandInbox(bus, self, on_result=answer)
+
     async def run(self, bus: Bus) -> None:
-        """Subscribe and process until cancelled. What a pipeline runs as a task."""
+        """Subscribe and process until cancelled. What a pipeline runs as a task.
+        A module with no ``input_model`` returns at once; its commands come
+        through its inbox."""
+        if self.input_model is None:
+            return
         with bus.subscribe(self.input_model, overflow=self.overflow, maxsize=self.maxsize) as inputs:
             async for message in inputs:
                 try:

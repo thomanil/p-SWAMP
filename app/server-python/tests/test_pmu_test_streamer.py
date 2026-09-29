@@ -12,11 +12,12 @@ import pytest
 
 from pmu_test_streamer.live_client import LIVE_STREAM_ID, LiveSyntheticClient
 from pmu_test_streamer.sample_client import EPOCH, STREAM_ID, SampleRecordingClient, load_sample
-from pmu_test_streamer.stats_module import FrameStatsModule, FrameStatsResult
+from pmu_test_streamer.stats_module import FrameStatsModule, FrameStatsResult, ResetStatsCommand
 from pswamp_core.bus import InProcessBus, Overflow
+from pswamp_core.command_routing import CommandRefused
 from pswamp_core.datagateway import Capability, DataGateway, Player, gateway_from_env
 from pswamp_core.datagateway.conformance import DataClientConformance
-from pswamp_core.messages import PmuFrame, PmuHeader
+from pswamp_core.messages import ErrorEvent, PlayCommand, PmuFrame, PmuHeader
 from pswamp_core.pipeline import Pipeline
 from pswamp_core.remote import ModuleHost, RemoteModule
 from pswamp_core.transport import InMemoryTransport
@@ -212,6 +213,79 @@ async def test_the_same_pipeline_with_the_module_in_a_worker():
                 result = await asyncio.wait_for(results.get(), 2)
                 wrapped, previous = result.timestamp < previous, result.timestamp
             assert wrapped
+    finally:
+        await pipeline.stop()
+        host_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await host_task
+
+
+# --- commands: one to the player, one to the module --------------------------------------
+
+
+async def _reset_round_trip(pipeline: Pipeline) -> tuple[FrameStatsResult, FrameStatsResult]:
+    """Play a few frames, reset, and return (the reset's answer, the next frame's result)."""
+    bus = pipeline.bus
+    with bus.subscribe(FrameStatsResult, overflow=Overflow.GROW) as results:
+        pipeline.dispatch(PlayCommand())                    # routed to the player by class
+        for _ in range(5):
+            last = await asyncio.wait_for(results.get(), 2)
+        assert last.result.frames_since_reset >= 5
+        reset = ResetStatsCommand()
+        pipeline.dispatch(reset)                            # routed to the module by class
+        while True:
+            answer = await asyncio.wait_for(results.get(), 2)
+            if answer.request_id == reset.request_id:
+                break
+        after = await asyncio.wait_for(results.get(), 2)
+    return answer, after
+
+
+async def test_a_command_reaches_the_module_that_declared_it():
+    module = FrameStatsModule()
+    with pytest.raises(CommandRefused, match="nothing to reset"):
+        module.validate(ResetStatsCommand())             # the edge's 409
+
+    pipeline = streamer_pipeline("42", [module])
+    assert [r.name for r in pipeline.receivers] == ["player", "frame-stats"]
+    await pipeline.start()
+    try:
+        answer, after = await _reset_round_trip(pipeline)
+    finally:
+        await pipeline.stop()
+    assert answer.result.frames_since_reset == 0 and answer.result.peak_angle_spread_deg is None
+    assert after.result.frames_since_reset in (1, 2)
+
+
+async def test_the_module_s_command_crosses_to_the_worker():
+    broker = InMemoryTransport()
+    host = ModuleHost(FrameStatsModule, broker)
+    host_task = asyncio.create_task(host.serve())
+    pipeline = streamer_pipeline("42", [RemoteModule(FrameStatsModule, broker, "42")])
+    await pipeline.start()
+    try:
+        answer, _ = await _reset_round_trip(pipeline)
+        assert answer.result.frames_since_reset == 0
+    finally:
+        await pipeline.stop()
+        host_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await host_task
+
+
+async def test_a_refusal_in_the_worker_comes_back_with_the_request_id():
+    broker = InMemoryTransport()
+    host = ModuleHost(FrameStatsModule, broker)
+    host_task = asyncio.create_task(host.serve())
+    pipeline = streamer_pipeline("7", [RemoteModule(FrameStatsModule, broker, "7")])
+    await pipeline.start()
+    try:
+        with pipeline.bus.subscribe(ErrorEvent, overflow=Overflow.GROW) as errors:
+            reset = ResetStatsCommand()
+            pipeline.dispatch(reset)  # the stand-in accepts; the worker's module has seen no frame
+            (error,) = [await asyncio.wait_for(errors.get(), 2)]
+        assert (error.source, error.request_id) == ("frame-stats", reset.request_id)
+        assert "nothing to reset" in error.detail
     finally:
         await pipeline.stop()
         host_task.cancel()

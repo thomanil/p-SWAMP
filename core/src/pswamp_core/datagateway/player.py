@@ -30,6 +30,10 @@ more than one frame interval behind, it drops time rather than bursting.
 
 The next-frame read is a task awaited *outside* the lock, so a live feed gone
 quiet never blocks a switch back to the replay.
+
+**The player is a command receiver** (:mod:`pswamp_core.command_routing`) for
+every ``PlayerCommand``: ``validate`` says synchronously whether one applies in
+the current mode (the edge's 409), and ``handle`` maps it to a control above.
 """
 
 from __future__ import annotations
@@ -38,9 +42,22 @@ import asyncio
 import contextlib
 import time
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
+from ..command_routing import CommandRefused
 from ..log import get_logger
+from ..messages.commands import (
+    Command,
+    GoLiveCommand,
+    PauseCommand,
+    PlayCommand,
+    PlayerCommand,
+    RefreshCommand,
+    ReplayCommand,
+    SeekCommand,
+    SpeedCommand,
+    StepCommand,
+)
 from ..messages.control import PlayerStatus, StreamChanged
 from ..messages.errors import ErrorEvent
 from ..messages.pmu import PmuFrame
@@ -54,16 +71,23 @@ if TYPE_CHECKING:
     from .data_gateway import DataGateway
     from .stream import DataStream
 
-__all__ = ["Player", "PlayerError"]
+__all__ = ["PLAYER_TARGET", "Player", "PlayerError"]
 
 logger = get_logger("pswamp_core.datagateway.player")
+
+#: The player's receiver name: what a ``Command.target`` names it by.
+PLAYER_TARGET = "player"
 
 #: How much slower than real time the loop may fall before dropping time.
 _BEHIND_TOLERANCE = 1.0  # in frame intervals
 
 
-class PlayerError(RuntimeError):
+class PlayerError(CommandRefused):
     """A control was refused: seeking a live source, or a bad argument."""
+
+
+#: The commands that move or pace a replay; none of them applies while live.
+_TRANSPORT = (PlayCommand, PauseCommand, StepCommand, SeekCommand, SpeedCommand)
 
 
 class Player:
@@ -81,8 +105,11 @@ class Player:
         paced: ``False`` delivers frames as fast as the provider yields them
             (tests; batch runs). Ignored in live mode, where arrival is the pace.
         autoplay: Start playing at ``start()`` rather than paused.
-        name: Used in logs and as the ``source`` of its ``ErrorEvent``s.
+        name: The ``Command.target`` this player answers to.
     """
+
+    #: Every player command; see :mod:`pswamp_core.messages.commands`.
+    commands: ClassVar[tuple[type[Command], ...]] = (PlayerCommand,)
 
     def __init__(
         self,
@@ -95,7 +122,7 @@ class Player:
         loop: bool = False,
         paced: bool = True,
         autoplay: bool = False,
-        name: str = "player",
+        name: str = PLAYER_TARGET,
     ) -> None:
         if speed <= 0:
             raise PlayerError("speed must be positive")
@@ -351,7 +378,89 @@ class Player:
         self._wake.set()
         self._publish_status()
 
+    # -- commands --------------------------------------------------------------
+
+    def validate(self, command: Command) -> None:
+        """Refuse ``command`` if it cannot apply now; synchronous, state only.
+
+        What the edge's 409 comes from. The controls below still refuse on
+        their own (the command may have been checked against an older state
+        than the one it is applied in); this is the check made first.
+        """
+        if isinstance(command, _TRANSPORT):
+            self._refuse_in_live(command.name)
+        if isinstance(command, GoLiveCommand) and not self._live_available:
+            raise PlayerError("no live source is configured for this pipeline")
+        needs_history = isinstance(command, (SeekCommand, ReplayCommand)) or (
+            isinstance(command, StepCommand) and command.n < 0
+        )
+        if needs_history and self._history is None:
+            raise PlayerError(
+                f"cannot {command.name}: the source reports no history; refresh once it is back"
+            )
+        if isinstance(command, SeekCommand):
+            self._refuse_outside_history(self._position(command.to, command.offset_s))
+        if isinstance(command, ReplayCommand):
+            start = self._position(command.start, command.offset_s)
+            end = self._position(command.end, command.end_offset_s)
+            if start is not None:
+                self._refuse_outside_history(start)
+            if end is not None and end <= (start or self._history.range.start):
+                raise PlayerError("replay range is empty")
+
+    async def handle(self, command: Command) -> None:
+        """Apply one command addressed to this player."""
+        if isinstance(command, PlayCommand):
+            self.resume()
+        elif isinstance(command, PauseCommand):
+            self.pause()
+        elif isinstance(command, StepCommand):
+            await self.step(command.n)
+        elif isinstance(command, SeekCommand):
+            await self.seek(self._position(command.to, command.offset_s))
+        elif isinstance(command, SpeedCommand):
+            self.set_speed(command.speed)
+        elif isinstance(command, GoLiveCommand):
+            await self.go_live()
+        elif isinstance(command, RefreshCommand):
+            await self.refresh()
+        elif isinstance(command, ReplayCommand):
+            await self.replay(
+                self._position(command.start, command.offset_s),
+                self._position(command.end, command.end_offset_s),
+            )
+            if command.play:
+                # One POST, one command: "play this range" lands paused and is
+                # resumed here, rather than needing a second command.
+                self.resume()
+        else:
+            raise PlayerError(f"the player does not handle {type(command).__name__}")
+
     # -- internals -------------------------------------------------------------
+
+    def _position(self, at: datetime | None, offset_s: float | None) -> datetime | None:
+        """An instant given as itself or as seconds from the history start."""
+        if at is not None:
+            return ensure_utc(at)
+        if offset_s is not None:
+            return self._from_coverage_start(offset_s, "position by offset")
+        return None
+
+    def _refuse_outside_history(self, at: datetime | None) -> None:
+        coverage = self._history
+        if at is None or coverage is None:
+            return
+        if not coverage.range.start <= at < coverage.range.end:
+            raise PlayerError(
+                f"{at.isoformat()} lies outside the history "
+                f"[{coverage.range.start.isoformat()}, {coverage.range.end.isoformat()})"
+            )
+
+    def _from_coverage_start(self, seconds: float, what: str) -> datetime:
+        start = self._coverage_start()
+        if start is None:
+            raise PlayerError(f"cannot {what}: coverage start is unknown")
+        return start + timedelta(seconds=seconds)
 
     def _coverage_start(self) -> datetime | None:
         return None if self._history is None else self._history.range.start
