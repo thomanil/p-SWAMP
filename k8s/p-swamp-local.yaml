@@ -21,7 +21,9 @@
 # doc/server-data-architecture.md.
 #
 # The PMU data sources are configured here rather than baked in: the env block
-# names each source's providers and points the live feed at
+# names each source's providers -- the remote recording is the Remote Data
+# Client over the p-swamp-remote-data-stub Service (a dummy of a deployment's
+# own data service, the same image again) -- and points the live feed at
 # k8s/deployment_pmu_data_file_example.txt, which the start script turns into
 # the ConfigMap mounted below. Every value in that file counts up by one per
 # frame from a round start (100 kV, 0°, 60 Hz), so a page switched to Live
@@ -80,8 +82,15 @@ spec:
             # the image and one more entry here.
             - name: PMU_TEST_STREAMER_LOCAL_CLIENTS
               value: "sample:pmu_test_streamer.sample_client:SampleRecordingClient"
+            - name: PMU_TEST_STREAMER_REMOTE_CLIENTS
+              value: "remote_data:pswamp_core.datagateway.clients.remote_data:RemoteDataClient"
             - name: PMU_TEST_STREAMER_LIVE_CLIENTS
               value: "live:pmu_test_streamer.live_client:LiveSyntheticClient"
+            # The Remote Data Client's own block: where the remote data service
+            # (here the p-swamp-remote-data-stub Service) answers. A deployment
+            # with its own service keeps the lines above and changes this URL.
+            - name: REMOTE_DATA_URL
+              value: http://p-swamp-remote-data-stub:8100
             # Each provider reads its own {NAME}_{SETTING} block: the live feed
             # cycles this file's rows instead of the image's sample_data.txt.
             - name: LIVE_PATH
@@ -204,6 +213,84 @@ spec:
             limits:
               cpu: "1"
               memory: "512Mi"
+---
+# The dummy remote data service the streamer's Remote recording queries: the same
+# image with a different command (core/examples/remote_data_stub/, outside the
+# installed package, hence the PYTHONPATH). It serves HTTP, so it has a Service
+# and /healthz probes; the server calls it over the cluster network.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: p-swamp-remote-data-stub
+  labels:
+    app: p-swamp-remote-data-stub
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: p-swamp-remote-data-stub
+  template:
+    metadata:
+      labels:
+        app: p-swamp-remote-data-stub
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: remote-data-stub
+          image: p-swamp:latest
+          imagePullPolicy: Never
+          command: ["python", "-m", "remote_data_stub"]
+          env:
+            - name: PYTHONPATH
+              value: /workspace/p-SWAMP/core/examples
+            - name: REMOTE_DATA_STUB_REPEAT
+              value: "20"
+          ports:
+            - name: http
+              containerPort: 8100
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8100
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8100
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: p-swamp-remote-data-stub
+  labels:
+    app: p-swamp-remote-data-stub
+spec:
+  type: ClusterIP
+  selector:
+    app: p-swamp-remote-data-stub
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8100
+      targetPort: 8100
 ---
 # The broker between the server and the worker: Apache Kafka, one node in KRaft
 # mode. The one image here pulled rather than built into minikube, hence

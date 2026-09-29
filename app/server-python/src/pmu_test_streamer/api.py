@@ -7,7 +7,8 @@ Everything between the data and this module is ``pswamp_core``; the pipelines
 themselves are defined in ``pipeline.py``, one registry per source::
 
     source  registry key                          what it is
-    local   "local-<client id>"                   each visitor's own replay of the recording
+    local   "local-<client id>"                   each visitor's own replay of the image's recording
+    remote  "remote-<client id>"                  the same, from a remote data service over REST
     live    "live" (the stream name)              one pipeline for every viewer; its modules run once
 
 What is per client is the **source**: which pipeline the client watches.

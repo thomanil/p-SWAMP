@@ -53,7 +53,9 @@ which exist to keep the "adding a page" path honest:
   generate a new subapp for those.
 - **`/pmu-test-streamer` is the worked example of the server data
   architecture** (`core/`, `doc/server-data-architecture.md`): the committed
-  sample recording replayed in a pipeline per client, a synthetic live feed in
+  sample recording replayed in a pipeline per client — from the image, or, in
+  compose and k8s, also from a remote data service behind its REST contract
+  (the Remote recording source) — a synthetic live feed in
   **one pipeline shared by every viewer**, a player paced by POSTed commands, a
   stats module on the bus (in-process, or in the `stats-worker` over Kafka), a
   module command (reset), and the gateway's stub CIM enricher. Copy it for a new module and its page; it is *not* the

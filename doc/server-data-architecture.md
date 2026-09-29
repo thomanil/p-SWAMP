@@ -512,13 +512,13 @@ command the player would refuse.
 *What.* The streamer builds one kind of pipeline per **source**. A source is
 nothing but the providers its variable names:
 
-| | Local recording | Live |
-|---|---|---|
-| providers | `PMU_TEST_STREAMER_LOCAL_CLIENTS` (default: the image's recording) | `PMU_TEST_STREAMER_LIVE_CLIENTS` (default: the synthetic feed) |
-| pipeline key | `local-<client id>` | `live`, the stream name |
-| player | one per client: its own cursor, speed and transport controls | one for everyone, always live, no transport |
-| modules | run once per client | **run once for all viewers**; one worker key |
-| commands | the client's POSTs, to its own pipeline | none from a viewer: a POST on the shared stream is a 409 |
+| | Local recording | Remote recording | Live |
+|---|---|---|---|
+| providers | `PMU_TEST_STREAMER_LOCAL_CLIENTS` (default: the image's recording) | `PMU_TEST_STREAMER_REMOTE_CLIENTS` (default: the Remote Data Client; needs `REMOTE_DATA_URL`) | `PMU_TEST_STREAMER_LIVE_CLIENTS` (default: the synthetic feed) |
+| pipeline key | `local-<client id>` | `remote-<client id>` | `live`, the stream name |
+| player | one per client: its own cursor, speed and transport controls | the same | one for everyone, always live, no transport |
+| modules | run once per client | run once per client | **run once for all viewers**; one worker key |
+| commands | the client's POSTs, to its own pipeline | the same | none from a viewer: a POST on the shared stream is a 409 |
 
 What stays per client is the **source**: which pipeline a browser watches.
 `POST /source {source}` switches it. The client's socket re-subscribes to the
@@ -537,3 +537,59 @@ the edge decides which registry and which key.
 *Where.* `pmu_test_streamer/pipeline.py` (`SOURCES`, `pipeline_key`,
 `build_pipeline`), `api.py` (`REGISTRIES`, `CLIENT_SOURCES`, `/source`,
 `serve_client`), and the edge tests in `app/server-python/tests/test_pmu_test_streamer.py`.
+
+## A remote data service as a provider — `RemoteDataClient`
+
+*What.* A deployment keeps its PMU history in a store this repo neither ships
+nor knows. It puts a small REST service in front of that store, speaking
+**`doc/remote-data-integration-contract.md`**, and names the Remote Data
+Client as a provider. Nothing else changes. In the streamer it is the
+"Remote recording" source, beside the local one:
+
+```
+PMU_TEST_STREAMER_REMOTE_CLIENTS="remote_data:pswamp_core.datagateway.clients.remote_data:RemoteDataClient"   # the default
+REMOTE_DATA_URL=http://my-data-service:8100                                                                    # switches it on
+```
+
+```mermaid
+sequenceDiagram
+    participant P as player
+    participant G as gateway
+    participant R as RemoteDataClient
+    participant S as remote data service
+    participant D as any store
+    P->>G: consume(PmuFrame, t0, t1)
+    G->>R: consume(PmuFrame, t0, t1)
+    R->>S: POST /v1/queries
+    S->>D: the range
+    loop as fast as the player pulls
+        S-->>R: one NDJSON line (a pmu.frame)
+        R-->>G: PmuFrame
+    end
+    S-->>R: kind "end"; the body closes
+```
+
+A range query goes up as `POST /v1/queries`, and the records come back as that
+call's streamed response, one NDJSON line each. Coverage is `GET /v1/coverage`.
+There is no broker on this path and no cancel route: closing the connection is
+the cancel, and the client reads a line only when the player wants the next
+frame, so backpressure comes for free.
+
+*Why.* Decoupling. p-SWAMP asks for a range and gets it back; which store
+answers (a time-series database, a historian, an archive) is the deployment's
+choice, and it can change that choice without a change here. The contract is
+written in HTTP terms alone, so the service may be built on any stack.
+
+**In this repo.** `core/examples/remote_data_stub/` is a dummy service (a
+three-second sample tiled to a minute). Compose (`remote-data-stub`) and
+`k8s/p-swamp-local.yaml` (`p-swamp-remote-data-stub`) run it and set
+`REMOTE_DATA_URL`, so the page offers **Local recording | Remote recording |
+Live**: the same page and module over two history providers, one in the image
+and one behind the REST contract (60 frames against the stub's 1200).
+`./scripts/check-remote-data-service.sh [URL]` checks any running service
+against the contract over plain HTTP, and CI runs it against the stub. Without
+`REMOTE_DATA_URL` (CI's bare `docker run`) the Remote button is disabled.
+
+*Where.* `core/src/pswamp_core/datagateway/clients/remote_data.py` (the
+`pswamp-core[remote-data]` extra), `messages/remote_data.py`, `core/examples/`,
+`core/tests/test_remote_data_*.py`.

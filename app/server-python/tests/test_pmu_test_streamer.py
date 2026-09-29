@@ -533,3 +533,21 @@ def test_state_keeps_stats_for_the_frame_or_the_one_just_before_it():
     assert not api._current(stats_for(live), frames[3], status)  # another stream: gone
     answer = stats_for(frames[0]).model_copy(update={"request_id": "r1"})
     assert api._current(answer, frames[3], status)  # a command's answer: shown
+
+
+def test_the_remote_recording_is_offered_once_a_service_url_is_configured(monkeypatch):
+    """The same page and module over a provider outside the process: the Remote
+    Data Client, named by default and switched on by its own URL. Built, not
+    started: no socket."""
+    from pswamp_core.datagateway.clients.remote_data import RemoteDataClient
+
+    for variable, _ in streamer.SOURCES.values():
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.delenv("REMOTE_DATA_URL", raising=False)
+    assert api.sources_available() == ["local", "live"]
+    monkeypatch.setenv("REMOTE_DATA_URL", "http://remote-data-stub:8100")
+    assert api.sources_available() == ["local", "remote", "live"]
+    pipeline = streamer.build_pipeline(streamer.pipeline_key("remote", "5"), "remote", [])
+    assert pipeline.key == "remote-5"
+    (client,) = pipeline.gateway.clients.values()
+    assert isinstance(client, RemoteDataClient) and client.capabilities == Capability.HISTORY_CONSUME

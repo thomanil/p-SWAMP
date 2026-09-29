@@ -36,6 +36,7 @@ const SPEEDS = ['0.5', '1', '2', '5']
  *  server's `Source` type makes this a type error until it has a label. */
 const SOURCE_LABELS: Record<Source, string> = {
   local: 'Local recording',
+  remote: 'Remote recording',
   live: 'Live',
 }
 

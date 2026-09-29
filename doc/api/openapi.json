@@ -1463,6 +1463,7 @@
             "description": "Which source this client is watching.",
             "enum": [
               "local",
+              "remote",
               "live"
             ],
             "title": "Source",
@@ -1473,6 +1474,7 @@
             "items": {
               "enum": [
                 "local",
+                "remote",
                 "live"
               ],
               "type": "string"
@@ -1603,6 +1605,7 @@
             "description": "The source to watch.",
             "enum": [
               "local",
+              "remote",
               "live"
             ],
             "title": "Source",
