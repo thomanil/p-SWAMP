@@ -341,3 +341,25 @@ The streamer's two providers do, in `app/server-python/tests/test_pmu_test_strea
 `stream.py`, `config.py`, `conformance.py`). The second example provider is
 `pmu_test_streamer/live_client.py`: the recording's rows re-stamped on the
 wall clock at 20 Hz, live only.
+
+## The player — `pswamp_core.datagateway.Player`
+
+*What.* The player pulls from the gateway and paces frames onto the bus.
+
+```python
+player = Player(gateway, bus, model=PmuFrame, loop=True)
+await player.start()            # a replay over the history, paused
+player.resume(); player.pause(); player.set_speed(2.0)
+await player.step(-1)           # one frame back
+await player.seek(t)            # a NEW stream from t, announced as StreamChanged
+await player.replay(t0, t1)     # a bounded chunk: ends paused at t1
+await player.go_live()          # an open-ended stream from now, no transport controls
+player.status()                 # PlayerStatus: mode, cursor, can_seek, can_go_live, error, ...
+```
+
+*Why.* The gateway yields as fast as the provider reads. A person watching a
+disturbance needs real time, and needs to scrub. **Mode is which stream is
+open**: a replay is paced and seekable, live is delivered as it arrives.
+`PlayerStatus` says which controls apply, so a page renders no dead buttons. A
+provider that fails mid-stream ends the stream paused, with
+`PlayerStatus.error` set and an `ErrorEvent` on the bus.
