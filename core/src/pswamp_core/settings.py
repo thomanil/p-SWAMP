@@ -34,8 +34,9 @@ __all__ = [
     "read_setting",
 ]
 
-#: How a setting's text is parsed. ``path`` yields a ``pathlib.Path``.
-SettingKind = Literal["str", "int", "float", "seconds", "list", "path"]
+#: How a setting's text is parsed. ``path`` yields a ``pathlib.Path``;
+#: ``capabilities`` is a provider's, parsed by ``DataClient.from_env``.
+SettingKind = Literal["str", "int", "float", "seconds", "list", "path", "capabilities"]
 
 T = TypeVar("T")
 

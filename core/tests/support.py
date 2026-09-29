@@ -13,6 +13,8 @@ from typing import Literal
 from pydantic import BaseModel
 
 from pswamp_core.bus import Subscription
+from pswamp_core.datagateway import Capability, EnvSetting
+from pswamp_core.datagateway.clients import InMemoryClient
 from pswamp_core.messages import DataModel, ResultEnvelope
 from pswamp_core.util.time import UTC
 
@@ -36,6 +38,8 @@ class NumberResult(ResultEnvelope[Number]):
 
 #: Fixed anchor well in the past, so history tests never touch live logic.
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
+
+HISTORY = Capability.HISTORY_CONSUME
 
 
 def at(offset_seconds: float) -> datetime:
@@ -62,3 +66,40 @@ async def take(subscription: Subscription, n: int, timeout: float = 2.0) -> list
         return out
 
     return await asyncio.wait_for(_take(), timeout)
+
+
+async def collect(stream) -> list[str]:
+    """Drain a stream into the list of identifiers it produced."""
+    return [payload.mRID async for payload in stream]
+
+
+class EnvTestClient(InMemoryClient):
+    """An in-memory client configurable from the environment, for the config and
+    ``gateway_from_env`` tests. Holds three measurements."""
+
+    env_settings = (
+        EnvSetting("LABEL", "A label the test asserts on", required=True),
+        EnvSetting(
+            "CAPABILITIES",
+            "Comma-separated capability names",
+            default="HISTORY_CONSUME",
+            kind="capabilities",
+        ),
+        EnvSetting("COUNT", "How many records to hold", default="3", kind="int"),
+    )
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        label: str,
+        capabilities: Capability = HISTORY,
+        count: int = 3,
+    ) -> None:
+        super().__init__(
+            name,
+            Measurement,
+            measurements(count),
+            capabilities=capabilities,
+        )
+        self.label = label
