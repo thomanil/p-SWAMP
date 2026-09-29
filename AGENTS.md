@@ -51,12 +51,13 @@ which exist to keep the "adding a page" path honest:
   and keep it current: change a convention here
   first, don't grow features on it, and don't use it for p-SWAMP experiments —
   generate a new subapp for those.
-- **`/pmu-test-streamer` is the older demo** it replaced, a PMU record streamer
-  with playback controls (back / play / stop / forward) over a canned sample. It
-  predates the monitor and used to play the reference role. It is **slated for
-  retirement**: it still works and is still described below where it does
-  something the reference app does not, but don't cite it as the example to copy
-  and don't make anything new depend on it.
+- **`/pmu-test-streamer` is the worked example of the server data
+  architecture** (`core/`, `doc/server-data-architecture.md`): the committed
+  sample recording and a synthetic live feed as two providers in one gateway, a
+  player paced by POSTed commands, a stats module on the bus (in-process, or in
+  the `stats-worker` over Kafka), a module command (reset), and the gateway's
+  stub CIM enricher. Copy it for a new module and its page; it is *not* the
+  example of a bare subapp — that stays `/reference-subapp`.
 
 **The client-server stack is stateless on purpose.** There is no database and no
 persistent volume anywhere under `app/` or `k8s/`. Don't reintroduce one without
@@ -158,12 +159,12 @@ Two deployables, one wire protocol:
   imports **relatively** (`from .model import ...`). It is the smallest complete
   subapp: no ticker, no data file, no lifespan, so what remains is exactly the
   wiring every app needs.
-  **`src/pmu_test_streamer/`** is the older demo, kept for now and slated for
-  retirement, and it is worth reading only for the two things it adds on top: a
-  `lifespan` that runs a playback `ticker()`, and a data file shipped beside its
-  code.
-  The streamer's `model.py` owns that `sample_data.txt` (read once at import,
-  one record per line): a **one-off sample committed for testing** — 300
+  **`src/pmu_test_streamer/`** is the worked example of the core: two providers
+  (`sample_client.py`, `live_client.py`), a module (`stats_module.py`), its
+  pipeline definition (`pipeline.py`), its worker (`worker.py`) and the web edge
+  (`api.py`). `doc/server-data-architecture.md` walks through it.
+  Its `sample_data.txt` (parsed lazily by `sample_client.py`, one record per
+  line) is a **one-off sample committed for testing** — 300
   *simulated* PMU records extracted by hand from the Nordic 44 simulation that now
   lives in this same repo under `examples/nordic44_rtsim/` (voltage phasor +
   measured frequency, five stations at 20 Hz, spanning a line trip). Sharing a
@@ -171,11 +172,13 @@ Two deployables, one wire protocol:
   fixture and nothing generates it. (The *grid monitor* is the one that really
   runs the desktop package's code; the streamer does not, and should not start.)
   Don't add tooling or deps to regenerate it unless asked;
-  replacing it is a file swap, since no code parses the contents. **`src/shared.py`** is what an app
+  replacing it is a file swap as long as the line format holds. **`src/shared.py`** is what an app
   package imports its domain-free helpers from — `SocketRegistry`, plus
   `ClientId`, `CommandAck`, `read_client_id`, `get_logger` re-exported from
   `pswamp_web/` (see "The p-SWAMP web layer" for why the definitions live down
-  there and the import runs inward); it is *not* an app package and never appears
+  there and the import runs inward), and `dispatch_command` + `COMMAND_RESPONSES`,
+  the one way a POST sends a typed command into a core pipeline (404 without
+  one, 409 when refused); it is *not* an app package and never appears
   in `APPS`.
   Note the spelling split: a package dir must be a Python identifier
   (`reference_subapp`) while its URL prefix is hyphenated to match the page route
@@ -217,19 +220,20 @@ Two deployables, one wire protocol:
   commands, where the connection half lives once in
   `src/hooks/useServerSocket.ts` and the app's own hook
   (`useReferenceSubappSocket`) adds only its wire type and its commands.
-  `/pmu-test-streamer` (`PmuTestStreamerPage`) is the older demo beside it, on
-  its way out. See
+  `/pmu-test-streamer` (`PmuTestStreamerPage`) is the core's worked example
+  beside it: a frame table, the module's result, a Recorded | Live switch and
+  controls rendered from the player's own status. See
   "Adding a p-SWAMP view" and "Adding a page" below.
 
 Key invariants to preserve:
 
 - **State is per-client and in-memory only.** Each browser has one random integer
   id, persisted in `localStorage` and sent as `?client_id=` on every WebSocket URL;
-  each scaffold app keeps one small model per id in its own module-level
-  `states: dict[str, …]` — `ReferenceSubappModel` in `reference_subapp`, a
-  position + play flag in `pmu_test_streamer` — never evicted (a bounded,
+  the reference app keeps one small model per id in its own module-level
+  `states: dict[str, …]` (`ReferenceSubappModel`), never evicted (a bounded,
   acceptable leak here, since the value is a couple of integers and not a
-  pipeline). That dict is the only store: nothing is persisted, so a process/pod
+  pipeline); the streamer keeps one core `Pipeline` per id in a
+  `PipelineRegistry`, capped and idle-evicted. Nothing is persisted, so a process/pod
   restart puts every client back at the start. That reset is expected behavior,
   not a bug. Note the id
   became stable per browser rather than per page mount when the grid monitor
@@ -730,7 +734,7 @@ socket — `pswamp_web/grid/` — just omits the name.
 `src/reference_subapp/` is the one to copy: the smallest complete api, and
 nothing in it is there for a reason peculiar to itself. If the app ships a **data
 file** beside its code, that needs no Dockerfile change either — read it once at
-import off `Path(__file__).parent`, as `pmu_test_streamer/model.py` and
+import off `Path(__file__).parent`, as `pmu_test_streamer/sample_client.py` and
 `pswamp_web/data/` both do, since `COPY src/ ./src/` takes the whole tree. Put
 anything a second app would otherwise duplicate in `src/shared.py`; the per-app
 `states` dict, `state_message`, any ticker, and command dispatch deliberately

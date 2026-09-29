@@ -29,12 +29,19 @@ So an app package imports from here and needs to know nothing about the layout:
 What is genuinely defined here is `SocketRegistry` — the scaffold apps' socket
 bookkeeping, which `pswamp_web/` has no use for because its pages push from their
 own per-connection task rather than fanning out to a client's sockets.
+
+And `dispatch_command`: the one way an app over a core pipeline turns a POST
+into a command. Find the client's pipeline (404 without one: a command never
+builds a pipeline), `pipeline.dispatch` it (409 when its receiver refuses it
+now), acknowledge. `COMMAND_RESPONSES` documents those two answers on the
+route, so the published contract carries them.
 """
 
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 
-from fastapi import WebSocket
+from fastapi import HTTPException, WebSocket
 from pydantic import BaseModel
 
 from pswamp_web.log import get_logger
@@ -48,11 +55,17 @@ from pswamp_web.wire import (
     send_state,
 )
 
+from pswamp_core.command_routing import CommandRefused
+from pswamp_core.messages import Command
+from pswamp_core.pipeline import Pipeline
+
 __all__ = [
     "CLIENT_ID_PATTERN",
+    "COMMAND_RESPONSES",
     "ClientId",
     "CommandAck",
     "SocketRegistry",
+    "dispatch_command",
     "get_logger",
     "read_client_id",
     "send_state",
@@ -115,3 +128,36 @@ class SocketRegistry(SessionRegistry[WebSocket]):
         for ws in self.of(client_id):
             with contextlib.suppress(Exception):
                 await send_state(ws, message)
+
+
+#: The answers a command route gives besides its ack; pass as ``responses=``.
+COMMAND_RESPONSES: dict[int | str, dict] = {
+    404: {"description": "The client has no live pipeline: its page is not open."},
+    409: {"description": "The command does not apply in the pipeline's current state."},
+}
+
+
+def dispatch_command(pipeline: Pipeline | None, command: Command, logger: logging.Logger) -> CommandAck:
+    """Send one command into a client's pipeline and acknowledge it.
+
+    404 when there is no pipeline (a command never builds one); 409 when the
+    receiver refuses it in its current state, with its reason as the detail.
+    Otherwise the command is on the pipeline's bus and the ack says so: the
+    effect arrives on the socket, never in this reply.
+    """
+    client_id = command.client_id or ""
+    if pipeline is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no live pipeline for client {client_id}; "
+                "open the page (and its WebSocket) before sending commands"
+            ),
+        )
+    try:
+        pipeline.dispatch(command)
+    except CommandRefused as refused:
+        logger.info("client %s: refused %s: %s", client_id, command.name, refused)
+        raise HTTPException(status_code=409, detail=str(refused)) from refused
+    logger.info("client %s: %s (request %s)", client_id, command.name, command.request_id)
+    return CommandAck(applied=command.name)

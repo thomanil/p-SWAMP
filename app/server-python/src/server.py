@@ -76,7 +76,8 @@ APPS = [
     AppEntry(
         "pmu-test-streamer",
         pmu_test_streamer,
-        "Scaffold demo: replays sample PMU records line by line.",
+        "The server data architecture's worked example: a recorded and a live PMU feed "
+        "through one core pipeline per client, with replay commands and a frame-stats module.",
     ),
     AppEntry(
         "app-status",
