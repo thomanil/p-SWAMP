@@ -609,3 +609,21 @@ async def test_the_range_posts_play_a_chunk_and_ask_for_an_average(edge):
             assert refused.value.status_code == 409
     finally:
         api.REGISTRIES["local"].release("local-21")
+
+
+def test_the_remote_recording_is_offered_once_a_service_url_is_configured(monkeypatch):
+    """The same page and module over a provider outside the process: the Remote
+    Data Client, named by default and switched on by its own URL. Built, not
+    started: no socket."""
+    from pswamp_core.datagateway.clients.remote_data import RemoteDataClient
+
+    for variable, _ in streamer.SOURCES.values():
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.delenv("REMOTE_DATA_URL", raising=False)
+    assert api.sources_available() == ["local", "live"]
+    monkeypatch.setenv("REMOTE_DATA_URL", "http://remote-data-stub:8100")
+    assert api.sources_available() == ["local", "remote", "live"]
+    pipeline = streamer.build_pipeline(streamer.pipeline_key("remote", "5"), "remote", [])
+    assert pipeline.key == "remote-5"
+    (client,) = pipeline.gateway.clients.values()
+    assert isinstance(client, RemoteDataClient) and client.capabilities == Capability.HISTORY_CONSUME

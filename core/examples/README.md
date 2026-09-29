@@ -14,7 +14,9 @@ HTTP terms alone, since the service a deployment runs may be built on any stack.
 
 - `remote_data_stub/` is the reference service: coverage and range queries over
   a three-second sample (`sample_frames.ndjson`, sixty `pmu.frame` lines) tiled
-  to a minute, with each query's answer streamed back as NDJSON.
+  to a minute, with each query's answer streamed back as NDJSON. The PMU test
+  streamer's "Remote recording" source queries it in compose and the local k8s
+  manifest.
 - `check_remote_data_service.py` checks a running service against the contract
   over plain HTTP. It uses the Python standard library and nothing from p-SWAMP.
 

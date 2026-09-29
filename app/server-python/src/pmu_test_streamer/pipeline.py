@@ -8,9 +8,14 @@ per key. Defining a pipeline is writing it: everything it builds is built fresh
 for that key. The streamer has one pipeline per **source**, and a source is
 nothing but the providers its variable names:
 
-    source  providers (variable, default)                              keyed by
-    local   PMU_TEST_STREAMER_LOCAL_CLIENTS: the recording in the image  the client:  "local-<id>"
-    live    PMU_TEST_STREAMER_LIVE_CLIENTS:  the synthetic live feed     the stream:  "live", shared
+    source  providers (variable, default)                                keyed by
+    local   PMU_TEST_STREAMER_LOCAL_CLIENTS:  the recording in the image   the client:  "local-<id>"
+    remote  PMU_TEST_STREAMER_REMOTE_CLIENTS: the Remote Data Client       the client:  "remote-<id>"
+                                              (offered once REMOTE_DATA_URL is set)
+    live    PMU_TEST_STREAMER_LIVE_CLIENTS:   the synthetic live feed      the stream:  "live", shared
+
+The two recordings are the same page and the same module over two providers:
+one in the image, one behind a remote data service's REST contract.
 
 Every pipeline gets the stub CIM reference enricher (PMU_TEST_STREAMER_CIM_REFERENCE,
 "none" to switch off) and the stats module -- in-process, or, with
@@ -57,7 +62,7 @@ __all__ = [
     "stats_modules",
 ]
 
-Source = Literal["local", "live"]
+Source = Literal["local", "remote", "live"]
 
 #: Per source: the variable naming its providers, and what it names when unset.
 #: Set a variable to ``none`` to switch that source off.
@@ -65,6 +70,10 @@ SOURCES: dict[Source, tuple[str, str]] = {
     "local": (
         "PMU_TEST_STREAMER_LOCAL_CLIENTS",
         "sample:pmu_test_streamer.sample_client:SampleRecordingClient",
+    ),
+    "remote": (
+        "PMU_TEST_STREAMER_REMOTE_CLIENTS",
+        "remote_data:pswamp_core.datagateway.clients.remote_data:RemoteDataClient",
     ),
     "live": (
         "PMU_TEST_STREAMER_LIVE_CLIENTS",

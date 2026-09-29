@@ -19,9 +19,18 @@ services:
       # `docker run` exercises).
       PMU_TEST_STREAMER_MODULE_TRANSPORT: "kafka:pswamp_core.transport.kafka:KafkaTransport"
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
-    # A publish to a broker that is still booting is dropped, so wait for it.
+      # The streamer's "Remote recording" source: the Remote Data Client asks
+      # this remote data service (the stub below, standing in for a
+      # deployment's own service over its own store) for each range and reads
+      # the answer back as the streamed response. Unset, the source is simply
+      # not offered (what CI's bare `docker run` does).
+      REMOTE_DATA_URL: "http://remote-data-stub:8100"
+    # A publish to a broker that is still booting is dropped, so wait for it;
+    # the stub likewise, since a remote pipeline's first act is to ask it for coverage.
     depends_on:
       kafka:
+        condition: service_healthy
+      remote-data-stub:
         condition: service_healthy
     # Dev-only override: run uvicorn with --reload so the files synced in by
     # `watch` (below) trigger an in-process hot reload. The Dockerfile's prod
@@ -122,6 +131,40 @@ services:
         - path: app/server-python/src
           action: sync+restart
           target: /workspace/p-SWAMP/app/server-python/src
+        - path: core
+          action: sync+restart
+          target: /workspace/p-SWAMP/core
+        - path: app/server-python/pyproject.toml
+          action: rebuild
+        - path: app/server-python/uv.lock
+          action: rebuild
+        - path: core/pyproject.toml
+          action: rebuild
+
+  # A dummy remote data service behind the REST contract
+  # (doc/remote-data-integration-contract.md): the SAME image, a different
+  # command, standing where a deployment's own service would. Its "store" is
+  # a three-second sample tiled to a minute (core/examples/remote_data_stub/,
+  # outside the installed package, hence the PYTHONPATH). Not published to the
+  # host: nothing outside the compose network needs it.
+  remote-data-stub:
+    build: .
+    image: p-swamp:latest
+    command: ["python", "-m", "remote_data_stub"]
+    environment:
+      PYTHONPATH: "/workspace/p-SWAMP/core/examples"
+      REMOTE_DATA_STUB_REPEAT: "20"
+    expose:
+      - "8100"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8100/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    develop:
+      watch:
         - path: core
           action: sync+restart
           target: /workspace/p-SWAMP/core

@@ -83,8 +83,9 @@ echo "Rolling out..."
 # a first run), and never restarted here -- it was not rebuilt, and a restart
 # would empty its topics for nothing. Then the pods built from the fresh image.
 kubectl rollout status deployment/p-swamp-kafka --timeout=300s
-kubectl rollout restart deployment/p-swamp deployment/p-swamp-stats-worker
+kubectl rollout restart deployment/p-swamp deployment/p-swamp-stats-worker deployment/p-swamp-remote-data-stub
 kubectl rollout status deployment/p-swamp-stats-worker --timeout=120s
+kubectl rollout status deployment/p-swamp-remote-data-stub --timeout=120s
 kubectl rollout status deployment/p-swamp --timeout=120s
 
 # --- Reach the Service ------------------------------------------------------

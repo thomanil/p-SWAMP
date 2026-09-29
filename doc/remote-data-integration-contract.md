@@ -56,6 +56,9 @@ client is
 [`RemoteDataClient`](../core/src/pswamp_core/datagateway/clients/remote_data.py),
 and the shared request and response-line models are in
 [`messages/remote_data.py`](../core/src/pswamp_core/messages/remote_data.py).
+The web client's PMU test streamer is the worked example: its "Remote
+recording" source is this client, pointed at the stub in compose and the local
+k8s manifest.
 
 ## Supported data
 

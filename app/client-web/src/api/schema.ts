@@ -1186,12 +1186,12 @@ export interface components {
              * @description Which source this client is watching.
              * @enum {string}
              */
-            source: "local" | "live";
+            source: "local" | "remote" | "live";
             /**
              * Sources Available
              * @description The sources configured in this deployment.
              */
-            sources_available: ("local" | "live")[];
+            sources_available: ("local" | "remote" | "live")[];
             /** @description The stats module's latest result. */
             stats: components["schemas"]["FrameStatsResult"] | null;
             /**
@@ -1347,7 +1347,7 @@ export interface components {
              * @description The source to watch.
              * @enum {string}
              */
-            source: "local" | "live";
+            source: "local" | "remote" | "live";
         };
         /** SpeedBody */
         SpeedBody: {

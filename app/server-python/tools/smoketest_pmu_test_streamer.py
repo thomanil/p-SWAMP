@@ -18,6 +18,11 @@ restart, with the gateway's CIM reference on every result. Then stop, set the
 speed, seek, and step forward and back; and a socket with no client id is
 refused, as the Reference example's is.
 
+Then the remote recording, when the server offers it (compose, minikube): the
+same page over the Remote Data Client, whose stub serves a minute (1200 frames)
+where the image's recording holds 60. A bare `docker run` offers no remote
+source, and that is checked too.
+
 Then the shared live stream: two clients switch their source to live and both
 see the same live frames, with the module's result, from one pipeline that
 counts them both as watching.
@@ -262,6 +267,32 @@ def choose(base_url: str, client_id: str, source: str) -> None:
     )
 
 
+async def remote_flow(base_url: str, ws_url: str) -> None:
+    client_id = str(random.randrange(10**9, 10**10))
+    print(f"\n  Remote recording flow (client_id={client_id})")
+    async with connect(f"{ws_url}{WS_PATH}?client_id={client_id}") as ws:
+        first = json.loads(await asyncio.wait_for(ws.recv(), RECV_TIMEOUT))
+        if "remote" not in first.get("sources_available", []):
+            check("no remote data service configured: the source is not offered", True)
+            return
+        choose(base_url, client_id, "remote")
+        status, body = post(base_url, f"{API_PATH}/playback/forward", client_id)
+        state: dict = {}
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + STATS_TIMEOUT
+        while loop.time() < deadline:
+            state = json.loads(await asyncio.wait_for(ws.recv(), RECV_TIMEOUT))
+            if state.get("source") == "remote" and state.get("frame"):
+                break
+            if state.get("source") == "remote" and status != 200:
+                status, body = post(base_url, f"{API_PATH}/playback/forward", client_id)
+        check(
+            "the remote recording is served through the remote data service (1200 frames, not 60)",
+            state.get("source") == "remote" and state.get("frame_count") == 1200 and state.get("frame"),
+            f"got {json.dumps(state)[:300]}",
+        )
+
+
 async def live_flow(base_url: str, ws_url: str) -> None:
     a, b = (str(random.randrange(10**9, 10**10)) for _ in range(2))
     print(f"\n  Shared live flow (client_ids={a}, {b})")
@@ -311,6 +342,10 @@ async def main(argv: list[str]) -> int:
         await stream_flow(base_url, ws_url)
     except Exception as error:
         bad(f"streamer flow could not run: {type(error).__name__}: {error}")
+    try:
+        await remote_flow(base_url, ws_url)
+    except Exception as error:
+        bad(f"remote recording flow could not run: {type(error).__name__}: {error}")
     try:
         await live_flow(base_url, ws_url)
     except Exception as error:
