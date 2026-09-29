@@ -12,6 +12,7 @@ from .config import DATA_CLIENTS_VARIABLE, gateway_from_env
 from .data_client_model import Capability, DataClient, ModelSelector, MRIDFilter
 from .data_gateway import DataGateway, ProduceError
 from .planner import DataGapError, GapPolicy, Segment, SegmentPlanner
+from .player import Player
 from .stream import DataStream
 from .time_range import Coverage, TimeRange
 
@@ -28,6 +29,7 @@ __all__ = [
     "MRIDFilter",
     "MissingSettingError",
     "ModelSelector",
+    "Player",
     "ProduceError",
     "Segment",
     "SegmentPlanner",
