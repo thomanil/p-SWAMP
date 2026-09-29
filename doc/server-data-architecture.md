@@ -305,3 +305,39 @@ never asks a provider for what it did not declare.
 `clients/in_memory.py`. The example is written outside the core, as a
 deployment's would be: `pmu_test_streamer/sample_client.py` (the committed
 recording, history only).
+
+## The gateway — `pswamp_core.datagateway.DataGateway`
+
+*What.* The **gateway** holds a pipeline's providers: **at most one for
+history and one for live** for a class of data, told apart by their declared
+capabilities. A second provider for the same role is refused when the gateway
+is built. Two reads, and the caller always says which:
+
+```python
+gateway.consume(PmuFrame, start=t0, end=t1)      # history: exactly [t0, t1)
+gateway.consume(PmuFrame, start=t0)              # history: from t0 to the end of what it holds
+gateway.tail(PmuFrame)                           # live: from now, open-ended
+```
+
+"Jump to a time" and "query a chunk" are the same call. Each returns a
+`DataStream`: one provider's iterator, read only as fast as it is pulled.
+
+*Why.* The source a person looks at is always chosen explicitly (a recording,
+or live), so a stream never needs more than one provider, and nothing hands a
+replay over to live on its own.
+
+**Which providers make up a gateway is chosen from the environment**, never in code:
+
+```
+PSWAMP_DATA_CLIENTS="sample:pmu_test_streamer.sample_client:SampleRecordingClient,live:pmu_test_streamer.live_client:LiveSyntheticClient"
+LIVE_PATH=/etc/p-swamp/pmu/other.txt       # each client reads its own {NAME}_{SETTING} block
+```
+
+**A provider proves itself** by inheriting `DataClientConformance` in a test
+and supplying three fixtures (the client, its model, the records it holds).
+The streamer's two providers do, in `app/server-python/tests/test_pmu_test_streamer.py`.
+
+*Where.* `core/src/pswamp_core/datagateway/` (`data_gateway.py`,
+`stream.py`, `config.py`, `conformance.py`). The second example provider is
+`pmu_test_streamer/live_client.py`: the recording's rows re-stamped on the
+wall clock at 20 Hz, live only.

@@ -5,14 +5,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from pmu_test_streamer.live_client import LIVE_STREAM_ID, LiveSyntheticClient
 from pmu_test_streamer.sample_client import EPOCH, STREAM_ID, SampleRecordingClient, load_sample
 from pmu_test_streamer.stats_module import FrameStatsModule, FrameStatsResult
-from pswamp_core.datagateway import Capability
+from pswamp_core.datagateway import Capability, DataGateway
+from pswamp_core.datagateway.conformance import DataClientConformance
 from pswamp_core.messages import PmuFrame, PmuHeader
+from pswamp_core.util.time import utcnow
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -84,3 +89,59 @@ def test_sample_client_reads_lazily_and_from_env(monkeypatch, tmp_path):
 
     assert (client.name, len(client.frames)) == ("mine", 2)
     assert client.capabilities == Capability.HISTORY_CONSUME
+
+
+class TestSampleRecordingClientConformance(DataClientConformance):
+    """A provider written outside the core, proving itself against the contract."""
+
+    @pytest.fixture
+    def client_under_test(self):
+        return SampleRecordingClient()
+
+    @pytest.fixture
+    def conformance_model(self):
+        return PmuFrame
+
+    @pytest.fixture
+    def conformance_records(self, client_under_test):
+        return list(client_under_test.frames)
+
+
+# --- the live provider --------------------------------------------------------------
+
+
+class TestLiveSyntheticClientConformance(DataClientConformance):
+    """The tail-only provider: the history cases skip, the live cases run."""
+
+    @pytest.fixture
+    def client_under_test(self):
+        return LiveSyntheticClient()
+
+    @pytest.fixture
+    def conformance_model(self):
+        return PmuFrame
+
+    @pytest.fixture
+    def conformance_records(self):
+        return []
+
+
+async def test_live_client_ticks_at_the_recording_rate_with_its_own_identity():
+    client = LiveSyntheticClient()
+    assert client.capabilities == Capability.LIVE_CONSUME
+    got: list[PmuFrame] = []
+    async with DataGateway([client]) as gateway:  # opening it starts the ticker
+        start = utcnow()
+        async with gateway.tail(PmuFrame) as stream:
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(0.35):
+                    async for frame in stream:
+                        got.append(frame)
+    assert not client.ticking
+
+    assert len(got) >= 3  # ~7 at 20 Hz; a lower bound, since runners jitter
+    assert all(f.mRID == LIVE_STREAM_ID for f in got)
+    assert all(f.header == load_sample().header for f in got)  # the live source describes itself
+    stamps = [f.timestamp for f in got]
+    assert all(start <= t < start + timedelta(seconds=0.5) for t in stamps)
+    assert stamps == sorted(stamps)
