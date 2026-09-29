@@ -389,3 +389,52 @@ in place of `FrameStatsModule()` and the module runs in a worker instead.
 built for its key, so providers stay single-consumer and a slow key never
 stalls another. `pipeline.latest` keeps the newest message of each class, which is
 what a freshly connected page renders from.
+
+## Commands — `pswamp_core.command_routing`
+
+*What.* A command is a typed message going *up*, and **its class is its
+address**. A **receiver** (the player, or any module) declares the command
+classes it takes, and the pipeline routes each command to the one receiver
+that declared its class.
+
+```
+POST ─▶ pipeline.dispatch(cmd) ─▶ who declared type(cmd)? ─▶ receiver.validate(cmd) ─▶ bus.publish(cmd)
+                                   none → NoReceiver            CommandRefused → 409
+bus ─▶ that receiver's inbox ─▶ validate again ─▶ await receiver.handle(cmd)
+                                  refused/failed → ErrorEvent(request_id) on the bus
+```
+
+| Receiver | Declares | Where the class lives |
+|---|---|---|
+| the player | `PlayerCommand` (every subclass: play, pause, step, seek, speed, replay, live, refresh) | `core/.../messages/commands.py` |
+| `FrameStatsModule` | `ResetStatsCommand` | beside the module, `stats_module.py` |
+
+A module that takes commands lists them and implements `handle` (and
+`validate` if it can refuse one):
+
+```python
+class ResetStatsCommand(Command): ...                   # topic reset.stats.command
+
+class FrameStatsModule(Module):
+    commands = (ResetStatsCommand,)
+    def validate(self, command): ...                    # raise CommandRefused → the POST's 409
+    async def handle(self, command) -> FrameStats | None:
+        ...                                             # published as a FrameStatsResult with request_id
+```
+
+Anything holding the pipeline can send one: `pipeline.dispatch(ResetStatsCommand())`.
+That covers a POST, a test, or another piece of the server. Two receivers may
+not declare the same class: the pipeline refuses to be built.
+
+*Why.* The mental model is one rule: **declare the class, receive the
+command.** No verb strings, no broadcast filtering, no per-app refusal
+checks. The check at dispatch gives the caller an honest "no" before anything
+is published. What the inbox still refuses (the state moved in between)
+arrives as an `ErrorEvent` carrying the command's `request_id`. **A command
+never answers with state**: its effect arrives as the next `PlayerStatus` or
+result on the bus.
+
+**Across a worker.** A module in a worker is still a receiver. Its
+`RemoteModule` accepts at dispatch (the state is in the worker), publishes the
+command on its class's topic under the key, and the worker's inbox applies it.
+The answer comes back as a result, and a refusal as an `ErrorEvent`.
