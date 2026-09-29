@@ -230,3 +230,52 @@ thread or process pool, or it stalls every pipeline in its process.
 
 *Where.* `core/src/pswamp_core/modules.py`. The example is
 `app/server-python/src/pmu_test_streamer/stats_module.py`.
+
+## Running a module as its own service — `pswamp_core.remote`
+
+*What.* The module's slot in the pipeline is taken by a stand-in,
+`RemoteModule`, which carries the module's input class out to a broker topic
+and its result class back. A worker process runs the real module through
+`ModuleHost`, one instance per pipeline key. Nothing in the module changes,
+and nothing above the bus notices.
+
+```mermaid
+flowchart LR
+    subgraph server["server process: one pipeline per key"]
+        bus["bus"] -- PmuFrame --> rm["RemoteModule(FrameStatsModule, key)"]
+        rm -- FrameStatsResult --> bus
+    end
+    subgraph kafka["Kafka"]
+        t1[["pmu.frame"]]
+        t2[["frame.stats.result"]]
+    end
+    subgraph worker["stats-worker process"]
+        host["ModuleHost(FrameStatsModule)<br/>one module + bus per key"]
+    end
+    rm -- "key" --> t1 --> host --> t2 -- "key" --> rm
+```
+
+One variable, which both sides read, is the whole switch:
+
+```
+PMU_TEST_STREAMER_MODULE_TRANSPORT=kafka:pswamp_core.transport.kafka:KafkaTransport
+KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+```
+
+When it is unset, the module runs in-process.
+
+**Deploying.** A worker is the server's image with a different command:
+`python -m pmu_test_streamer.worker`, whose whole body is
+`main(FrameStatsModule, "PMU_TEST_STREAMER_MODULE_TRANSPORT")`. Compose runs
+it as `stats-worker` beside `kafka`, and `k8s/p-swamp-local.yaml` runs it as
+the `p-swamp-stats-worker` Deployment beside `p-swamp-kafka`. Give it no port
+and one replica: a host owns every key it sees.
+
+*Why.* A heavy module gets its own process (its own CPU limit, its own pod)
+and cannot stall the server's event loop. The input is all a worker needs,
+because a frame carries its layout: a worker that starts late, or a key that
+was evicted and rebuilt, is primed by the first frame it sees. An `ErrorEvent`
+raised in the worker comes back under the key to the pipeline's bus.
+
+*Where.* `core/src/pswamp_core/remote.py`, `core/tests/test_remote.py`, and
+`app/server-python/src/pmu_test_streamer/worker.py`.
