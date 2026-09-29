@@ -25,6 +25,12 @@ dependencies = [
 kafka = ["aiokafka>=0.14,<1"]
 remote-data = ["httpx>=0.28,<1"]
 
+# What core/examples/ needs beyond the library (the remote data stub is a small
+# FastAPI service). A group, not an extra: nothing that installs pswamp-core
+# should get it. The web backend's environment already has both.
+[dependency-groups]
+examples = ["fastapi>=0.141", "uvicorn>=0.52"]
+
 [build-system]
 requires = ["uv_build"]
 build-backend = "uv_build"
@@ -37,5 +43,6 @@ module-name = "pswamp_core"
 
 # So `pytest core/tests` also works when pointed at directly.
 [tool.pytest.ini_options]
+pythonpath = ["examples"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
