@@ -16,7 +16,8 @@ dependencies = [
     "fastapi>=0.141.1,<0.142",
     "uvicorn[standard]>=0.52.4,<0.53",
     "p-swamp",
-    "pswamp-core",
+    # [kafka]: a module can run as its own service over Kafka.
+    "pswamp-core[kafka]",
 ]
 
 # p-swamp is the desktop package at the repo root (root pyproject.toml, root

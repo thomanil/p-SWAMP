@@ -143,3 +143,40 @@ Overflow is chosen per subscription: `DROP_OLDEST` for a live stream, `GROW`
 for commands. So a slow browser tab drops its
 own frames and never stalls the analysis. `Latest` keeps the newest message
 of each class, which is what a freshly connected socket renders from.
+
+## Topics between processes: the transport — `pswamp_core.transport`
+
+The transport (`Transport`) is publish/subscribe *between* processes. It
+comes into play only when a module runs as its own service. There is one
+topic per message class, and the pipeline key rides as the record key, never
+as a message field:
+
+```python
+await transport.publish(frame, key="42")                  # topic pmu.frame, key "42"
+with transport.subscribe(FrameStatsResult, key="42") as results: ...
+with transport.subscribe(PmuFrame) as frames: ...         # every key: a worker's view
+```
+
+| Implementation | Where | Used by |
+|---|---|---|
+| `InMemoryTransport` | `transport/__init__.py` | tests: one instance shared by both sides *is* the broker |
+| `KafkaTransport` | `transport/kafka.py`, the `pswamp-core[kafka]` extra | compose and k8s |
+
+*Why a transport, not the broker as the bus.* The broker carries only what
+crosses a process boundary. Everything else stays a method call on the event
+loop. Swapping Kafka for NATS means one new `Transport` subclass that implements
+`publish` and `_feed` (one broker consumer per class). Nothing above it
+changes. `InMemoryTransport` is the second implementation that keeps the
+contract honest.
+
+A transport is chosen from the environment, like everything plugged in by name
+(`pswamp_core.settings`):
+
+```
+PMU_TEST_STREAMER_MODULE_TRANSPORT=kafka:pswamp_core.transport.kafka:KafkaTransport
+KAFKA_BOOTSTRAP_SERVERS=kafka:9092        # the transport's own {NAME}_{SETTING} block
+```
+
+Kafka topics are created with about a minute's retention (`LIVE_TOPIC_CONFIGS`).
+Every topic is a live hop that nobody reads back, and the broker's defaults let
+a fast replay fill a disk.

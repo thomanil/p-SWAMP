@@ -18,6 +18,11 @@ dependencies = [
     "pydantic>=2.12",
 ]
 
+# Optional, imported lazily, so the core stays pydantic-only unless a host asks:
+# [kafka] is aiokafka, for pswamp_core.transport.kafka.
+[project.optional-dependencies]
+kafka = ["aiokafka>=0.14,<1"]
+
 [build-system]
 requires = ["uv_build"]
 build-backend = "uv_build"
