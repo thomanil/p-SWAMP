@@ -357,3 +357,29 @@ open**: a replay is paced and seekable, live is delivered as it arrives.
 `PlayerStatus` says which controls apply, so a page renders no dead buttons. A
 provider that fails mid-stream ends the stream paused, with
 `PlayerStatus.error` set and an `ErrorEvent` on the bus.
+
+## Pipelines — `pswamp_core.pipeline`
+
+*What.* A `Pipeline` is one gateway, bus, player and module list, built fresh
+per **key**. A `PipelineRegistry` builds one on first `acquire(key)`, keeps it
+across reconnects, evicts it when idle or at the cap, and refuses with
+`CapacityError` when nothing can be reclaimed.
+
+```python
+def build_pipeline(key: str) -> Pipeline:
+    gateway = gateway_from_env(DATA_CLIENTS)
+    bus = InProcessBus()
+    player = Player(gateway, bus, model=PmuFrame, loop=True)
+    return Pipeline(key, gateway, bus, player, [FrameStatsModule()])   # the module list
+
+REGISTRY = PipelineRegistry(build_pipeline, max_pipelines=8, idle_seconds=300)
+```
+
+**Defining a pipeline is writing that factory.** The module list is the one
+place modules are wired in. Put `RemoteModule(FrameStatsModule, transport, key)`
+in place of `FrameStatsModule()` and the module runs in a worker instead.
+
+*Why.* The key is the unit of isolation. Everything inside a pipeline is
+built for its key, so providers stay single-consumer and a slow key never
+stalls another. `pipeline.latest` keeps the newest message of each class, which is
+what a freshly connected page renders from.

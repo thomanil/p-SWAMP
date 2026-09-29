@@ -13,10 +13,20 @@ import pytest
 from pmu_test_streamer.live_client import LIVE_STREAM_ID, LiveSyntheticClient
 from pmu_test_streamer.sample_client import EPOCH, STREAM_ID, SampleRecordingClient, load_sample
 from pmu_test_streamer.stats_module import FrameStatsModule, FrameStatsResult
-from pswamp_core.datagateway import Capability, DataGateway
+from pswamp_core.bus import InProcessBus, Overflow
+from pswamp_core.datagateway import Capability, DataGateway, Player, gateway_from_env
 from pswamp_core.datagateway.conformance import DataClientConformance
 from pswamp_core.messages import PmuFrame, PmuHeader
+from pswamp_core.pipeline import Pipeline
+from pswamp_core.remote import ModuleHost, RemoteModule
+from pswamp_core.transport import InMemoryTransport
 from pswamp_core.util.time import utcnow
+
+#: The streamer's two providers, as a ``PSWAMP_DATA_CLIENTS`` spec.
+DATA_CLIENTS = (
+    "sample:pmu_test_streamer.sample_client:SampleRecordingClient,"
+    "live:pmu_test_streamer.live_client:LiveSyntheticClient"
+)
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -148,3 +158,62 @@ async def test_live_client_ticks_at_the_recording_rate_with_its_own_identity():
 
 async def _collect(stream) -> list[PmuFrame]:
     return [frame async for frame in stream]
+
+
+# --- a pipeline over the streamer's providers and module ------------------------------
+
+
+def streamer_pipeline(key: str, modules) -> Pipeline:
+    gateway = gateway_from_env(DATA_CLIENTS)
+    bus = InProcessBus()
+    player = Player(gateway, bus, model=PmuFrame, loop=True, paced=False)
+    return Pipeline(key, gateway, bus, player, modules)
+
+
+async def test_pipeline_streams_frames_and_stats_onto_the_bus():
+    pipeline = streamer_pipeline("42", [FrameStatsModule()])
+    assert list(pipeline.gateway.clients) == ["sample", "live"]
+    await pipeline.start()
+    try:
+        status = pipeline.player.status()
+        assert status.mode == "replay" and status.can_seek and status.can_go_live
+        with pipeline.bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames, pipeline.bus.subscribe(
+            FrameStatsResult, overflow=Overflow.GROW
+        ) as results:
+            pipeline.player.resume()
+            got = [await asyncio.wait_for(frames.get(), 2) for _ in range(3)]
+            stats = await asyncio.wait_for(results.get(), 2)
+        assert [f.timestamp for f in got] == [f.timestamp for f in load_sample().frames[:3]]
+        assert stats.app.name == "frame-stats" and stats.result.n_stations == 5
+        assert pipeline.latest.get(FrameStatsResult) is not None
+    finally:
+        await pipeline.stop()
+
+
+async def test_the_same_pipeline_with_the_module_in_a_worker():
+    """The module's stand-in in the pipeline, the worker's host beside it, one
+    in-memory transport between: the same results land on the same bus -- and
+    keep coming when the replay loops and its timestamps go backwards."""
+    broker = InMemoryTransport()
+    host = ModuleHost(FrameStatsModule, broker)
+    host_task = asyncio.create_task(host.serve())
+    remote = RemoteModule(FrameStatsModule, broker, "42")
+    pipeline = streamer_pipeline("42", [remote])
+    await pipeline.start()
+    try:
+        with pipeline.bus.subscribe(FrameStatsResult, overflow=Overflow.GROW) as results:
+            pipeline.player.resume()
+            got = [await asyncio.wait_for(results.get(), 2) for _ in range(3)]
+            assert got[0].app.name == "frame-stats" and got[0].result.n_stations == 5
+            assert host.keys() == ["42"]
+            previous, wrapped = got[-1].timestamp, False
+            deadline = asyncio.get_running_loop().time() + 5
+            while not wrapped and asyncio.get_running_loop().time() < deadline:
+                result = await asyncio.wait_for(results.get(), 2)
+                wrapped, previous = result.timestamp < previous, result.timestamp
+            assert wrapped
+    finally:
+        await pipeline.stop()
+        host_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await host_task
