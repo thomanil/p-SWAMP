@@ -64,8 +64,16 @@ jobs:
           cache-dependency-glob: app/server-python/uv.lock
       - run: uv python install 3.11
 
-      # Hermetic: HubRegistry is driven with a stubbed Hub, nothing binds a port.
+      # The Kafka transport's round trip needs a broker: compose's, reached on
+      # its EXTERNAL listener. Only the broker starts, not the app.
+      - name: Start the Kafka broker
+        run: docker compose up -d --wait kafka
+
+      # Hermetic, apart from that round trip: HubRegistry is driven with a
+      # stubbed Hub, and the core's pipelines run over in-memory transports.
       - name: Server unit tests
+        env:
+          KAFKA_TEST_BOOTSTRAP_SERVERS: 127.0.0.1:19092
         run: ./scripts/run-python-server-tests.sh
 
       # TODO Re-enable once the desktop suite (repo-root tests/) collects again:
@@ -75,6 +83,10 @@ jobs:
       # must be skip-guarded first.
       # - name: Core (desktop) unit tests
       #   run: ./scripts/run-core-python-tests.sh
+
+      - name: Stop the Kafka broker
+        if: always()
+        run: docker compose down
 
   # error_check.sh never starts the app; this job only starts it. It runs the
   # image as a cluster would (the Dockerfile's own CMD, no compose dev overrides)

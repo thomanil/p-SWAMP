@@ -74,7 +74,12 @@ kubectl apply -f k8s/p-swamp-local.yaml
 # `kubectl apply` won't restart pods if the manifest text is unchanged, even
 # though we just rebuilt :latest. Force a new pod so the fresh image is used.
 echo "Rolling out..."
-kubectl rollout restart deployment/p-swamp
+# The broker first: it is pulled rather than built (hence the longer timeout on
+# a first run), and never restarted here -- it was not rebuilt, and a restart
+# would empty its topics for nothing. Then the pods built from the fresh image.
+kubectl rollout status deployment/p-swamp-kafka --timeout=300s
+kubectl rollout restart deployment/p-swamp deployment/p-swamp-stats-worker
+kubectl rollout status deployment/p-swamp-stats-worker --timeout=120s
 kubectl rollout status deployment/p-swamp --timeout=120s
 
 # --- Reach the Service ------------------------------------------------------
