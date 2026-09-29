@@ -279,3 +279,29 @@ raised in the worker comes back under the key to the pipeline's bus.
 
 *Where.* `core/src/pswamp_core/remote.py`, `core/tests/test_remote.py`, and
 `app/server-python/src/pmu_test_streamer/worker.py`.
+
+## Providers — `pswamp_core.datagateway.DataClient`
+
+*What.* A **provider** (`DataClient`) is a data source. It declares what it
+can do and implements `coverage` (what time window it holds now), `consume`
+(stream a window) and `produce` (store, if it can):
+
+```python
+class SampleRecordingClient(DataClient):
+    capabilities = Capability.HISTORY_CONSUME        # a file cannot tail live data
+    async def coverage(self, model, mRID=None) -> Coverage | None: ...
+    async def consume(self, model, time_range, mRID=None): ...   # an async iterator
+    async def produce(self, data): raise TypeError("read-only")
+```
+
+A provider is configured from the environment: it declares `env_settings`, and
+`from_env(name)` reads its own `{NAME}_{SETTING}` block (`SAMPLE_PATH=...`).
+
+*Why.* History lives with the provider: the repo persists nothing. A
+deployment's archive or feed is one more `DataClient` in the image. The core
+never asks a provider for what it did not declare.
+
+*Where.* `core/src/pswamp_core/datagateway/data_client_model.py`; the reference
+`clients/in_memory.py`. The example is written outside the core, as a
+deployment's would be: `pmu_test_streamer/sample_client.py` (the committed
+recording, history only).
