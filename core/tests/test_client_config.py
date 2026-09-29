@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 import pytest
-from support import EnvTestClient
+from support import EnvTestClient, Measurement
 
-from pswamp_core.datagateway import Capability, MissingSettingError
+from pswamp_core.datagateway import Capability, MissingSettingError, gateway_from_env
 from pswamp_core.datagateway.clients import InMemoryClient
+from pswamp_core.datagateway.config import parse_client_specs
 from pswamp_core.settings import env_key
 
 
@@ -85,3 +86,50 @@ def test_show_config_on_a_client_without_settings(capsys):
 
 
 # --- composing a gateway from the environment ---------------------------------
+
+
+def test_parse_client_specs():
+    assert parse_client_specs("a:mod.path:Cls, b:other:Other") == [
+        ("a", "mod.path", "Cls"),
+        ("b", "other", "Other"),
+    ]
+    with pytest.raises(MissingSettingError):
+        parse_client_specs("a:mod.path")
+    with pytest.raises(MissingSettingError):
+        parse_client_specs("")
+
+
+async def test_gateway_from_env_builds_the_named_clients(monkeypatch):
+    monkeypatch.setenv("PSWAMP_DATA_CLIENTS", "one:support:EnvTestClient,two:support:EnvTestClient")
+    monkeypatch.setenv("ONE_LABEL", "first")
+    monkeypatch.setenv("TWO_LABEL", "second")
+    monkeypatch.setenv("TWO_PRIORITY", "5")
+
+    gateway = gateway_from_env()
+
+    assert set(gateway.clients) == {"one", "two"}
+    assert gateway.clients["two"].priority == 5
+    assert [m.mRID async for m in gateway.consume(Measurement)] == ["m0", "m1", "m2"]
+
+
+def test_gateway_from_env_falls_back_to_the_default(monkeypatch):
+    monkeypatch.delenv("PSWAMP_DATA_CLIENTS", raising=False)
+    monkeypatch.setenv("SAMPLE_LABEL", "default")
+
+    gateway = gateway_from_env("sample:support:EnvTestClient")
+
+    assert list(gateway.clients) == ["sample"]
+
+
+def test_gateway_from_env_reports_a_bad_class(monkeypatch):
+    monkeypatch.setenv("PSWAMP_DATA_CLIENTS", "x:support:Measurement")
+    with pytest.raises(MissingSettingError, match="not a DataClient"):
+        gateway_from_env()
+
+    monkeypatch.setenv("PSWAMP_DATA_CLIENTS", "x:no.such.module:Thing")
+    with pytest.raises(MissingSettingError, match="cannot import"):
+        gateway_from_env()
+
+    monkeypatch.delenv("PSWAMP_DATA_CLIENTS", raising=False)
+    with pytest.raises(MissingSettingError, match="unset"):
+        gateway_from_env()

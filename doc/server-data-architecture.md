@@ -305,3 +305,33 @@ never asks a provider for what it did not declare.
 `clients/in_memory.py`. The example is written outside the core, as a
 deployment's would be: `pmu_test_streamer/sample_client.py` (the committed
 recording, history only).
+
+## The gateway — `pswamp_core.datagateway.DataGateway`
+
+*What.* The **gateway** stitches providers into one time-addressed stream.
+"Jump to a time" and "query a chunk" are the same call:
+
+```python
+gateway.consume(PmuFrame, start=t0, end=None)    # from t0 onwards (live after history, if offered)
+gateway.consume(PmuFrame, start=t0, end=t1)      # exactly [t0, t1)
+```
+
+Behind it, a `SegmentPlanner` picks, one segment at a time, the client that
+covers the cursor, honouring declared capabilities. A `DataStream` joins the
+segments, and a watermark drops duplicates where sources overlap.
+
+**Which providers make up a gateway is chosen from the environment**, never in code:
+
+```
+PSWAMP_DATA_CLIENTS="sample:pmu_test_streamer.sample_client:SampleRecordingClient,live:pmu_test_streamer.live_client:LiveSyntheticClient"
+LIVE_PATH=/etc/p-swamp/pmu/other.txt       # each client reads its own {NAME}_{SETTING} block
+```
+
+**A provider proves itself** by inheriting `DataClientConformance` in a test
+and supplying three fixtures (the client, its model, the records it holds).
+The streamer's two providers do, in `app/server-python/tests/test_pmu_test_streamer.py`.
+
+*Where.* `core/src/pswamp_core/datagateway/` (`data_gateway.py`, `planner.py`,
+`stream.py`, `config.py`, `conformance.py`). The second example provider is
+`pmu_test_streamer/live_client.py`: the recording's rows re-stamped on the
+wall clock at 20 Hz, live only.
