@@ -83,3 +83,40 @@ flowchart TB
 Data flows down, and commands flow up. Every arrow carries a message. Nothing
 above the bus knows what is below it, which is why a provider can be swapped
 and a module can be moved out of the process without the page noticing.
+
+## Messages — `pswamp_core.messages`
+
+*What.* Every message is a `DataModel`: a pydantic model with a pinned schema
+`version`, an optional `mRID` identity, a UTC `timestamp`, and a **topic
+derived from the class name**.
+
+```python
+class LineTrip(DataModel):            # topic: "line.trip"
+    version: Literal["v1"] = "v1"
+    timestamp: datetime
+    line: str
+
+LineTrip.model_validate_json(text)    # the whole codec; a "v2" payload fails here
+```
+
+| Kind | Classes | File |
+|---|---|---|
+| measurement | `PmuFrame`, carrying its `PmuHeader` | `pmu.py` |
+| command (up) | `Command`, `PlayerCommand` and its subclasses (`PlayCommand`, `SeekCommand`, `GoLiveCommand`, …) | `commands.py` |
+| result (down) | `ResultEnvelope[T]`: what every module emits | `results.py` |
+| control (down) | `PlayerStatus`, `StreamChanged` | `control.py` |
+| error (down) | `ErrorEvent`: something operational failed | `errors.py` |
+
+*Why.* No pickle and no numpy on the wire: a message can be logged,
+validated on receipt, and published into the browser contract as is. The set
+of `DataModel` subclasses *is* the topic catalogue.
+
+**A frame carries its layout.** `PmuFrame.header` is repeated in every frame
+(~1.2x on the wire after a broker's compression). In return, any single frame
+is enough to work from: a module in another process is primed by its first
+frame, and a changed layout is just the next frame.
+
+**A command's class is its address.** There are no verb strings: `SeekCommand`
+*is* the seek, and its fields are its validated arguments. A module's own
+commands and result classes live beside the module; the player's live here,
+because the player is core.
