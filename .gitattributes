@@ -1,0 +1,5 @@
+# Generated files: GitHub collapses these in a diff, so a reviewer skips them.
+doc/api/openapi.json linguist-generated=true
+app/client-web/src/api/schema.ts linguist-generated=true
+**/uv.lock linguist-generated=true
+**/package-lock.json linguist-generated=true
