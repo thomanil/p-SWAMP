@@ -593,3 +593,32 @@ against the contract over plain HTTP, and CI runs it against the stub. Without
 *Where.* `core/src/pswamp_core/datagateway/clients/remote_data.py` (the
 `pswamp-core[remote-data]` extra), `messages/remote_data.py`, `core/examples/`,
 `core/tests/test_remote_data_*.py`.
+
+## Running and testing it
+
+| Where | How | What runs |
+|---|---|---|
+| compose | `./scripts/start-local-hotloaded-pswamp-server.sh` | server, `stats-worker`, `kafka`, `remote-data-stub` |
+| minikube | `./scripts/start-pswamp-in-local-minikube-cluster.sh` | the same four as Deployments, plus the live feed's ConfigMap |
+| bare image (CI) | `docker run p-swamp:latest` | the server alone: module in-process; Local recording and Live, no Remote |
+
+| Check | Covers |
+|---|---|
+| `./scripts/run-python-server-tests.sh` | the core (`core/tests/`) and the streamer's pieces, hermetic: in-memory transport, the stub in-process |
+| `KAFKA_TEST_BOOTSTRAP_SERVERS=127.0.0.1:19092 … -k kafka` | the Kafka transport against compose's broker |
+| `./scripts/check-remote-data-service.sh [URL]` | a remote data service against its HTTP contract |
+| `./scripts/e2e-smoke-test.sh` (`SMOKETEST_URL=` for minikube) | over the wire: play, the module's result, a module command, the CIM reference, the remote recording, the shared live stream |
+| `./scripts/run-playwright-tests.sh` | the same through a browser: the three sources, and two browsers sharing the live stream |
+
+## What is deliberately not here yet
+
+- **Error display.** `ErrorEvent` reaches the edge's log and the page's state,
+  but there is no cross-page error tray, and no reporting when a module falls
+  behind its input (dropped frames, stale input).
+- **Cloud deployment.** Only the local minikube manifest.
+- **A module that reads the gateway itself** (a batch job over a range), and
+  a gateway in a worker.
+- **Several live streams.** The edge runs one (`LIVE_STREAM`). More is a key
+  per stream in the same registry.
+- **Thread-hosted modules.** The desktop package's thread-based applications
+  are not bridged to the bus. `publish_threadsafe` is the seam for that.
