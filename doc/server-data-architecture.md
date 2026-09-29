@@ -179,3 +179,54 @@ KAFKA_BOOTSTRAP_SERVERS=kafka:9092        # the transport's own {NAME}_{SETTING}
 Kafka topics are created with about a minute's retention (`LIVE_TOPIC_CONFIGS`).
 Every topic is a live hop that nobody reads back, and the broker's defaults let
 a fast replay fill a disk.
+
+## Modules — `pswamp_core.modules.Module`
+
+*What.* A module consumes one message class off the bus and publishes another.
+That is the whole contract: its **input** is `input_model`, and its **output**
+is `output_model`, a `ResultEnvelope[Body]` subclass whose name is its topic.
+
+```python
+class FrameStats(BaseModel):                            # the result body
+    mean_frequency_hz: float | None
+    ...
+
+class FrameStatsResult(ResultEnvelope[FrameStats]):     # topic: frame.stats.result
+    version: Literal["v1"] = "v1"
+
+class FrameStatsModule(Module):
+    name = "frame-stats"
+    input_model = PmuFrame
+    output_model = FrameStatsResult
+
+    async def process(self, frame: PmuFrame) -> FrameStats | None:
+        ...                                             # None publishes nothing
+```
+
+`Module.run` subscribes, calls `process`, wraps the body in the envelope
+(timestamp, the module's identity, its `parameters`) and publishes it. A
+`process` that raises publishes an `ErrorEvent` and the module carries on.
+Whoever shows the result subscribes to `FrameStatsResult`, never to the
+module.
+
+*Why.* A contributor's module is the analysis plus two class attributes. It
+imports only `pswamp_core`, and it never learns whether it runs in-process or
+as its own service.
+
+**Adding a module:**
+
+1. Define the result body (pydantic) and its envelope beside the module. If
+   another package must import it, put it in `core/.../messages/` instead.
+2. Subclass `Module` with `name`, `input_model`, `output_model`, `process`.
+   Read the layout off `frame.header`, and re-derive it when `header_id`
+   changes. Don't cache anything the frame does not bring, so the module can
+   later move to a worker unchanged.
+3. Test it by calling `process` directly (see
+   `app/server-python/tests/test_pmu_test_streamer.py`).
+4. Put it in a pipeline's module list (see "Pipelines" below).
+
+`process` runs on the event loop. A CPU-heavy module must hand its work to a
+thread or process pool, or it stalls every pipeline in its process.
+
+*Where.* `core/src/pswamp_core/modules.py`. The example is
+`app/server-python/src/pmu_test_streamer/stats_module.py`.
