@@ -438,3 +438,33 @@ result on the bus.
 `RemoteModule` accepts at dispatch (the state is in the worker), publishes the
 command on its class's topic under the key, and the worker's inbox applies it.
 The answer comes back as a result, and a refusal as an `ErrorEvent`.
+
+## A CIM reference on the frame — `pswamp_core.datagateway.enrich`
+
+*What.* The gateway stamps every PMU frame with an optional
+`PmuHeader.cimReferenceId`, an id for the grid (CIM) data that applies to the
+frame. An **enricher** passed to the gateway runs on every payload a stream
+yields:
+
+```python
+gateway = gateway_from_env(DEFAULT_DATA_CLIENTS, enrichers=[CimReferenceEnricher("n44-stub")])
+```
+
+`CimReferenceEnricher` decides the reference once per layout
+(`reference_for(header)`) and stamps it on every frame with that layout.
+Anything later in the pipeline reads it off the frame: the stats module hands
+it on as `FrameStats.cim_reference_id`. **It is a stub.** `reference_for`
+returns one configured placeholder (`PMU_TEST_STREAMER_CIM_REFERENCE`, or
+`none` to switch it off). A lookup against a CIM model overrides that one
+method (and `open`, to load the model), and further enrichers slot in beside it.
+
+*Why.* The gateway is where every reader's frames pass, so stamping there
+means every reader sees the same reference, decided once, early. As an
+optional field it is additive: providers, player, bus and transport are
+untouched, `header_id` does not change, and the reference travels with the
+frame into a worker with no configuration there. It carries a reference, not
+the grid data, which would cost kilobytes a frame on every hop.
+
+*Where.* `messages/pmu.py` (`PmuHeader.cimReferenceId`), `datagateway/enrich.py`,
+`core/tests/test_enrich.py`. The wiring is in the streamer's pipeline
+definition, `app/server-python/src/pmu_test_streamer/pipeline.py`.

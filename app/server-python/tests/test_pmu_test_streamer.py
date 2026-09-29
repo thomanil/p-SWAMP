@@ -11,12 +11,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from pmu_test_streamer import pipeline as streamer
 from pmu_test_streamer.live_client import LIVE_STREAM_ID, LiveSyntheticClient
 from pmu_test_streamer.sample_client import EPOCH, STREAM_ID, SampleRecordingClient, load_sample
 from pmu_test_streamer.stats_module import FrameStatsModule, FrameStatsResult, ResetStatsCommand
-from pswamp_core.bus import InProcessBus, Overflow
+from pswamp_core.bus import Overflow
 from pswamp_core.command_routing import CommandRefused
-from pswamp_core.datagateway import Capability, DataGateway, Player, gateway_from_env
+from pswamp_core.datagateway import Capability, DataGateway
 from pswamp_core.datagateway.conformance import DataClientConformance
 from pswamp_core.messages import ErrorEvent, PlayCommand, PmuFrame, PmuHeader
 from pswamp_core.pipeline import Pipeline
@@ -24,11 +25,6 @@ from pswamp_core.remote import ModuleHost, RemoteModule
 from pswamp_core.transport import InMemoryTransport
 from pswamp_core.util.time import utcnow
 
-#: The streamer's two providers, as a ``PSWAMP_DATA_CLIENTS`` spec.
-DATA_CLIENTS = (
-    "sample:pmu_test_streamer.sample_client:SampleRecordingClient,"
-    "live:pmu_test_streamer.live_client:LiveSyntheticClient"
-)
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -162,10 +158,10 @@ async def test_live_client_ticks_at_the_recording_rate_with_its_own_identity():
 
 
 def streamer_pipeline(key: str, modules) -> Pipeline:
-    gateway = gateway_from_env(DATA_CLIENTS)
-    bus = InProcessBus()
-    player = Player(gateway, bus, model=PmuFrame, loop=True, paced=False)
-    return Pipeline(key, gateway, bus, player, modules)
+    """The streamer's own pipeline definition, unpaced for the test."""
+    pipeline = streamer.build_pipeline(key, modules)
+    pipeline.player.paced = False
+    return pipeline
 
 
 async def test_pipeline_streams_frames_and_stats_onto_the_bus():
@@ -288,3 +284,30 @@ async def test_a_refusal_in_the_worker_comes_back_with_the_request_id():
         host_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await host_task
+
+
+# --- the CIM reference -------------------------------------------------------------------
+
+
+async def test_the_gateway_stamps_the_cim_reference_and_the_module_hands_it_on(monkeypatch):
+    monkeypatch.delenv(streamer.CIM_REFERENCE_VARIABLE, raising=False)
+    pipeline = streamer_pipeline("42", [FrameStatsModule()])
+    await pipeline.start()
+    try:
+        with pipeline.bus.subscribe(PmuFrame, FrameStatsResult, overflow=Overflow.GROW) as sub:
+            pipeline.player.resume()
+            frame = await asyncio.wait_for(sub.get(), 2)
+            result = await asyncio.wait_for(sub.get(), 2)
+    finally:
+        await pipeline.stop()
+    assert frame.header.cimReferenceId == streamer.DEFAULT_CIM_REFERENCE
+    assert frame.header.header_id == load_sample().header.header_id  # the same layout
+    assert result.result.cim_reference_id == streamer.DEFAULT_CIM_REFERENCE
+
+
+def test_the_cim_reference_is_configured_or_switched_off(monkeypatch):
+    monkeypatch.setenv(streamer.CIM_REFERENCE_VARIABLE, "none")
+    assert streamer.cim_reference_enrichers() == []
+    monkeypatch.setenv(streamer.CIM_REFERENCE_VARIABLE, "grid-2026")
+    (enricher,) = streamer.cim_reference_enrichers()
+    assert enricher.reference == "grid-2026"

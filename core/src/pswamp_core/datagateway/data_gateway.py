@@ -20,6 +20,7 @@ over to live on its own. ``coverage()`` is what the history provider holds.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 
     from ..messages.data_model import DataModel
     from .data_client_model import MRIDFilter
+    from .enrich import Enricher
 
 __all__ = ["DataGateway"]
 
@@ -50,14 +52,23 @@ class DataGateway:
     Args:
         data_clients: The providers. ``None`` or empty disables the gateway,
             which then rejects any read.
+        enrichers: Applied to every payload a stream yields, in order
+            (:mod:`~pswamp_core.datagateway.enrich`: a ``cimReferenceId`` on
+            PMU frames); opened and closed with the clients.
 
     Raises:
         ValueError: When two providers share a name, or declare the same role
             for an overlapping model: a read has exactly one provider.
     """
 
-    def __init__(self, data_clients: list[DataClient] | None = None):
+    def __init__(
+        self,
+        data_clients: list[DataClient] | None = None,
+        *,
+        enrichers: Sequence[Enricher] = (),
+    ):
         self.clients: dict[str, DataClient] = {}
+        self.enrichers: tuple[Enricher, ...] = tuple(enrichers)
         #: The last failure of the history provider's ``coverage`` call, by
         #: client name, cleared when it answers again. ``coverage`` returns
         #: ``None`` rather than raising, so this is where the *reason* survives
@@ -117,7 +128,7 @@ class DataGateway:
             RuntimeError: When no provider serves ``model``'s history.
         """
         client = self._provider(model, Capability.HISTORY_CONSUME)
-        return DataStream(client, model, TimeRange(start, end), mRID)
+        return DataStream(client, model, TimeRange(start, end), mRID, self.enrichers)
 
     def tail(self, model: type[DataModel], mRID: MRIDFilter = None) -> DataStream:
         """
@@ -127,7 +138,7 @@ class DataGateway:
             RuntimeError: When no provider serves ``model`` live.
         """
         client = self._provider(model, Capability.LIVE_CONSUME)
-        return DataStream(client, model, TimeRange(utcnow(), None), mRID, live=True)
+        return DataStream(client, model, TimeRange(utcnow(), None), mRID, self.enrichers, live=True)
 
     async def coverage(self, model: type[DataModel], mRID: MRIDFilter = None) -> Coverage | None:
         """
@@ -154,11 +165,18 @@ class DataGateway:
         return coverage
 
     async def open(self) -> None:
-        """Open every registered client."""
+        """Open every registered client, then the enrichers."""
         await self._lifecycle("open")
+        for enricher in self.enrichers:
+            await enricher.open()
 
     async def close(self) -> None:
-        """Close every registered client."""
+        """Close the enrichers, then every registered client."""
+        for enricher in self.enrichers:
+            try:
+                await enricher.close()
+            except Exception as error:
+                logger.error("enricher %s failed to close: %s", enricher.name, error)
         await self._lifecycle("close")
 
     async def __aenter__(self) -> "DataGateway":

@@ -17,6 +17,10 @@ It is also the example of **a module that takes a command**: it keeps a
 running count and the largest angle spread seen, and ``ResetStatsCommand`` --
 declared here, beside the module, not in the core -- zeroes them. The pipeline
 routes the command here by its class; in a worker it crosses the transport.
+
+And it reads the frame's **CIM reference** (``header.cimReferenceId``, stamped
+by the gateway's enricher) and hands it on in its result: the reference rides
+in the frame, so the module needs no configuration for it, in a worker either.
 """
 
 from __future__ import annotations
@@ -46,6 +50,9 @@ class FrameStats(BaseModel):
     frames_since_reset: int = Field(description="Frames processed since the last reset.")
     peak_angle_spread_deg: float | None = Field(
         description="Largest angle spread seen since the last reset."
+    )
+    cim_reference_id: str | None = Field(
+        description="The grid (CIM) data these stats refer to, as the gateway stamped it on the frame."
     )
 
 
@@ -104,6 +111,7 @@ class FrameStatsModule(Module):
             mean_voltage_kv=sum(v) / len(v) if v else None,
             frames_since_reset=self._frames,
             peak_angle_spread_deg=self._peak_spread,
+            cim_reference_id=frame.header.cimReferenceId,
         )
 
     def validate(self, command: ResetStatsCommand) -> None:

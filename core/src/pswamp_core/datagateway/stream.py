@@ -18,7 +18,7 @@ A stream never goes backwards, which is why "seek" and "loop" are always a
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING
 
 from .time_range import TimeRange
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
     from ..messages.data_model import DataModel
     from .data_client_model import DataClient, MRIDFilter
+    from .enrich import Enricher
 
 __all__ = ["DataStream"]
 
@@ -41,6 +42,8 @@ class DataStream:
         model: Model class being streamed.
         request: The window asked for.
         mRID: Optional identifier filter.
+        enrichers: Applied to every payload, in order, just before it is
+            yielded, so every reader sees the same.
         live: A live read (``tail``): its end stays open. A history read takes
             any open bound from the provider's coverage.
 
@@ -56,6 +59,7 @@ class DataStream:
         model: type[DataModel],
         request: TimeRange,
         mRID: MRIDFilter = None,
+        enrichers: Sequence[Enricher] = (),
         *,
         live: bool = False,
     ):
@@ -64,6 +68,7 @@ class DataStream:
         self._model = model
         self._request = request
         self._mRID = mRID
+        self._enrichers = tuple(enrichers)
 
         self._generator: AsyncIterator[DataModel] | None = None
 
@@ -111,6 +116,8 @@ class DataStream:
         iterator = self.client.consume(self._model, window, self._mRID)
         try:
             async for payload in iterator:
+                for enricher in self._enrichers:
+                    payload = enricher.enrich(payload)
                 yield payload
         finally:
             await _aclose(iterator)
