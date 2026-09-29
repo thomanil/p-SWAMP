@@ -68,7 +68,12 @@ echo "Building p-swamp:latest into minikube..."
 minikube image build -t p-swamp:latest .
 
 # --- Apply manifests and roll out ------------------------------------------
+# The live feed's data file first, as the ConfigMap the server mounts. Built from
+# the file so the example data stays plain text; dry-run-then-apply is idempotent.
 echo "Applying manifests..."
+kubectl create configmap p-swamp-pmu-data \
+  --from-file=k8s/deployment_pmu_data_file_example.txt \
+  --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f k8s/p-swamp-local.yaml
 
 # `kubectl apply` won't restart pods if the manifest text is unchanged, even

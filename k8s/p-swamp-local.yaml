@@ -1,16 +1,17 @@
 # Local minikube deployment of the p-swamp client-server stack (the FastAPI
 # state server, with the web client baked in and served from the same origin).
 #
-# Single replica on purpose: the server holds per-client state in memory and
-# runs one ticker for everyone (see src/pmu_test_streamer/api.py), so it must
-# never be scaled past 1 — a second pod would have its own independent state and
+# Single replica on purpose: the server holds per-client state in memory — one
+# pipeline per connected client (src/pmu_test_streamer/api.py, pswamp_web/hub.py)
+# — so it must never be scaled past 1 — a second pod would have its own independent state and
 # the Service would split clients across them. The strategy is Recreate (not the
 # default RollingUpdate) so the old pod is gone before the new one serves, for
 # the same reason.
 #
 # Nothing is persisted: no DB, no persistent volumes. A rollout resets every
 # client's state, which is the expected behavior for this stateless deployment.
-# The broker's emptyDir is scratch that dies with its pod, on purpose.
+# The volumes are a read-only ConfigMap (configuration, not storage) and the
+# broker's emptyDir (scratch that dies with its pod, on purpose).
 #
 # Beside the server: the PMU test streamer's stats module as its own pod
 # (p-swamp-stats-worker, the same image with a different command) and the Kafka
@@ -18,6 +19,13 @@
 # says so (PMU_TEST_STREAMER_MODULE_TRANSPORT); drop those two variables and it
 # runs in the server pod. See "Running a module as its own service" in
 # doc/server-data-architecture.md.
+#
+# The PMU data sources are configured here rather than baked in: the env block
+# names the two providers and points the live feed at
+# k8s/deployment_pmu_data_file_example.txt, which the start script turns into
+# the ConfigMap mounted below. Every value in that file counts up by one per
+# frame from a round start (100 kV, 0°, 60 Hz), so a page switched to Live
+# shows at a glance that the k8s-configured source is feeding it.
 #
 # Apply with scripts/start-pswamp-in-local-minikube-cluster.sh, which builds the image straight into
 # minikube and forces a rollout. Clients reach this over the NodePort at
@@ -66,6 +74,20 @@ spec:
               value: kafka:pswamp_core.transport.kafka:KafkaTransport
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: p-swamp-kafka:9092
+            # Which providers make up each pipeline's gateway: name:module:Class,
+            # comma-separated. This is the streamer's built-in default, spelled
+            # out; a deployment's own provider is one more package in the image
+            # and one more entry here.
+            - name: PSWAMP_DATA_CLIENTS
+              value: "sample:pmu_test_streamer.sample_client:SampleRecordingClient,live:pmu_test_streamer.live_client:LiveSyntheticClient"
+            # Each provider reads its own {NAME}_{SETTING} block: the live feed
+            # cycles this file's rows instead of the image's sample_data.txt.
+            - name: LIVE_PATH
+              value: /etc/p-swamp/pmu/deployment_pmu_data_file_example.txt
+          volumeMounts:
+            - name: pmu-data
+              mountPath: /etc/p-swamp/pmu
+              readOnly: true
           # Both probes hit /healthz: the broker is reached lazily by one
           # module, so there is nothing readiness could check that liveness
           # doesn't. Readiness still
@@ -111,6 +133,13 @@ spec:
               # This was 128Mi when one pipeline served the whole process, which
               # does not fit even a single client under the new arrangement.
               memory: "768Mi"
+      volumes:
+        # Built by scripts/start-pswamp-in-local-minikube-cluster.sh from
+        # k8s/deployment_pmu_data_file_example.txt. Not inlined here, so the
+        # data stays a plain text file.
+        - name: pmu-data
+          configMap:
+            name: p-swamp-pmu-data
 ---
 apiVersion: v1
 kind: Service

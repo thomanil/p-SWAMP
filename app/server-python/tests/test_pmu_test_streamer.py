@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -158,6 +159,21 @@ async def test_live_client_ticks_at_the_recording_rate_with_its_own_identity():
 
 async def _collect(stream) -> list[PmuFrame]:
     return [frame async for frame in stream]
+
+
+#: The file the local k8s manifest mounts for the live feed (k8s/p-swamp-local.yaml).
+K8S_EXAMPLE_FILE = Path(__file__).resolve().parents[3] / "k8s" / "deployment_pmu_data_file_example.txt"
+
+
+def test_k8s_example_file_feeds_the_live_client(monkeypatch):
+    """The deployment example: the live client re-pointed by ``LIVE_PATH`` at a
+    file outside the image, keeping the recording's layout. Every value counts
+    up by one per frame, the same in every station."""
+    monkeypatch.setenv("LIVE_PATH", str(K8S_EXAMPLE_FILE))
+    recording = LiveSyntheticClient.from_env("live").recording
+    assert recording.header.header_id == load_sample().header.header_id
+    for index, frame in enumerate(recording.frames):
+        assert frame.values[:3] == [100.0 + index, 0.0 + index, 60.0 + index]
 
 
 # --- a pipeline over the streamer's providers and module ------------------------------
