@@ -18,11 +18,8 @@ Run from the server's ``src/`` directory, as the image does.
 
 from pswamp_core.remote import main
 
+from .pipeline import IDLE_EVICT_SECONDS, MODULE_TRANSPORT_VARIABLE
 from .stats_module import FrameStatsModule
 
-#: Names the transport, on both sides: set, the server's pipeline holds a
-#: RemoteModule and this worker runs the module; unset, it runs in-process.
-MODULE_TRANSPORT_VARIABLE = "PMU_TEST_STREAMER_MODULE_TRANSPORT"
-
 if __name__ == "__main__":
-    raise SystemExit(main(FrameStatsModule, MODULE_TRANSPORT_VARIABLE))
+    raise SystemExit(main(FrameStatsModule, MODULE_TRANSPORT_VARIABLE, idle_seconds=IDLE_EVICT_SECONDS))

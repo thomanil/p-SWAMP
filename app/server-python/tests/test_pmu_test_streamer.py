@@ -9,16 +9,19 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi import HTTPException
 
+from pmu_test_streamer import api
 from pmu_test_streamer import pipeline as streamer
 from pmu_test_streamer.live_client import LIVE_STREAM_ID, LiveSyntheticClient
 from pmu_test_streamer.sample_client import EPOCH, STREAM_ID, SampleRecordingClient, load_sample
-from pmu_test_streamer.stats_module import FrameStatsModule, FrameStatsResult, ResetStatsCommand
+from pmu_test_streamer.stats_module import FrameStats, FrameStatsModule, FrameStatsResult, ResetStatsCommand
 from pswamp_core.bus import Overflow
 from pswamp_core.command_routing import CommandRefused
 from pswamp_core.datagateway import Capability, DataGateway
+from pswamp_core.datagateway.clients import InMemoryClient
 from pswamp_core.datagateway.conformance import DataClientConformance
-from pswamp_core.messages import ErrorEvent, PlayCommand, PmuFrame, PmuHeader
+from pswamp_core.messages import ErrorEvent, PlayCommand, PlayerStatus, PmuFrame, PmuHeader
 from pswamp_core.pipeline import Pipeline
 from pswamp_core.remote import ModuleHost, RemoteModule
 from pswamp_core.transport import InMemoryTransport
@@ -314,3 +317,145 @@ def test_the_cim_reference_is_configured_or_switched_off(monkeypatch):
     monkeypatch.setenv(streamer.CIM_REFERENCE_VARIABLE, "grid-2026")
     (enricher,) = streamer.cim_reference_enrichers()
     assert enricher.reference == "grid-2026"
+
+
+# --- the web edge ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def registry(monkeypatch):
+    """The edge's own registry, bound to this loop, with the module in-process."""
+    monkeypatch.delenv("PSWAMP_DATA_CLIENTS", raising=False)
+    monkeypatch.delenv(streamer.MODULE_TRANSPORT_VARIABLE, raising=False)
+    api.REGISTRY.bind(asyncio.get_running_loop())
+    yield api.REGISTRY
+    await api.REGISTRY.stop_all()
+    api.REGISTRY.bind(None)
+
+
+async def _wait_status(subscription, predicate, timeout: float = 2.0) -> PlayerStatus:
+    async def _wait():
+        while True:
+            message = await subscription.get()
+            if isinstance(message, PlayerStatus) and predicate(message):
+                return message
+
+    return await asyncio.wait_for(_wait(), timeout)
+
+
+async def test_posts_become_commands_and_a_refusal_is_a_409(registry):
+    pipeline = await registry.acquire("9")
+    try:
+        with pipeline.bus.subscribe(PlayerStatus, overflow=Overflow.GROW) as statuses:
+            assert (await api.live("9")).applied == "go.live"
+            await _wait_status(statuses, lambda s: s.mode == "live")
+            with pytest.raises(HTTPException) as refused:
+                await api.seek("9", api.SeekBody(offset_s=1.0))
+            assert refused.value.status_code == 409 and "live mode" in refused.value.detail
+            assert (await api.replay("9")).applied == "replay"
+            await _wait_status(statuses, lambda s: s.mode == "replay")
+            assert (await api.play("9")).applied == "play"
+            assert (await api.stop("9")).applied == "pause"
+        with pytest.raises(HTTPException) as refused:
+            await api.reset_stats("9")  # nothing played yet: the module refuses
+        assert refused.value.status_code == 409 and "nothing to reset" in refused.value.detail
+        with pytest.raises(HTTPException) as missing:
+            await api.play("no-such-client")  # a command never builds a pipeline
+        assert missing.value.status_code == 404
+    finally:
+        registry.release("9")
+
+
+async def test_the_socket_message_follows_the_switch_between_recorded_and_live(registry):
+    pipeline = await registry.acquire("43")
+    pipeline.player.paced = False
+    try:
+        message = api.state_message(pipeline)
+        assert message.player.mode == "replay" and message.frame is None
+        with pipeline.bus.subscribe(PmuFrame, FrameStatsResult, overflow=Overflow.GROW) as sub:
+            await api.forward("43")
+            await asyncio.wait_for(sub.get(), 2)
+            await asyncio.wait_for(sub.get(), 2)
+        message = api.state_message(pipeline)
+        assert message.frame.mRID == STREAM_ID and (message.frame_index, message.frame_count) == (0, 60)
+        assert message.stats is not None and message.stats.result.cim_reference_id == streamer.DEFAULT_CIM_REFERENCE
+
+        with pipeline.bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames:
+            await api.live("43")
+            frame = await asyncio.wait_for(frames.get(), 3)
+            while frame.mRID != LIVE_STREAM_ID:
+                frame = await asyncio.wait_for(frames.get(), 3)
+        message = api.state_message(pipeline)
+        assert message.player.mode == "live" and message.frame_index is None
+
+        await api.replay("43")
+        await asyncio.sleep(0.05)
+        message = api.state_message(pipeline)
+        # Nothing has played on the replay yet: no live frame under a "recorded" badge.
+        assert message.player.mode == "replay" and message.frame is None and message.stats is None
+    finally:
+        registry.release("43")
+
+
+class TinyClient(InMemoryClient):
+    """A stand-in provider, to prove the swap is configuration only."""
+
+    def __init__(self, name: str):
+        header = PmuHeader(station=["x"], channel=["f"], measurement=["f"], units=["Hz"], data_rate=1.0)
+        frames = [
+            PmuFrame(timestamp=EPOCH + timedelta(seconds=i), mRID="tiny", header=header, values=[50.0 + i])
+            for i in range(3)
+        ]
+        super().__init__(name, [PmuFrame], frames, capabilities=Capability.HISTORY_CONSUME)
+
+
+async def test_the_provider_is_swapped_by_environment_alone_and_live_is_then_refused(registry, monkeypatch):
+    monkeypatch.setenv("PSWAMP_DATA_CLIENTS", "tiny:test_pmu_test_streamer:TinyClient")
+    pipeline = await registry.acquire("11")
+    try:
+        assert list(pipeline.gateway.clients) == ["tiny"]
+        assert pipeline.player.status().can_go_live is False
+        with pytest.raises(HTTPException) as refused:
+            await api.live("11")
+        assert refused.value.status_code == 409 and "no live source" in refused.value.detail
+    finally:
+        registry.release("11")
+
+
+def test_the_environment_sends_the_module_to_the_worker(monkeypatch):
+    monkeypatch.delenv(streamer.MODULE_TRANSPORT_VARIABLE, raising=False)
+    assert isinstance(streamer.stats_modules("1")[0], FrameStatsModule)
+    monkeypatch.setenv(streamer.MODULE_TRANSPORT_VARIABLE, "mem:pswamp_core.transport:InMemoryTransport")
+    (module,) = streamer.stats_modules("1")
+    assert isinstance(module, RemoteModule)
+    assert (module.name, module.key, module.output_model) == ("frame-stats", "1", FrameStatsResult)
+    assert streamer.stats_modules("2")[0].transport is module.transport  # one per process
+    asyncio.run(streamer.close_module_transport())
+
+
+def test_state_keeps_stats_for_the_frame_or_the_one_just_before_it():
+    """With the module in another process its result lands after the frame;
+    the previous frame's stats are kept for that gap, and no longer."""
+    frames = load_sample().frames
+    identity = FrameStatsModule().identity
+    body = FrameStats(
+        n_stations=5, mean_frequency_hz=50.0, min_frequency_hz=50.0, max_frequency_hz=50.0,
+        angle_spread_deg=0.0, mean_voltage_kv=400.0, frames_since_reset=1,
+        peak_angle_spread_deg=0.0, cim_reference_id=None,
+    )
+
+    def stats_for(frame: PmuFrame) -> FrameStatsResult:
+        return FrameStatsResult(timestamp=frame.timestamp, mRID=frame.mRID, app=identity, result=body)
+
+    status = PlayerStatus(
+        timestamp=utcnow(), mode="replay", cursor=None, speed=1.0, paused=True, loop=True, ended=False,
+        can_seek=True, can_go_live=True, coverage_start=EPOCH, coverage_end=None, frame_interval_s=0.05,
+    )
+    assert api._current(stats_for(frames[3]), frames[3], status)
+    assert api._current(stats_for(frames[2]), frames[3], status)  # one frame behind: kept
+    assert not api._current(stats_for(frames[1]), frames[3], status)  # two behind: gone
+    assert not api._current(stats_for(frames[4]), frames[3], status)  # from the future: gone
+    live = frames[2].model_copy(update={"mRID": LIVE_STREAM_ID})
+    assert not api._current(stats_for(live), frames[3], status)  # another stream: gone
+    answer = stats_for(frames[0]).model_copy(update={"request_id": "r1"})
+    assert api._current(answer, frames[3], status)  # a command's answer: shown

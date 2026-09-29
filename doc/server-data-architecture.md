@@ -462,3 +462,47 @@ the grid data, which would cost kilobytes a frame on every hop.
 *Where.* `messages/pmu.py` (`PmuHeader.cimReferenceId`), `datagateway/enrich.py`,
 `core/tests/test_enrich.py`. The wiring is in the streamer's pipeline
 definition, `app/server-python/src/pmu_test_streamer/pipeline.py`.
+
+## The web edge — an app package
+
+*What.* An app package in the web backend puts a pipeline in front of a
+browser. It is the only piece that knows about HTTP, and it has three parts:
+
+| Part | In `pmu_test_streamer/api.py` |
+|---|---|
+| a `PipelineRegistry` over the pipeline definition, bound in `lifespan` | `REGISTRY = PipelineRegistry(build_client_pipeline, ...)` |
+| one `POST` per operation, each building one typed command | `SeekCommand(client_id=..., offset_s=...)` → `shared.dispatch_command` (404 without a pipeline, 409 when refused) |
+| one socket pushing one state message, built from the bus | `PmuStreamState`: the frame at the cursor, `PlayerStatus`, the module's result, the latest `ErrorEvent` |
+
+```
+browser ── POST /api/pmu-test-streamer/stats/reset?client_id=42 ──▶ ResetStatsCommand ──▶ pipeline.dispatch
+browser ◀── /api/pmu-test-streamer/ws ◀── PmuStreamState ◀── bus (PmuFrame · PlayerStatus · FrameStatsResult · ErrorEvent)
+```
+
+The state message carries the core's own models, so the browser's
+TypeScript types are generated from them (`doc/api/openapi.json`,
+`app/client-web/src/api/schema.ts`). Nothing renames a field on the way. The
+page (`app/client-web/src/pages/pmu-test-streamer/`) renders its controls from
+`PlayerStatus` (`mode`, `can_seek`, `can_go_live`), so it never offers a
+command the player would refuse.
+
+**Adding a module and a page that shows it** (the streamer is the template):
+
+1. `./scripts/generate-new-subapp.sh my-thing "My Thing"` for the two folders
+   and the four registrations. Replace the counter it writes.
+2. **The module**: see "Modules" above. Add its commands, if any, beside it
+   (see "Commands").
+3. **The pipeline definition**: copy `pmu_test_streamer/pipeline.py`. Name the
+   providers in the `gateway_from_env` default, and put your module in the list.
+4. **The edge**: copy `api.py`. Keep the registry, `connected_pipeline` and
+   `serve_stream`, write your own state model (export it as `WS_MESSAGE`) and
+   `state_message`, and add one `POST` per command with
+   `responses=COMMAND_RESPONSES`.
+5. **The page**: a hook over `useServerSocket<Wire['MyThingState']>(...)` with
+   one `postCommand` per operation. Copy `usePmuStreamSocket.ts`.
+6. `./scripts/generate-api-contract.sh`, `./scripts/error_check.sh`,
+   `./scripts/run-python-server-tests.sh`. Test the module by calling
+   `process`, and the pipeline with `player.paced = False`.
+7. **Optional, its own service**: a `worker.py` with `main(MyModule, VAR)`, the
+   `RemoteModule` switch in the pipeline definition (copy `stats_modules`), and
+   the worker in compose and `k8s/` (copy `stats-worker`).

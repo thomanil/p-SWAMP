@@ -279,7 +279,7 @@ __all__ = ["WS_MESSAGE", "ReferenceSubappState", "router"]
 ```
 
 An app that also needs startup/shutdown work exports a `lifespan` beside those —
-`pmu_test_streamer` (a playback ticker) and `pswamp_web` (the pipeline registry) do.
+`pmu_test_streamer` (its core pipeline registry) and `pswamp_web` (the hub registry) do.
 
 `api_contract.py` walks the same `APPS` list `server.py` mounts and collects
 whatever each package exports under that name. An app with no socket
@@ -416,11 +416,9 @@ From there the two families of app part ways.
 - a command handler that mutates one client's state and pushes it, and a socket
   handler that pushes on connect and then only waits.
 
-`pmu_test_streamer/` (the older demo, on its way out) adds the one thing the
-reference app has no need of: a `ticker()` task, started by the package's `lifespan`,
-advancing every playing client each tick and sending each its own `state_message()`.
-Copy that pair when an app must push on its own clock rather than only in response to
-a command.
+`pmu_test_streamer/` is the other shape: a page over a core pipeline, where a
+command is a typed `Command` handed to `shared.dispatch_command` and the state is
+pushed from the pipeline's bus. `doc/server-data-architecture.md` describes it.
 
 A client id may briefly hold several sockets — a reconnect overlapping the dying one
 — which is why it is a set. `send_to_client` iterates a snapshot and drops any socket
@@ -569,7 +567,7 @@ Every handler then does two things: change the right state, and get that change 
 the screen. The state lives in three different places, so there are three
 arrangements.
 
-**1. State in a module dict** — `reference_subapp`, `pmu_test_streamer`, anything the
+**1. State in a module dict** — `reference_subapp`, anything the
 scaffold generates. The simplest case, needing no new plumbing: `SocketRegistry`
 already addresses a client id and runs on this same event loop.
 
