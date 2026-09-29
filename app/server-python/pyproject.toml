@@ -16,6 +16,7 @@ dependencies = [
     "fastapi>=0.141.1,<0.142",
     "uvicorn[standard]>=0.52.4,<0.53",
     "p-swamp",
+    "pswamp-core",
 ]
 
 # p-swamp is the desktop package at the repo root (root pyproject.toml, root
@@ -42,6 +43,12 @@ dependencies = [
 # Dockerfile.
 [tool.uv.sources]
 p-swamp = { path = "../../", editable = true }
+
+# pswamp-core is the shared data architecture at core/ (see
+# doc/server-data-architecture.md). Same one-way rule: this backend imports
+# pswamp_core; nothing under core/ imports app/ or the desktop package. After
+# editing core/pyproject.toml, re-lock with `uv lock --upgrade-package pswamp-core`.
+pswamp-core = { path = "../../core", editable = true }
 
 # Tooling that must never ship in the image — the Dockerfile installs with
 # --no-dev. Declared here so the versions are locked and hash-verified like
@@ -80,6 +87,8 @@ package = false
 # treat the file as config; only a [tool.ruff] section would, and there
 # deliberately isn't one (see the note above).
 [tool.pytest.ini_options]
+# core/tests/ is the shared core's suite, run in this environment so one runner
+# and one CI job cover both.
 pythonpath = ["src"]
-testpaths = ["tests"]
+testpaths = ["tests", "../../core/tests"]
 asyncio_mode = "auto"

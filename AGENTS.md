@@ -25,7 +25,7 @@ the driving goals and constraints behind it; `README.md` is the desktop package'
 The two are no longer disconnected. The web stack's **grid monitor** is a front
 end over the desktop package's analysis core: `app/server-python/src/pswamp_web/`
 imports `pswamp.*` and the web backend declares the root package as an editable
-path dependency. See "Two Python projects in one repo" for what that does and
+path dependency. See "Three Python projects in one repo" for what that does and
 does not change, and "The p-SWAMP web layer" for the code itself.
 
 **Everything below is about the client-server stack**, except where it says
@@ -64,7 +64,7 @@ an explicit ask. (The Nordic 44 grid model *is* a sqlite file, and the replayed
 PMU stream *is* a committed `.npz` — but both are read-only sample data the
 server opens, not storage it writes to.)
 
-## Two Python projects in one repo
+## Three Python projects in one repo
 
 The root `pyproject.toml` + `uv.lock` belong to the **desktop `p-swamp` package**
 (root `src/pswamp/`, imported as `pswamp`; PySide6, pyqtgraph, Kafka). The web
@@ -73,22 +73,32 @@ still resolve **separately** — which is the point, since Qt + Kafka and FastAP
 uvicorn have no business being solved as one dependency problem. Don't hoist
 either manifest to the other's level.
 
-They are not, however, independent. **The dependency runs one way, web →
-desktop:**
+The third is **`core/` — the shared data architecture, `pswamp-core`, imported
+as `pswamp_core`** (`core/pyproject.toml`, `core/src/pswamp_core/`,
+`core/tests/`). pydantic is its only default dependency. It has no lockfile: it
+is a library, consumed by the web backend as a second editable path dependency,
+and its tests run in that backend's environment. `doc/server-data-architecture.md`
+describes it. The desktop package is "the desktop package" in this file, never
+"the core", to keep the two apart.
+
+They are not, however, independent. **The dependencies run one way, web →
+desktop and web → core:**
 
 ```toml
 # app/server-python/pyproject.toml
-dependencies = ["fastapi…", "uvicorn…", "p-swamp"]
+dependencies = ["fastapi…", "uvicorn…", "p-swamp", "pswamp-core"]
 
 [tool.uv.sources]
-p-swamp = { path = "../../", editable = true }   # the repo root
+p-swamp = { path = "../../", editable = true }       # the repo root
+pswamp-core = { path = "../../core", editable = true }
 ```
 
-That single stanza is the whole seam. `pswamp_web/` imports `pswamp.*`; nothing
-under root `src/pswamp/` imports anything from `app/`, and nothing may start.
-Editable, so an edit to root `src/pswamp/` is live in the server with no
-reinstall — locally through the venv, and in the container through the compose
-watch that syncs root `src/` into it.
+Those two stanzas are the whole seam. `pswamp_web/` imports `pswamp.*`; app
+packages import `pswamp_core.*`; nothing under root `src/pswamp/` or `core/`
+imports anything from `app/`, and `core/` does not import the desktop package.
+Editable, so an edit to root `src/pswamp/` or `core/` is live in the server with
+no reinstall — locally through the venv, and in the container through the
+compose watch that syncs both into it.
 
 Consequences worth knowing before touching anything:
 
@@ -101,6 +111,11 @@ Consequences worth knowing before touching anything:
   that the image mirrors the *repo root*, not just the server dir — see the
   workspace note at the top of the Dockerfile's runtime stage for why the depth is
   required rather than a matter of taste.
+- **`core/` is in the image too**, copied and installed editable beside the
+  desktop package (manifest before the dependency resolve, source after;
+  `--no-emit-package pswamp-core` keeps it out of the wheel layer).
+  `.dockerignore` keeps `core/tests/` out. `error_check.sh` gates it fully
+  (py_compile + ruff), like `app/`.
 - **`./scripts/error_check.sh` gates `app/` fully; root `src/` only for syntax.**
   ruff, `tsc` and the lockfile check are scoped to `app/`. Root `src/` now gets a
   **syntax-only** `py_compile` gate (it ships in the image, so it must at least
@@ -116,7 +131,9 @@ Consequences worth knowing before touching anything:
   git rather than an index. The Dockerfile's `import server` smoke test is what
   makes both exclusions checked decisions rather than hopeful ones.
 - **A dependency for the web backend goes in `app/server-python/pyproject.toml`**,
-  never the root one — and vice versa. After editing either, re-lock **both**:
+  never the root one — and vice versa. A dependency for the core goes in
+  `core/pyproject.toml`; think twice, pydantic is meant to stay the only default
+  one, and re-lock with `--upgrade-package pswamp-core`. After editing either, re-lock **both**:
   `(cd app/server-python && uv lock --upgrade-package p-swamp)` is what refreshes
   the web backend's view of the root manifest. A plain `uv lock` will report
   "Resolved N packages" without re-reading the path dependency.
@@ -1043,7 +1060,7 @@ mind when editing that script:
   `git check-ignore -v <path>` before assuming it is tracked, and `git status`
   is not enough — an ignored file simply never shows up.
 - **`.dockerignore` now has to earn its keep.** The build context is the repo root
-  and the image installs root `src/` (see "Two Python projects in one repo"), so
+  and the image installs root `src/` (see "Three Python projects in one repo"), so
   everything else at the root would otherwise be uploaded to the daemon on every
   build — `build/` alone is ~1.6 GB. It is excluded there, along with `examples/`,
   `tests/` and the cache dirs. Two entries are deliberately *not* excluded and
