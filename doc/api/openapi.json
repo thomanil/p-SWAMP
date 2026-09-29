@@ -1461,9 +1461,35 @@
             "description": "0-based position of the cursor in the recording.",
             "title": "Frame Index"
           },
+          "live_viewers": {
+            "description": "How many sockets are watching the shared live stream.",
+            "title": "Live Viewers",
+            "type": "integer"
+          },
           "player": {
             "$ref": "#/components/schemas/PlayerStatus",
             "description": "Where the replay is and which controls apply."
+          },
+          "source": {
+            "description": "Which source this client is watching.",
+            "enum": [
+              "local",
+              "live"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "sources_available": {
+            "description": "The sources configured in this deployment.",
+            "items": {
+              "enum": [
+                "local",
+                "live"
+              ],
+              "type": "string"
+            },
+            "title": "Sources Available",
+            "type": "array"
           },
           "stats": {
             "anyOf": [
@@ -1484,6 +1510,9 @@
           }
         },
         "required": [
+          "source",
+          "sources_available",
+          "live_viewers",
           "frame",
           "player",
           "stats",
@@ -1736,6 +1765,24 @@
           "offset_s"
         ],
         "title": "SeekBody",
+        "type": "object"
+      },
+      "SourceBody": {
+        "properties": {
+          "source": {
+            "description": "The source to watch.",
+            "enum": [
+              "local",
+              "live"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "title": "SourceBody",
         "type": "object"
       },
       "SpeedBody": {
@@ -2205,58 +2252,6 @@
         ]
       }
     },
-    "/api/pmu-test-streamer/playback/live": {
-      "post": {
-        "description": "Switch this client to the live feed. 409 when no live source is configured.",
-        "operationId": "pmu_test_streamer_live",
-        "parameters": [
-          {
-            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
-            "in": "query",
-            "name": "client_id",
-            "required": true,
-            "schema": {
-              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
-              "pattern": "^\\d{1,20}$",
-              "title": "Client Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommandAck"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "404": {
-            "description": "The client has no live pipeline: its page is not open."
-          },
-          "409": {
-            "description": "The command does not apply in the pipeline's current state."
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Live",
-        "tags": [
-          "pmu-test-streamer"
-        ]
-      }
-    },
     "/api/pmu-test-streamer/playback/play": {
       "post": {
         "description": "Start (or resume) this client's replay.",
@@ -2366,58 +2361,6 @@
           }
         },
         "summary": "Play Range",
-        "tags": [
-          "pmu-test-streamer"
-        ]
-      }
-    },
-    "/api/pmu-test-streamer/playback/replay": {
-      "post": {
-        "description": "Switch this client back to the recording, paused at its start.",
-        "operationId": "pmu_test_streamer_replay",
-        "parameters": [
-          {
-            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
-            "in": "query",
-            "name": "client_id",
-            "required": true,
-            "schema": {
-              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
-              "pattern": "^\\d{1,20}$",
-              "title": "Client Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommandAck"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "404": {
-            "description": "The client has no live pipeline: its page is not open."
-          },
-          "409": {
-            "description": "The command does not apply in the pipeline's current state."
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Replay",
         "tags": [
           "pmu-test-streamer"
         ]
@@ -2594,6 +2537,68 @@
           }
         },
         "summary": "Stop",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
+    "/api/pmu-test-streamer/source": {
+      "post": {
+        "description": "Switch which source this client watches; its sockets follow. A recording\nrestarts at its beginning, paused; the one left behind pauses. 409 when the\nsource is not configured.\n\nNot a command to a player as such: the live pipeline runs for every viewer\nwhether this client watches or not. What changes is which pipeline this\nclient's sockets follow.",
+        "operationId": "pmu_test_streamer_source",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
+          "409": {
+            "description": "The command does not apply in the pipeline's current state."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Choose Source",
         "tags": [
           "pmu-test-streamer"
         ]

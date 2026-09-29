@@ -1,15 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""The PMU test streamer's web edge: one core pipeline per client, over REST and a socket.
+"""The PMU test streamer's web edge: a pipeline per source, recordings per client, live shared.
 
-Everything between the data and this module is ``pswamp_core``; the pipeline
-itself is defined in ``pipeline.py``. What is left here is the edge::
+Everything between the data and this module is ``pswamp_core``; the pipelines
+themselves are defined in ``pipeline.py``, one registry per source::
 
-    POST /playback/{play,stop,forward,back,seek,speed,live,replay} ── typed PlayerCommand ─┐
-    POST /stats/reset                                              ── ResetStatsCommand ──┤
-                                                           shared.dispatch_command ◀──────┘
-                                                           (404 no pipeline · 409 refused)
+    source  registry key                          what it is
+    local   "local-<client id>"                   each visitor's own replay of the recording
+    live    "live" (the stream name)              one pipeline for every viewer; its modules run once
+
+What is per client is the **source**: which pipeline the client watches.
+``POST /source`` switches it and the client's sockets follow; switching to a
+recording restarts it at the beginning, paused. The edge otherwise::
+
+    POST /playback/{play,stop,forward,back,seek,speed} ── typed PlayerCommand ─┐
+    POST /stats/reset                                  ── ResetStatsCommand ──┤  to the client's recording;
+                                                shared.dispatch_command ◀─────┘  409 on the shared live stream
     bus ── PmuFrame · PlayerStatus · FrameStatsResult · ErrorEvent ──▶ one PmuStreamState ──▶ /ws
 
 Commands go up over REST and state comes down over the socket, as everywhere
@@ -23,15 +30,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
 from typing import Literal
 
-from fastapi import APIRouter, FastAPI, WebSocket
+from fastapi import APIRouter, FastAPI, HTTPException, WebSocket
 from pydantic import BaseModel, Field
 from shared import (
     COMMAND_RESPONSES,
     ClientId,
     CommandAck,
+    SessionRegistry,
     dispatch_command,
     get_logger,
     read_client_id,
@@ -43,7 +50,6 @@ from pswamp_core.bus import Overflow, Subscription
 from pswamp_core.messages import (
     Command,
     ErrorEvent,
-    GoLiveCommand,
     PauseCommand,
     PlayCommand,
     PlayerStatus,
@@ -56,44 +62,86 @@ from pswamp_core.messages import (
 )
 from pswamp_core.pipeline import CapacityError, Pipeline, PipelineRegistry
 
-from .pipeline import IDLE_EVICT_SECONDS, MAX_PIPELINES, build_pipeline, close_module_transport
+from .pipeline import (
+    IDLE_EVICT_SECONDS,
+    LIVE_STREAM,
+    MAX_PIPELINES,
+    SOURCES,
+    Source,
+    available,
+    build_pipeline,
+    close_module_transport,
+    pipeline_key,
+)
 from .average_module import AverageRangeCommand, RangeAverageResult
 from .stats_module import FrameStatsResult, ResetStatsCommand
 
 logger = get_logger("pmu")
 
 
-# --- one pipeline per client ------------------------------------------------------
+# --- one registry per source ----------------------------------------------------------------
 
 
-def build_client_pipeline(client_id: str) -> Pipeline:
-    """The streamer's pipeline, plus the edge's one addition: its errors in the log."""
-    pipeline = build_pipeline(client_id)
-    pipeline.bus.add_listener(ErrorEvent, lambda error: _log_error(client_id, error))
-    return pipeline
+def _factory(source: Source):
+    """The source's pipeline definition, plus the edge's one addition: its errors in the log."""
+
+    def build(key: str) -> Pipeline:
+        pipeline = build_pipeline(key, source)
+
+        def log(error: ErrorEvent) -> None:
+            logger.warning(
+                "pipeline %s: %s: %s (%s)%s", key, error.source, error.message, error.detail,
+                f" [request {error.request_id}]" if error.request_id else "",
+            )
+
+        pipeline.bus.add_listener(ErrorEvent, log)
+        return pipeline
+
+    return build
 
 
-def _log_error(client_id: str, error: ErrorEvent) -> None:
-    logger.warning(
-        "client %s: %s: %s (%s)%s", client_id, error.source, error.message, error.detail,
-        f" [request {error.request_id}]" if error.request_id else "",
+#: A recording's registry holds one pipeline per client; the live one holds one, full stop.
+REGISTRIES: dict[Source, PipelineRegistry[Pipeline]] = {
+    source: PipelineRegistry(
+        _factory(source),
+        max_pipelines=1 if source == "live" else MAX_PIPELINES,
+        idle_seconds=IDLE_EVICT_SECONDS,
     )
+    for source in SOURCES
+}
+
+#: Which source each client watches; ``local`` until it asks for another.
+#: A short string per client id, never evicted: a bounded leak, as the reference app's.
+CLIENT_SOURCES: dict[str, Source] = {}
+#: Each open socket's wake-up, per client: a source switch has to reach them all.
+SOCKETS: SessionRegistry[asyncio.Event] = SessionRegistry()
 
 
-REGISTRY: PipelineRegistry[Pipeline] = PipelineRegistry(
-    build_client_pipeline, max_pipelines=MAX_PIPELINES, idle_seconds=IDLE_EVICT_SECONDS
-)
+def source_of(client_id: str) -> Source:
+    return CLIENT_SOURCES.get(client_id, "local")
+
+
+def pipeline_of(client_id: str, source: Source | None = None) -> Pipeline | None:
+    """The client's pipeline for ``source`` (its current one by default), if it has one."""
+    source = source or source_of(client_id)
+    return REGISTRIES[source].peek(pipeline_key(source, client_id))
+
+
+def sources_available() -> list[Source]:
+    return [source for source in SOURCES if available(source)]
 
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Bind the registry to the loop while the server is up; drain it on shutdown."""
-    REGISTRY.bind(asyncio.get_running_loop())
+    """Bind the registries to the loop while the server is up; drain them on shutdown."""
+    for registry in REGISTRIES.values():
+        registry.bind(asyncio.get_running_loop())
     try:
         yield
     finally:
-        await REGISTRY.stop_all()
-        REGISTRY.bind(None)
+        for registry in REGISTRIES.values():
+            await registry.stop_all()
+            registry.bind(None)
         await close_module_transport()
 
 
@@ -109,6 +157,9 @@ class PmuStreamState(BaseModel):
     """
 
     type: Literal["state"] = "state"
+    source: Source = Field(description="Which source this client is watching.")
+    sources_available: list[Source] = Field(description="The sources configured in this deployment.")
+    live_viewers: int = Field(description="How many sockets are watching the shared live stream.")
     frame: PmuFrame | None = Field(
         description="The frame at the cursor, with its channel layout, once one has played."
     )
@@ -141,9 +192,11 @@ def _position(status: PlayerStatus, frame: PmuFrame | None) -> tuple[int | None,
     return index, count
 
 
-def state_message(pipeline: Pipeline) -> PmuStreamState:
-    """The current state: the player's live status, the frame it last played on the
-    open stream, and the module's result for that frame."""
+def state_message(
+    pipeline: Pipeline, source: Source = "local", sources_available: list[Source] | None = None
+) -> PmuStreamState:
+    """The current state of the pipeline a client watches: its player's status,
+    the frame it last played on the open stream, and the module's result for it."""
     latest = pipeline.latest
     # The player's status, not the last *published* one: the cursor moves with
     # every frame, and only control changes publish a PlayerStatus.
@@ -159,6 +212,9 @@ def state_message(pipeline: Pipeline) -> PmuStreamState:
         stats = None
     index, count = _position(status, frame)
     return PmuStreamState(
+        source=source,
+        sources_available=[source] if sources_available is None else sources_available,
+        live_viewers=REGISTRIES["live"].watchers(LIVE_STREAM),
         frame=frame,
         player=status,
         stats=stats,
@@ -190,15 +246,23 @@ def _current(stats: FrameStatsResult | None, frame: PmuFrame, status: PlayerStat
 
 # --- REST commands ----------------------------------------------------------------------
 #
-# One POST per operation, each building one typed command. Routing, the 404 and
-# the 409 are shared.dispatch_command's; the effect arrives on the socket.
+# One POST per operation, each building one typed command for the client's own
+# recording. Routing, the 404 and the 409 are shared.dispatch_command's; the
+# effect arrives on the socket. The live stream takes no commands from a
+# viewer: it is not one viewer's to pause, seek or reset.
 
 router = APIRouter()
 
 
 def dispatch(command: Command) -> CommandAck:
-    """Dispatch one command into its client's pipeline."""
-    return dispatch_command(REGISTRY.peek(command.client_id or ""), command, logger)
+    """Dispatch one command into the client's recording; 409 on the shared live stream."""
+    client_id = command.client_id or ""
+    if source_of(client_id) == "live":
+        raise HTTPException(
+            status_code=409,
+            detail=f"{command.name} does not apply to the shared live stream; switch to a recording first",
+        )
+    return dispatch_command(pipeline_of(client_id), command, logger)
 
 
 @router.post("/playback/play", operation_id="pmu_test_streamer_play", responses=COMMAND_RESPONSES)
@@ -245,18 +309,6 @@ async def speed(client_id: ClientId, body: SpeedBody) -> CommandAck:
     return dispatch(SpeedCommand(client_id=client_id, speed=body.speed))
 
 
-@router.post("/playback/live", operation_id="pmu_test_streamer_live", responses=COMMAND_RESPONSES)
-async def live(client_id: ClientId) -> CommandAck:
-    """Switch this client to the live feed. 409 when no live source is configured."""
-    return dispatch(GoLiveCommand(client_id=client_id))
-
-
-@router.post("/playback/replay", operation_id="pmu_test_streamer_replay", responses=COMMAND_RESPONSES)
-async def replay(client_id: ClientId) -> CommandAck:
-    """Switch this client back to the recording, paused at its start."""
-    return dispatch(ReplayCommand(client_id=client_id))
-
-
 class RangeBody(BaseModel):
     start_offset_s: float = Field(ge=0, description="Where the chunk starts, in seconds from the start of the recording.")
     end_offset_s: float = Field(gt=0, description="Where it ends (exclusive), in seconds from the start of the recording.")
@@ -297,46 +349,41 @@ async def reset_stats(client_id: ClientId) -> CommandAck:
     return dispatch(ResetStatsCommand(client_id=client_id))
 
 
+class SourceBody(BaseModel):
+    source: Source = Field(description="The source to watch.")
+
+
+@router.post("/source", operation_id="pmu_test_streamer_source", responses=COMMAND_RESPONSES)
+async def choose_source(client_id: ClientId, body: SourceBody) -> CommandAck:
+    """Switch which source this client watches; its sockets follow. A recording
+    restarts at its beginning, paused; the one left behind pauses. 409 when the
+    source is not configured.
+
+    Not a command to a player as such: the live pipeline runs for every viewer
+    whether this client watches or not. What changes is which pipeline this
+    client's sockets follow."""
+    if not SOCKETS.of(client_id):
+        raise HTTPException(status_code=404, detail=f"client {client_id} has no socket open; open the page first")
+    if body.source not in sources_available():
+        raise HTTPException(status_code=409, detail=f"no {body.source} source is configured")
+    left = source_of(client_id)
+    if left != "live" and (recording := pipeline_of(client_id, left)) is not None and not recording.player.paused:
+        with contextlib.suppress(Exception):
+            recording.dispatch(PauseCommand(client_id=client_id))
+    if body.source != "live" and (recording := pipeline_of(client_id, body.source)) is not None:
+        recording.dispatch(ReplayCommand(client_id=client_id))  # from the beginning, paused
+    CLIENT_SOURCES[client_id] = body.source
+    for wake in SOCKETS.of(client_id):
+        wake.set()
+    logger.info("client %s: source %s (%s watching live)", client_id, body.source, REGISTRIES["live"].watchers(LIVE_STREAM))
+    return CommandAck(applied=f"source.{body.source}")
+
+
 # --- websocket endpoint (downstream only) ------------------------------------------------
 
 
-@contextlib.asynccontextmanager
-async def connected_pipeline(ws: WebSocket) -> AsyncIterator[Pipeline | None]:
-    """Accept one socket and hold its client's pipeline for as long as it lives.
-
-    Yields ``None`` when refused: no usable client id is closed *before*
-    accepting (1008); at capacity the socket is accepted first and closed with
-    1013, because a close code only reaches the browser on an established
-    connection, and the web client treats 1013 as terminal.
-    """
-    client_id = read_client_id(ws)
-    if client_id is None:
-        await ws.close(code=1008)  # policy violation
-        yield None
-        return
-
-    await ws.accept()
-    try:
-        pipeline = await REGISTRY.acquire(client_id)
-    except CapacityError:
-        logger.warning("refused client %s: all %s pipelines in use", client_id, REGISTRY.max_pipelines)
-        await ws.close(code=1013)  # try again later
-        yield None
-        return
-    except Exception:
-        logger.exception("failed to start pipeline for client %s", client_id)
-        await ws.close(code=1011)  # unexpected server error
-        yield None
-        return
-
-    try:
-        yield pipeline
-    finally:
-        REGISTRY.release(client_id)
-
-
 def subscribe_updates(pipeline: Pipeline) -> Subscription:
-    """What this page shows, off the client's bus. Opened *before* the first
+    """What this page shows, off the pipeline's bus. Opened *before* the first
     send, so nothing published in between is lost."""
     return pipeline.bus.subscribe(
         PmuFrame, PlayerStatus, FrameStatsResult, RangeAverageResult, StreamChanged, ErrorEvent,
@@ -344,36 +391,74 @@ def subscribe_updates(pipeline: Pipeline) -> Subscription:
     )
 
 
-async def serve_stream(ws: WebSocket, pipeline: Pipeline, updates: Subscription) -> None:
-    """Push the state on every change until the client disconnects.
+async def push_until_switched(
+    ws: WebSocket, pipeline: Pipeline, source: Source, available_now: list[Source],
+    updates: Subscription, switched: asyncio.Event,
+) -> None:
+    """Push the state on every change until the client's source switches.
 
     Coalesces: when the reader wakes it drains whatever else is pending and
     sends **one** message built from the latest of each, so a socket that falls
     behind sees the newest state rather than a backlog.
     """
+    while not switched.is_set():
+        update = asyncio.ensure_future(updates.get())
+        wait = asyncio.ensure_future(switched.wait())
+        try:
+            await asyncio.wait({update, wait}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (update, wait):
+                task.cancel()
+        if switched.is_set() or not update.done() or update.cancelled():
+            continue
+        while updates.get_nowait() is not None:
+            pass
+        await send_state(ws, state_message(pipeline, source, available_now))
 
-    async def push() -> None:
-        async for _ in updates:
-            while updates.get_nowait() is not None:
-                pass
-            await send_state(ws, state_message(pipeline))
 
-    pusher = asyncio.create_task(push())
-    try:
-        await wait_for_disconnect(ws)
-    finally:
-        pusher.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await pusher
+async def serve_client(ws: WebSocket, client_id: str) -> None:
+    """Follow the client's source: hold that pipeline and push its state until
+    the source switches, then the next. A pipeline is held (a watcher in its
+    registry) only while the client watches it."""
+    switched = asyncio.Event()
+    with SOCKETS.registered(client_id, switched):
+        while True:
+            switched.clear()
+            source = source_of(client_id)
+            async with REGISTRIES[source].session(pipeline_key(source, client_id)) as pipeline:
+                available_now = sources_available()
+                with subscribe_updates(pipeline) as updates:
+                    await send_state(ws, state_message(pipeline, source, available_now))
+                    await push_until_switched(ws, pipeline, source, available_now, updates, switched)
 
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    async with connected_pipeline(ws) as pipeline:
-        if pipeline is None:
-            return
-        logger.info("client %s: connected (%s live)", pipeline.key, REGISTRY.live)
-        with subscribe_updates(pipeline) as updates:
-            await send_state(ws, state_message(pipeline))
-            await serve_stream(ws, pipeline, updates)
-        logger.info("client %s: disconnected", pipeline.key)
+    """One client's socket. No usable client id is closed *before* accepting
+    (1008); at capacity it is accepted first and closed with 1013, because a
+    close code only reaches the browser on an established connection, and the
+    web client treats 1013 as terminal."""
+    client_id = read_client_id(ws)
+    if client_id is None:
+        await ws.close(code=1008)  # policy violation
+        return
+    await ws.accept()
+    logger.info("client %s: connected", client_id)
+    server = asyncio.create_task(serve_client(ws, client_id))
+    disconnected = asyncio.create_task(wait_for_disconnect(ws))
+    try:
+        await asyncio.wait({server, disconnected}, return_when=asyncio.FIRST_COMPLETED)
+        if server.done() and not server.cancelled() and (error := server.exception()) is not None:
+            if isinstance(error, CapacityError):
+                logger.warning("refused client %s: %s", client_id, error)
+                await ws.close(code=1013)  # try again later
+            else:
+                logger.error("client %s: pipeline failed: %r", client_id, error)
+                await ws.close(code=1011)  # unexpected server error
+    finally:
+        for task in (server, disconnected):
+            task.cancel()
+        for task in (server, disconnected):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+    logger.info("client %s: disconnected", client_id)

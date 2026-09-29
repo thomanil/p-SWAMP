@@ -179,18 +179,18 @@ def test_k8s_example_file_feeds_the_live_client(monkeypatch):
 
 def streamer_pipeline(key: str, modules) -> Pipeline:
     """The streamer's own pipeline definition, unpaced for the test."""
-    pipeline = streamer.build_pipeline(key, modules)
+    pipeline = streamer.build_pipeline(key, "local", modules)
     pipeline.player.paced = False
     return pipeline
 
 
 async def test_pipeline_streams_frames_and_stats_onto_the_bus():
     pipeline = streamer_pipeline("42", [FrameStatsModule()])
-    assert list(pipeline.gateway.clients) == ["sample", "live"]
+    assert list(pipeline.gateway.clients) == ["sample"]
     await pipeline.start()
     try:
         status = pipeline.player.status()
-        assert status.mode == "replay" and status.can_seek and status.can_go_live
+        assert status.mode == "replay" and status.can_seek
         with pipeline.bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames, pipeline.bus.subscribe(
             FrameStatsResult, overflow=Overflow.GROW
         ) as results:
@@ -333,82 +333,106 @@ def test_the_cim_reference_is_configured_or_switched_off(monkeypatch):
     assert enricher.reference == "grid-2026"
 
 
-# --- the web edge ---------------------------------------------------------------------------
+# --- the web edge: a pipeline per source, recordings per client, live shared -----------------
 
 
 @pytest.fixture
-async def registry(monkeypatch):
-    """The edge's own registry, bound to this loop, with the module in-process."""
-    monkeypatch.delenv("PSWAMP_DATA_CLIENTS", raising=False)
+async def edge(monkeypatch):
+    """The edge's registries, bound to this loop, with the module in-process."""
+    for variable, _ in streamer.SOURCES.values():
+        monkeypatch.delenv(variable, raising=False)
     monkeypatch.delenv(streamer.MODULE_TRANSPORT_VARIABLE, raising=False)
-    api.REGISTRY.bind(asyncio.get_running_loop())
-    yield api.REGISTRY
-    await api.REGISTRY.stop_all()
-    api.REGISTRY.bind(None)
+    for registry in api.REGISTRIES.values():
+        registry.bind(asyncio.get_running_loop())
+    yield api
+    for registry in api.REGISTRIES.values():
+        await registry.stop_all()
+        registry.bind(None)
+    api.CLIENT_SOURCES.clear()
 
 
-async def _wait_status(subscription, predicate, timeout: float = 2.0) -> PlayerStatus:
-    async def _wait():
-        while True:
-            message = await subscription.get()
-            if isinstance(message, PlayerStatus) and predicate(message):
-                return message
-
-    return await asyncio.wait_for(_wait(), timeout)
+@contextlib.contextmanager
+def socket_open(client_id: str):
+    """What an open socket registers, without a socket: enough for POST /source."""
+    with api.SOCKETS.registered(client_id, asyncio.Event()):
+        yield
 
 
-async def test_posts_become_commands_and_a_refusal_is_a_409(registry):
-    pipeline = await registry.acquire("9")
+async def test_posts_become_commands_and_the_shared_live_stream_refuses_them(edge):
+    key = streamer.pipeline_key("local", "9")
+    recording = await api.REGISTRIES["local"].acquire(key)
     try:
-        with pipeline.bus.subscribe(PlayerStatus, overflow=Overflow.GROW) as statuses:
-            assert (await api.live("9")).applied == "go.live"
-            await _wait_status(statuses, lambda s: s.mode == "live")
-            with pytest.raises(HTTPException) as refused:
-                await api.seek("9", api.SeekBody(offset_s=1.0))
-            assert refused.value.status_code == 409 and "live mode" in refused.value.detail
-            assert (await api.replay("9")).applied == "replay"
-            await _wait_status(statuses, lambda s: s.mode == "replay")
-            assert (await api.play("9")).applied == "play"
-            assert (await api.stop("9")).applied == "pause"
+        assert recording.key == "local-9" and list(recording.gateway.clients) == ["sample"]
+        assert (await api.play("9")).applied == "play"
+        assert (await api.stop("9")).applied == "pause"
         with pytest.raises(HTTPException) as refused:
             await api.reset_stats("9")  # nothing played yet: the module refuses
         assert refused.value.status_code == 409 and "nothing to reset" in refused.value.detail
+        with socket_open("9"):
+            assert (await api.choose_source("9", api.SourceBody(source="live"))).applied == "source.live"
+            for command in (api.seek("9", api.SeekBody(offset_s=1.0)), api.play("9"), api.reset_stats("9")):
+                with pytest.raises(HTTPException) as refused:
+                    await command
+                assert refused.value.status_code == 409 and "shared live stream" in refused.value.detail
+            assert (await api.choose_source("9", api.SourceBody(source="local"))).applied == "source.local"
         with pytest.raises(HTTPException) as missing:
-            await api.play("no-such-client")  # a command never builds a pipeline
+            await api.forward("12345")  # a command never builds a pipeline
+        assert missing.value.status_code == 404
+        with pytest.raises(HTTPException) as missing:
+            await api.choose_source("12345", api.SourceBody(source="live"))  # no socket open
         assert missing.value.status_code == 404
     finally:
-        registry.release("9")
+        api.REGISTRIES["local"].release(key)
 
 
-async def test_the_socket_message_follows_the_switch_between_recorded_and_live(registry):
-    pipeline = await registry.acquire("43")
-    pipeline.player.paced = False
+async def test_two_clients_share_one_live_pipeline_but_keep_their_own_recordings(edge):
+    a = await api.REGISTRIES["local"].acquire("local-1")
+    b = await api.REGISTRIES["local"].acquire("local-2")
     try:
-        message = api.state_message(pipeline)
-        assert message.player.mode == "replay" and message.frame is None
-        with pipeline.bus.subscribe(PmuFrame, FrameStatsResult, overflow=Overflow.GROW) as sub:
-            await api.forward("43")
-            await asyncio.wait_for(sub.get(), 2)
-            await asyncio.wait_for(sub.get(), 2)
-        message = api.state_message(pipeline)
-        assert message.frame.mRID == STREAM_ID and (message.frame_index, message.frame_count) == (0, 60)
-        assert message.stats is not None and message.stats.result.cim_reference_id == streamer.DEFAULT_CIM_REFERENCE
-
-        with pipeline.bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames:
-            await api.live("43")
-            frame = await asyncio.wait_for(frames.get(), 3)
-            while frame.mRID != LIVE_STREAM_ID:
-                frame = await asyncio.wait_for(frames.get(), 3)
-        message = api.state_message(pipeline)
-        assert message.player.mode == "live" and message.frame_index is None
-
-        await api.replay("43")
-        await asyncio.sleep(0.05)
-        message = api.state_message(pipeline)
-        # Nothing has played on the replay yet: no live frame under a "recorded" badge.
-        assert message.player.mode == "replay" and message.frame is None and message.stats is None
+        assert a is not b and a.gateway is not b.gateway  # recordings: per client
+        live_a = await api.REGISTRIES["live"].acquire(streamer.LIVE_STREAM)
+        live_b = await api.REGISTRIES["live"].acquire(streamer.LIVE_STREAM)
+        try:
+            assert live_a is live_b                         # one pipeline for every viewer
+            assert api.REGISTRIES["live"].watchers(streamer.LIVE_STREAM) == 2
+            assert list(live_a.gateway.clients) == ["live"]
+            assert live_a.player.mode == "live" and not live_a.player.paused
+            with live_a.bus.subscribe(FrameStatsResult, overflow=Overflow.GROW) as results:
+                result = await asyncio.wait_for(results.get(), 3)
+            assert result.app.name == "frame-stats" and len(live_a.modules) == 1  # the module runs once
+            message = api.state_message(live_a, "live", ["local", "live"])
+            assert message.source == "live" and message.live_viewers == 2
+        finally:
+            api.REGISTRIES["live"].release(streamer.LIVE_STREAM)
+            api.REGISTRIES["live"].release(streamer.LIVE_STREAM)
     finally:
-        registry.release("43")
+        api.REGISTRIES["local"].release("local-1")
+        api.REGISTRIES["local"].release("local-2")
+
+
+async def eventually(predicate, timeout: float = 2.0) -> None:
+    """Wait until ``predicate()`` holds: commands are applied by an inbox, not inline."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        assert asyncio.get_running_loop().time() < deadline, "condition never held"
+        await asyncio.sleep(0.01)
+
+
+async def test_switching_back_to_a_recording_restarts_it_at_the_beginning(edge):
+    start = load_sample().frames[0].timestamp
+    recording = await api.REGISTRIES["local"].acquire("local-5")
+    try:
+        recording.player.paced = False
+        await api.play("5")
+        await eventually(lambda: recording.player.cursor is not None and recording.player.cursor > start)
+        with socket_open("5"):
+            await api.choose_source("5", api.SourceBody(source="live"))
+            await eventually(lambda: recording.player.paused)  # the recording left behind pauses
+            await api.choose_source("5", api.SourceBody(source="local"))
+        await eventually(lambda: recording.player.status().cursor == start)  # from the start
+        assert recording.player.paused
+    finally:
+        api.REGISTRIES["local"].release("local-5")
 
 
 class TinyClient(InMemoryClient):
@@ -423,17 +447,50 @@ class TinyClient(InMemoryClient):
         super().__init__(name, [PmuFrame], frames, capabilities=Capability.HISTORY_CONSUME)
 
 
-async def test_the_provider_is_swapped_by_environment_alone_and_live_is_then_refused(registry, monkeypatch):
-    monkeypatch.setenv("PSWAMP_DATA_CLIENTS", "tiny:test_pmu_test_streamer:TinyClient")
-    pipeline = await registry.acquire("11")
+async def test_a_source_is_its_variable_swapped_or_switched_off_by_environment_alone(edge, monkeypatch):
+    monkeypatch.setenv("PMU_TEST_STREAMER_LOCAL_CLIENTS", "tiny:test_pmu_test_streamer:TinyClient")
+    monkeypatch.setenv("PMU_TEST_STREAMER_LIVE_CLIENTS", "none")
+    assert api.sources_available() == ["local"]
+    recording = await api.REGISTRIES["local"].acquire("local-11")
     try:
-        assert list(pipeline.gateway.clients) == ["tiny"]
-        assert pipeline.player.status().can_go_live is False
-        with pytest.raises(HTTPException) as refused:
-            await api.live("11")
+        assert list(recording.gateway.clients) == ["tiny"]
+        with socket_open("11"), pytest.raises(HTTPException) as refused:
+            await api.choose_source("11", api.SourceBody(source="live"))
         assert refused.value.status_code == 409 and "no live source" in refused.value.detail
     finally:
-        registry.release("11")
+        api.REGISTRIES["local"].release("local-11")
+
+
+def test_the_socket_follows_the_client_s_source(monkeypatch):
+    """Over a real socket: the recording on connect, the shared live stream after
+    POST /source live, the recording (from its start) after POST /source local."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    for variable, _ in streamer.SOURCES.values():
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.delenv(streamer.MODULE_TRANSPORT_VARIABLE, raising=False)
+    app = FastAPI(lifespan=api.lifespan)
+    app.include_router(api.router)
+
+    def until(ws, predicate, limit: int = 200) -> dict:
+        for _ in range(limit):
+            message = ws.receive_json()
+            if predicate(message):
+                return message
+        raise AssertionError("no matching state")
+
+    with TestClient(app) as client, client.websocket_connect("/ws?client_id=77") as ws:
+        first = ws.receive_json()
+        assert first["source"] == "local" and first["sources_available"] == ["local", "live"]
+        assert client.post("/source?client_id=77", json={"source": "live"}).json()["applied"] == "source.live"
+        live = until(ws, lambda m: m["source"] == "live" and m["frame"] is not None)
+        assert live["frame"]["mRID"] == LIVE_STREAM_ID and live["player"]["mode"] == "live"
+        assert live["live_viewers"] == 1
+        assert client.post("/source?client_id=77", json={"source": "local"}).json()["applied"] == "source.local"
+        back = until(ws, lambda m: m["source"] == "local")
+        assert back["player"]["mode"] == "replay" and back["live_viewers"] == 0
+    api.CLIENT_SOURCES.clear()
 
 
 def test_the_environment_sends_the_module_to_the_worker(monkeypatch):
@@ -536,8 +593,8 @@ async def test_a_failing_provider_gives_an_error_result_and_an_error_event():
     assert (event.source, event.request_id) == ("range-average", command.request_id)
 
 
-async def test_the_range_posts_play_a_chunk_and_ask_for_an_average(registry):
-    await registry.acquire("21")
+async def test_the_range_posts_play_a_chunk_and_ask_for_an_average(edge):
+    await api.REGISTRIES["local"].acquire("local-21")
     try:
         body = api.RangeBody(start_offset_s=0.5, end_offset_s=1.0)
         assert (await api.play_range("21", body)).applied == "replay"
@@ -545,5 +602,10 @@ async def test_the_range_posts_play_a_chunk_and_ask_for_an_average(registry):
         with pytest.raises(HTTPException) as refused:
             await api.average("21", api.RangeBody(start_offset_s=1.0, end_offset_s=0.5))
         assert refused.value.status_code == 409 and "empty" in refused.value.detail
+        with socket_open("21"):
+            await api.choose_source("21", api.SourceBody(source="live"))
+            with pytest.raises(HTTPException) as refused:
+                await api.average("21", body)  # the shared live stream takes no viewer's commands
+            assert refused.value.status_code == 409
     finally:
-        registry.release("21")
+        api.REGISTRIES["local"].release("local-21")

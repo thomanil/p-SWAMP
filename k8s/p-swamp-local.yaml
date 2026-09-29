@@ -21,7 +21,7 @@
 # doc/server-data-architecture.md.
 #
 # The PMU data sources are configured here rather than baked in: the env block
-# names the two providers and points the live feed at
+# names each source's providers and points the live feed at
 # k8s/deployment_pmu_data_file_example.txt, which the start script turns into
 # the ConfigMap mounted below. Every value in that file counts up by one per
 # frame from a round start (100 kV, 0°, 60 Hz), so a page switched to Live
@@ -74,12 +74,14 @@ spec:
               value: kafka:pswamp_core.transport.kafka:KafkaTransport
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: p-swamp-kafka:9092
-            # Which providers make up each pipeline's gateway: name:module:Class,
-            # comma-separated. This is the streamer's built-in default, spelled
-            # out; a deployment's own provider is one more package in the image
-            # and one more entry here.
-            - name: PSWAMP_DATA_CLIENTS
-              value: "sample:pmu_test_streamer.sample_client:SampleRecordingClient,live:pmu_test_streamer.live_client:LiveSyntheticClient"
+            # Which providers make up each source's pipelines: name:module:Class,
+            # comma-separated. These are the streamer's built-in defaults,
+            # spelled out; a deployment's own provider is one more package in
+            # the image and one more entry here.
+            - name: PMU_TEST_STREAMER_LOCAL_CLIENTS
+              value: "sample:pmu_test_streamer.sample_client:SampleRecordingClient"
+            - name: PMU_TEST_STREAMER_LIVE_CLIENTS
+              value: "live:pmu_test_streamer.live_client:LiveSyntheticClient"
             # Each provider reads its own {NAME}_{SETTING} block: the live feed
             # cycles this file's rows instead of the image's sample_data.txt.
             - name: LIVE_PATH

@@ -1,26 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""The streamer's pipeline definition: which providers, which enrichers, which modules.
+"""The streamer's pipeline definitions: which providers, which enrichers, which modules.
 
-``build_pipeline(key)`` is the factory a ``PipelineRegistry`` calls once per
-key. Defining a pipeline is writing this function: everything it builds is
-built fresh for that key.
+``build_pipeline(key, source)`` is the factory a ``PipelineRegistry`` calls once
+per key. Defining a pipeline is writing it: everything it builds is built fresh
+for that key. The streamer has one pipeline per **source**, and a source is
+nothing but the providers its variable names:
 
-    providers  ── PSWAMP_DATA_CLIENTS, defaulting to the recording + the synthetic live feed
-    enrichers  ── the stub CIM reference (PMU_TEST_STREAMER_CIM_REFERENCE, "none" to switch off)
-    player     ── loops the recording; "live" switches to the feed
-    modules    ── FrameStatsModule, in-process -- or, with PMU_TEST_STREAMER_MODULE_TRANSPORT
-                  set, a RemoteModule standing in for it while worker.py runs it
+    source  providers (variable, default)                              keyed by
+    local   PMU_TEST_STREAMER_LOCAL_CLIENTS: the recording in the image  the client:  "local-<id>"
+    live    PMU_TEST_STREAMER_LIVE_CLIENTS:  the synthetic live feed     the stream:  "live", shared
+
+Every pipeline gets the stub CIM reference enricher (PMU_TEST_STREAMER_CIM_REFERENCE,
+"none" to switch off) and the stats module -- in-process, or, with
+PMU_TEST_STREAMER_MODULE_TRANSPORT set, a RemoteModule standing in for it while
+worker.py runs it. The pipeline key is the worker's key too, so two pipelines
+never share a module instance.
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Sequence
+from typing import Literal
 
 from pswamp_core.bus import InProcessBus
-from pswamp_core.datagateway import CimReferenceEnricher, Enricher, Player, gateway_from_env
+from pswamp_core.datagateway import (
+    CimReferenceEnricher,
+    Enricher,
+    MissingSettingError,
+    Player,
+    gateway_from_env,
+)
 from pswamp_core.messages import PmuFrame
 from pswamp_core.modules import Module
 from pswamp_core.pipeline import Pipeline
@@ -31,22 +43,37 @@ from .average_module import RangeAverageModule
 from .stats_module import FrameStatsModule
 
 __all__ = [
-    "DEFAULT_DATA_CLIENTS",
     "IDLE_EVICT_SECONDS",
+    "LIVE_STREAM",
     "MAX_PIPELINES",
     "MODULE_TRANSPORT_VARIABLE",
+    "SOURCES",
+    "Source",
+    "available",
     "build_pipeline",
     "cim_reference_enrichers",
     "close_module_transport",
+    "pipeline_key",
     "stats_modules",
 ]
 
-#: The providers when ``PSWAMP_DATA_CLIENTS`` is unset: the committed recording
-#: (history) and a synthetic live feed of the same rows.
-DEFAULT_DATA_CLIENTS = (
-    "sample:pmu_test_streamer.sample_client:SampleRecordingClient,"
-    "live:pmu_test_streamer.live_client:LiveSyntheticClient"
-)
+Source = Literal["local", "live"]
+
+#: Per source: the variable naming its providers, and what it names when unset.
+#: Set a variable to ``none`` to switch that source off.
+SOURCES: dict[Source, tuple[str, str]] = {
+    "local": (
+        "PMU_TEST_STREAMER_LOCAL_CLIENTS",
+        "sample:pmu_test_streamer.sample_client:SampleRecordingClient",
+    ),
+    "live": (
+        "PMU_TEST_STREAMER_LIVE_CLIENTS",
+        "live:pmu_test_streamer.live_client:LiveSyntheticClient",
+    ),
+}
+
+#: The key of the one shared live pipeline: a stream name, not a client id.
+LIVE_STREAM = "live"
 
 #: The placeholder ``cimReferenceId`` the stub enricher stamps on every frame.
 DEFAULT_CIM_REFERENCE = "n44-stub"
@@ -96,9 +123,31 @@ async def close_module_transport() -> None:
         await transport.close()
 
 
-def build_pipeline(key: str, modules: Sequence[Module] | None = None) -> Pipeline:
-    """One pipeline for ``key``: its own gateway, bus, player and modules."""
-    gateway = gateway_from_env(DEFAULT_DATA_CLIENTS, enrichers=cim_reference_enrichers())
+def pipeline_key(source: Source, client_id: str) -> str:
+    """Recordings are per client; the live stream is one, whoever watches."""
+    return LIVE_STREAM if source == "live" else f"{source}-{client_id}"
+
+
+def available(source: Source) -> bool:
+    """Whether ``source``'s providers are configured and can be built."""
+    variable, default = SOURCES[source]
+    if os.environ.get(variable, "").strip().lower() == "none":
+        return False
+    try:
+        return bool(gateway_from_env(default, variable=variable).clients)
+    except MissingSettingError:
+        return False
+
+
+def build_pipeline(key: str, source: Source = "local", modules: Sequence[Module] | None = None) -> Pipeline:
+    """One pipeline for ``key`` over ``source``'s providers: its own gateway,
+    bus, player and modules. A live-only gateway makes the player start live."""
+    variable, default = SOURCES[source]
+    gateway = gateway_from_env(default, variable=variable, enrichers=cim_reference_enrichers())
     bus = InProcessBus()
     player = Player(gateway, bus, model=PmuFrame, loop=True)
-    return Pipeline(key, gateway, bus, player, recording_modules(key) if modules is None else modules)
+    if modules is None:
+        # The live stream gets the stats module only: the batch average reads a
+        # recording's history, and the shared stream takes no viewer's commands.
+        modules = stats_modules(key) if source == "live" else recording_modules(key)
+    return Pipeline(key, gateway, bus, player, modules)

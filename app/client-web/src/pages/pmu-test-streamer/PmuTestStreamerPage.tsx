@@ -9,7 +9,7 @@ import {
 } from 'lucide-react'
 
 // This page's own pieces, imported relatively so the folder stays self-contained.
-import { usePmuStreamSocket } from './usePmuStreamSocket'
+import { usePmuStreamSocket, type Source } from './usePmuStreamSocket'
 import { FrameTable } from './FrameTable'
 import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -32,6 +32,13 @@ import {
 
 const SPEEDS = ['0.5', '1', '2', '5']
 
+/** The sources, in the order the switch shows them. Adding a source to the
+ *  server's `Source` type makes this a type error until it has a label. */
+const SOURCE_LABELS: Record<Source, string> = {
+  local: 'Local recording',
+  live: 'Live',
+}
+
 /** Seconds between two instants the server sent as ISO strings. */
 function secondsBetween(from: string | null | undefined, to: string | null | undefined): number | null {
   if (!from || !to) return null
@@ -47,8 +54,8 @@ function clockTime(iso: string): string {
  * The PMU test streamer page (route `/pmu-test-streamer`) — the thin slice of
  * the data architecture, seen from the browser. A thin renderer over
  * usePmuStreamSocket: it draws the frame at the cursor as a station table, the
- * stats module's result for it, a Recorded | Live switch, and the replay
- * controls — all rendered from the player's own status. In live mode the
+ * stats module's result for it, a source switch, and the replay
+ * controls — all rendered from the server's state. On the shared live stream the
  * transport controls are disabled and a red LIVE badge says why; a control the
  * source cannot honour is disabled rather than dead.
  */
@@ -64,8 +71,7 @@ export function PmuTestStreamerPage() {
     back,
     seek,
     setSpeed,
-    goLive,
-    replay,
+    chooseSource,
     resetStats,
     playRange,
     averageRange,
@@ -99,7 +105,8 @@ export function PmuTestStreamerPage() {
   }, [scrub, seek])
 
   const player = state?.player
-  const live = player?.mode === 'live'
+  const source = state?.source
+  const live = source === 'live'
   // "Playing" is a replay notion: live is never paused, but its transport row
   // is disabled, and a filled Stop button there would read as an active one.
   const playing = player !== undefined && !player.paused && !live
@@ -110,7 +117,6 @@ export function PmuTestStreamerPage() {
   // switch to live over a source that can tail, and the transport row only
   // while the recording is what is open.
   const canSeek = connected && !live && player?.can_seek === true
-  const canGoLive = connected && player?.can_go_live === true
   const transport = connected && !live
   const stats = state?.stats?.result
   const error = state?.error
@@ -123,18 +129,19 @@ export function PmuTestStreamerPage() {
       <CardHeader className="border-b">
         <CardTitle className="text-lg">PMU Test Streamer</CardTitle>
         <span className="text-gray-500">
-          The sample recording replayed through the core: provider → gateway → player → bus →
+          A recorded or live PMU feed through the core: provider → gateway → player → bus →
           this page, with a stats module listening on the same bus.
         </span>
         <CardAction className="self-center">
           {connected && live ? (
             <Badge className="bg-red-600 text-white" aria-label="Live">
               <span className="size-2 rounded-full bg-white animate-pulse" aria-hidden />
-              LIVE
+              LIVE · {state?.live_viewers ?? 0} watching
             </Badge>
           ) : connected ? (
             <Badge variant={playing ? 'default' : 'secondary'}>
-              Recorded · {player?.ended ? 'Ended' : playing ? 'Playing' : 'Paused'}
+              {source ? SOURCE_LABELS[source] : 'Recorded'} ·{' '}
+              {player?.ended ? 'Ended' : playing ? 'Playing' : 'Paused'}
             </Badge>
           ) : (
             <Badge variant="outline" className="text-muted-foreground">
@@ -167,39 +174,34 @@ export function PmuTestStreamerPage() {
       </CardContent>
 
       <CardFooter className="flex-col gap-4 border-t pt-6">
-        {/* The source: the recording, or the live feed. Each button fires only
-            when it would change something — a `replay` in recorded mode would
-            restart the recording, which is not what a click on the already
-            active choice means. There is no toggle-group in ui/; two buttons
-            in a bordered group are what one user needs. */}
+        {/* The source: this browser's own recording, or the live stream every
+            viewer shares. A button fires only when it would change
+            something; one the server has no source for is disabled. There
+            is no toggle-group in ui/; buttons in a bordered group suffice. */}
         <div
           role="group"
           aria-label="Source"
           className="inline-flex items-center gap-1 rounded-lg border p-1"
         >
-          <Button
-            size="sm"
-            variant={live ? 'ghost' : 'default'}
-            aria-pressed={!live}
-            disabled={!connected}
-            onClick={() => {
-              if (live) replay()
-            }}
-          >
-            Recorded
-          </Button>
-          <Button
-            size="sm"
-            variant={live ? 'default' : 'ghost'}
-            className={live ? 'bg-red-600 text-white hover:bg-red-600/90' : undefined}
-            aria-pressed={live}
-            disabled={!canGoLive}
-            onClick={() => {
-              if (!live) goLive()
-            }}
-          >
-            Live
-          </Button>
+          {(Object.keys(SOURCE_LABELS) as Source[]).map((choice) => (
+            <Button
+              key={choice}
+              size="sm"
+              variant={source === choice ? 'default' : 'ghost'}
+              className={
+                source === choice && choice === 'live'
+                  ? 'bg-red-600 text-white hover:bg-red-600/90'
+                  : undefined
+              }
+              aria-pressed={source === choice}
+              disabled={!connected || !state?.sources_available.includes(choice)}
+              onClick={() => {
+                if (source !== choice) chooseSource(choice)
+              }}
+            >
+              {SOURCE_LABELS[choice]}
+            </Button>
+          ))}
         </div>
 
         {/* Position and the module's result for the frame at the cursor. */}
@@ -233,7 +235,7 @@ export function PmuTestStreamerPage() {
               size="icon"
               className="size-6"
               aria-label="Reset stats"
-              disabled={!connected || !stats}
+              disabled={!transport || !stats}
               onClick={resetStats}
             >
               <RotateCcwIcon className="size-3" />
