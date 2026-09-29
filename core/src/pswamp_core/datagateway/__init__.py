@@ -11,6 +11,7 @@ from ..settings import EnvSetting, MissingSettingError
 from .config import DATA_CLIENTS_VARIABLE, gateway_from_env
 from .data_client_model import Capability, DataClient, ModelSelector, MRIDFilter
 from .data_gateway import DataGateway, ProduceError
+from .enrich import CimReferenceEnricher, Enricher
 from .planner import DataGapError, GapPolicy, Segment, SegmentPlanner
 from .player import Player
 from .stream import DataStream
@@ -19,11 +20,13 @@ from .time_range import Coverage, TimeRange
 __all__ = [
     "DATA_CLIENTS_VARIABLE",
     "Capability",
+    "CimReferenceEnricher",
     "Coverage",
     "DataClient",
     "DataGapError",
     "DataGateway",
     "DataStream",
+    "Enricher",
     "EnvSetting",
     "GapPolicy",
     "MRIDFilter",

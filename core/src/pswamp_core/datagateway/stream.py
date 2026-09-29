@@ -16,7 +16,7 @@ across overlapping sources and exactly wrong for going backwards.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
     from ..messages.data_model import DataModel
     from .data_client_model import MRIDFilter
+    from .enrich import Enricher
     from .planner import Segment, SegmentPlanner
     from .time_range import TimeRange
 
@@ -48,6 +49,8 @@ class DataStream:
         model: Model class being streamed.
         request: Window requested by the caller. An open end tails forever.
         mRID: Optional identifier filter.
+        enrichers: Applied to every payload, in order, just before it is
+            yielded (after de-duplication), so every reader sees the same.
 
     Examples:
         >>> async with gateway.consume(PmuFrame, start=yesterday) as stream:
@@ -61,11 +64,13 @@ class DataStream:
         model: type[DataModel],
         request: TimeRange,
         mRID: MRIDFilter = None,
+        enrichers: Sequence[Enricher] = (),
     ):
         self._planner = planner
         self._model = model
         self._request = request
         self._mRID = mRID
+        self._enrichers = tuple(enrichers)
 
         self._generator: AsyncIterator[DataModel] | None = None
 
@@ -165,6 +170,9 @@ class DataStream:
 
                     emitted_at_watermark.add(payload.mRID)
                     produced = True
+
+                    for enricher in self._enrichers:
+                        payload = enricher.enrich(payload)
                     yield payload
             finally:
                 await _aclose(iterator)
