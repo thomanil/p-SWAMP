@@ -6,11 +6,13 @@ name regardless of which conftest.py pytest loaded first."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel
 
+from pswamp_core.bus import Subscription
 from pswamp_core.messages import DataModel, ResultEnvelope
 from pswamp_core.util.time import UTC
 
@@ -48,3 +50,15 @@ def measurement(index: int, moment: datetime) -> Measurement:
 
 def measurements(n: int, step_seconds: float = 1.0) -> list[Measurement]:
     return [measurement(i, at(i * step_seconds)) for i in range(n)]
+
+
+async def take(subscription: Subscription, n: int, timeout: float = 2.0) -> list:
+    """The next ``n`` messages off a subscription, or fail after ``timeout``."""
+
+    async def _take() -> list:
+        out = []
+        while len(out) < n:
+            out.append(await subscription.get())
+        return out
+
+    return await asyncio.wait_for(_take(), timeout)

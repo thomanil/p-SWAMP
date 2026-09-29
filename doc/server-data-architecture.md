@@ -119,3 +119,26 @@ frame, and a changed layout is just the next frame.
 *is* the seek, and its fields are its validated arguments. A module's own
 commands and result classes live beside the module; the player's live here,
 because the player is core.
+
+## Topics: the bus — `pswamp_core.bus`
+
+A topic is a message class. Two layers carry topics: the bus inside a process,
+and the transport between processes (next section). **A module only ever sees
+the bus.**
+
+**The bus** (`InProcessBus`) is publish/subscribe inside one process. There is
+one bus per pipeline, and a subscription to a base class receives every
+subclass.
+
+```python
+bus = InProcessBus()
+with bus.subscribe(PmuFrame, overflow=Overflow.DROP_OLDEST, maxsize=64) as frames:
+    async for frame in frames: ...
+bus.publish(result)                     # from the event loop
+bus.publish_threadsafe(result)          # from a thread: the one crossing point
+```
+
+Overflow is chosen per subscription: `DROP_OLDEST` for a live stream,
+`LATEST_ONLY` for state, `GROW` for commands. So a slow browser tab drops its
+own frames and never stalls the analysis. `Latest` keeps the newest message
+of each class, which is what a freshly connected socket renders from.
