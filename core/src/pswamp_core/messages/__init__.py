@@ -10,7 +10,10 @@ published into the browser-facing OpenAPI contract without an adapter.
 * **measurements** -- ``PmuFrame``, carrying its ``PmuHeader`` (``pmu``);
 * **commands** going up -- ``Command`` and the player's commands (``commands``);
 * **results and control** coming down -- ``ResultEnvelope`` (``results``),
-  ``PlayerStatus`` and ``StreamChanged`` (``control``), ``ErrorEvent`` (``errors``).
+  ``PlayerStatus`` and ``StreamChanged`` (``control``), ``ErrorEvent`` (``errors``);
+* **the remote data contract** -- ``RemoteDataQuery`` (a range query going up
+  over REST) and ``RemoteDataResult`` (one line of the streamed answer), in
+  ``remote_data``.
 """
 
 from .commands import (
@@ -29,6 +32,7 @@ from .control import PlayerStatus, StreamChanged
 from .data_model import DataModel, topic_from_name
 from .errors import ErrorEvent
 from .pmu import PmuFrame, PmuHeader
+from .remote_data import RemoteDataQuery, RemoteDataResult
 from .results import AppIdentity, AppStatus, ResultEnvelope
 
 __all__ = [
@@ -45,6 +49,8 @@ __all__ = [
     "PmuFrame",
     "PmuHeader",
     "RefreshCommand",
+    "RemoteDataQuery",
+    "RemoteDataResult",
     "ReplayCommand",
     "ResultEnvelope",
     "SeekCommand",
