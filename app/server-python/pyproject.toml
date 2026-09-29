@@ -17,7 +17,9 @@ dependencies = [
     "uvicorn[standard]>=0.52.4,<0.53",
     "p-swamp",
     # [kafka]: a module can run as its own service over Kafka.
-    "pswamp-core[kafka]",
+    # [remote-data]: httpx, for the Remote Data Client (a provider over a
+    # deployment's own data service, behind a REST contract).
+    "pswamp-core[kafka,remote-data]",
 ]
 
 # p-swamp is the desktop package at the repo root (root pyproject.toml, root
