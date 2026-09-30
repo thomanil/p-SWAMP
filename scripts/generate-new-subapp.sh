@@ -9,9 +9,13 @@
 # pushing state from a new backend package, and two POST commands over a per-client
 # counter. Replacing that counter is the only work left.
 #
-# Generated files come from scripts/templates/ — edit those, not this script, to
-# change what a subapp starts life as. Each is <filename>.template; the suffix is
+# Generated files come from scripts/templates/<set>/ — edit those, not this script,
+# to change what a subapp starts life as. Each is <filename>.template; the suffix is
 # stripped on render and keeps editors off them.
+#
+# TEMPLATE_SET picks the set: `subapp` (the default, the counter above) or `module`
+# (a module over the core pipeline and the page that shows it — what
+# generate-new-module-with-frontend.sh runs this script with).
 #
 # The subapp joins the api contract with no registry entry (its package exports
 # WS_MESSAGE, api_contract.py collects it); this script regenerates both artifacts
@@ -21,15 +25,16 @@ set -euo pipefail
 # Run from the repo root regardless of where the script is invoked from.
 cd "$(dirname "$0")/.."
 
+GENERATOR="${GENERATOR:-scripts/generate-new-subapp.sh}"
 if [ $# -ne 2 ]; then
-  echo 'usage: scripts/generate-new-subapp.sh <url-name> "<Nav Label>"' >&2
-  echo '   eg: scripts/generate-new-subapp.sh grid-overview "Grid Overview"' >&2
+  echo "usage: $GENERATOR <url-name> \"<Nav Label>\"" >&2
+  echo "   eg: $GENERATOR grid-overview \"Grid Overview\"" >&2
   exit 1
 fi
 
 # python3 does the work: derive the name's spellings, render the templates, and
 # insert into the registries by anchor. (Already required by error_check.sh.)
-SLUG="$1" LABEL="$2" python3 - <<'PY'
+SLUG="$1" LABEL="$2" TEMPLATE_SET="${TEMPLATE_SET:-subapp}" python3 - <<'PY'
 import json
 import keyword
 import os
@@ -52,16 +57,21 @@ def die(msg):
 #   name            GridOverview           React component, hook, model class
 #   ws_path_const   GRID_OVERVIEW_WS_PATH  ws path const in lib/servers.ts
 #   api_path_const  GRID_OVERVIEW_API_PATH REST prefix const, same file
+#   upper           GRID_OVERVIEW          env variable prefix (module set)
 #
 # Two path consts because the directions use two transports: state down the
 # socket, commands up as POSTs (see AGENTS.md).
 
 slug = os.environ["SLUG"]
 label = os.environ["LABEL"]
+template_set = os.environ["TEMPLATE_SET"]
 pkg = slug.replace("-", "_")
 name = "".join(word.capitalize() for word in slug.split("-"))
 ws_path_const = f"{pkg.upper()}_WS_PATH"
 api_path_const = f"{pkg.upper()}_API_PATH"
+
+if template_set not in ("subapp", "module"):
+    die(f"TEMPLATE_SET={template_set!r}: use 'subapp' or 'module'.")
 
 # The 32-char cap keeps the rendered Python lines short and readable. (They used
 # to have to fit ruff's 88-column limit; error_check.sh no longer enforces line
@@ -135,16 +145,25 @@ def render(text):
         ("__NAME__", name),
         ("__WS_PATH_CONST__", ws_path_const),
         ("__API_PATH_CONST__", api_path_const),
+        ("__UPPER__", pkg.upper()),
         ("__LABEL__", label),
     ):
         text = text.replace(token, value)
     return text
 
 
+# Each template folder of the set, and where its files land. The first two are
+# new folders; the module set also drops its unit tests into the server's tests/,
+# which exists already.
+TEMPLATES = Path("scripts/templates") / template_set
 sources = [
-    (Path("scripts/templates/server-python"), api_dir),
-    (Path("scripts/templates/client-web"), page_dir),
+    (TEMPLATES / "server-python", api_dir),
+    (TEMPLATES / "client-web", page_dir),
 ]
+if template_set == "module":
+    sources += [
+        (TEMPLATES / "tests", Path("app/server-python/tests")),
+    ]
 
 # Validate every template's name before rendering. This, the slug/label checks
 # above and the anchor checks below all run before the commit phase touches the
@@ -168,6 +187,8 @@ rendered = {}  # dest Path -> file contents
 for templates, dest_dir in sources:
     for template in sorted(templates.iterdir()):
         dest = dest_dir / render(template.name).removesuffix(".template")
+        if dest.exists():
+            die(f"{dest} already exists — pick another name.")
         rendered[dest] = render(template.read_text())
 
 
@@ -181,14 +202,20 @@ for templates, dest_dir in sources:
 patches = {}  # path -> patched contents
 
 
-def plan_edit(path, pattern, addition, before=False):
+def plan_edit(path, pattern, addition, before=False, group=None):
+    """Insert `addition` after the last match of `pattern`, before the first
+    (`before`), or at the end of capture `group` of the first (a list inside a
+    line, such as a worker's families)."""
     text = patches.get(path)
     if text is None:
         text = path.read_text()
     found = list(re.finditer(pattern, text, re.M))
     if not found:
         die(f"Could not find {pattern!r} in {path} — add the entry by hand.")
-    at = found[0].start() if before else found[-1].end()
+    if group is not None:
+        at = found[0].end(group)
+    else:
+        at = found[0].start() if before else found[-1].end()
     patches[path] = text[:at] + addition + text[at:]
 
 
@@ -245,14 +272,34 @@ plan_edit(
     before=True,
 )
 
+# The module set: the module-worker hosts the new family under compose and k8s
+# (the server hosts no module there), so its families list gains one entry.
+# Anchored on the worker's own name, so the mode-estimation worker's list, further
+# down both files, is never the one patched.
+if template_set == "module":
+    family_ref = f",{pkg}.family:FAMILY"
+    plan_edit(
+        Path("docker-compose.yml"),
+        r'^  module-worker:\n(?:.*\n)*?\s*PSWAMP_WORKER_FAMILIES: "?([^"\n]*)',
+        family_ref,
+        group=1,
+    )
+    plan_edit(
+        Path("k8s/p-swamp-local.yaml"),
+        r'name: p-swamp-module-worker\n(?:.*\n)*?\s*- name: PSWAMP_WORKER_FAMILIES\n\s*value: "?([^"\n]*)',
+        family_ref,
+        group=1,
+    )
+
 
 # --- commit: create dirs, write files, write patches, or roll back ----------
 #
 # The first write to the working tree happens here. If any write fails part way,
-# restore every patched file and remove the new folders, so a failure never
-# leaves a partial subapp for the contributor to untangle by hand.
+# restore every patched file, remove the new files and folders, so a failure
+# never leaves a partial subapp for the contributor to untangle by hand.
 
 created_dirs = []
+created_files = []
 originals = {path: path.read_text() for path in patches}
 try:
     for dest_dir in (api_dir, page_dir):
@@ -260,6 +307,7 @@ try:
         created_dirs.append(dest_dir)
     for dest, content in rendered.items():
         dest.write_text(content)
+        created_files.append(dest)
         print(f"  new      {dest}")
     for path, text in patches.items():
         path.write_text(text)
@@ -267,12 +315,20 @@ try:
 except Exception:
     for path, text in originals.items():
         path.write_text(text)
+    for dest in created_files:
+        dest.unlink(missing_ok=True)
     for dest_dir in reversed(created_dirs):
         shutil.rmtree(dest_dir, ignore_errors=True)
     raise
 
-print(f"\n\033[1m{label}: page /{slug}, socket /api/{slug}/ws, "
-      f"commands POST /api/{slug}/count/…\033[0m")
+if template_set == "module":
+    print(f"\n\033[1m{label}: page /{slug}, socket /api/{slug}/ws, "
+          f"module {pkg}.family:FAMILY\033[0m")
+    print("  hosted by the module-worker in docker-compose.yml and k8s/p-swamp-local.yaml;")
+    print(f"  unit tests in app/server-python/tests/test_{pkg}.py.")
+else:
+    print(f"\n\033[1m{label}: page /{slug}, socket /api/{slug}/ws, "
+          f"commands POST /api/{slug}/count/…\033[0m")
 print("  the api contract is regenerated next — commit doc/api/openapi.json and")
 print("  app/client-web/src/api/schema.ts along with the new subapp.")
 PY

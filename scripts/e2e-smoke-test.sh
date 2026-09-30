@@ -33,6 +33,10 @@
 #   8. the explorer flow               — count a range, play a bounded range: over REST, streamed
 #                                        back from the remote-data-stub container under compose,
 #                                        over the sample recording under a bare `docker run` (CI)
+#   9. the generators                  — scripts/check-generators.sh: a counter subapp and a module
+#                                        app generated from this working tree in a throwaway
+#                                        worktree, checked, booted on :8765 and driven. Not about
+#                                        the server above, so it runs in both forms
 #
 # Steps 1-5 are curl; steps 6-8 are tools/smoketest_*.py, since bash can't speak
 # a WebSocket (websockets is already in the server's env via uvicorn[standard]).
@@ -127,7 +131,7 @@ wait_for_healthz() {
 
 # --- Preflight ---------------------------------------------------------------
 missing=()
-needed=(curl uv)
+needed=(curl uv git npx)   # git and npx for step 9
 [ -n "${SMOKETEST_URL:-}" ] || needed+=(docker)
 for tool in "${needed[@]}"; do
   command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
@@ -218,6 +222,10 @@ section "Time Series Explorer (a range counted, and a range played to its end)"
 uv run --project app/server-python \
   python app/server-python/tools/smoketest_time_series_explorer.py "$BASE_URL" \
   || FAILURES+=("explorer flow")
+
+# --- 9: the generators, over this working tree --------------------------------
+section "Generators (a counter subapp and a module app, generated and driven)"
+scripts/check-generators.sh || FAILURES+=("generators")
 
 # --- Report ------------------------------------------------------------------
 if [ "${#FAILURES[@]}" -ne 0 ]; then

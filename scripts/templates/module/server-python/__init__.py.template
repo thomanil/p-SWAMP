@@ -1,0 +1,15 @@
+"""The __LABEL__ app: a module over the core, and the page that shows it.
+
+Same public surface as every app package — src/server.py uses nothing else:
+
+  router      the endpoints, mounted under /api/__SLUG__
+  WS_MESSAGE  the model this app pushes down its socket
+  lifespan    the pipeline registry bound, errors forwarded to the tray, and
+              (with no broker) the module hosted in the server
+"""
+
+from .api import __NAME__State, lifespan, router
+
+WS_MESSAGE = __NAME__State
+
+__all__ = ["WS_MESSAGE", "__NAME__State", "lifespan", "router"]

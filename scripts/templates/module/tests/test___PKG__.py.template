@@ -1,0 +1,90 @@
+"""The __LABEL__ app, bottom up: the analysis function, the module around it,
+and the pipeline end to end."""
+
+import asyncio
+from datetime import datetime, timezone
+
+import pytest
+from app_test_support import Watch, fresh_transport
+
+from __PKG__ import api, family
+from __PKG__.__PKG___module import __NAME__Module, __NAME__Result, highest_frequency
+from pmu_test_streamer.sample_client import SampleRecordingClient
+from pswamp_core.messages import PmuFrame, PmuHeader
+
+
+# --- the analysis: a plain function, plain values --------------------------------
+
+
+def test_picks_the_station_with_the_highest_frequency():
+    assert highest_frequency(["a", "b", "c"], [49.9, 50.1, 50.0]) == ("b", 50.1)
+
+
+def test_skips_stations_without_a_value():
+    assert highest_frequency(["a", "b"], [None, 49.8]) == ("b", 49.8)
+
+
+def test_none_when_no_station_has_a_value():
+    assert highest_frequency(["a", "b"], [None, None]) is None
+    assert highest_frequency([], []) is None
+
+
+# --- the module: a frame in, a result body out ---------------------------------
+
+
+def frame(values: list[float | None]) -> PmuFrame:
+    """A hand-made frame: one frequency channel per station."""
+    n = len(values)
+    header = PmuHeader(
+        station=[f"s{i}" for i in range(n)],
+        channel=["f"] * n,
+        measurement=["f"] * n,
+        units=["Hz"] * n,
+        data_rate=50.0,
+    )
+    return PmuFrame(mRID="test", timestamp=datetime.now(timezone.utc), header=header, values=values)
+
+
+@pytest.mark.asyncio
+async def test_process_reads_the_frequency_columns_of_a_frame():
+    result = await __NAME__Module().process(frame([49.9, 50.1, None]))
+    assert result is not None
+    assert (result.station, result.frequency_hz) == ("s1", 50.1)
+
+
+@pytest.mark.asyncio
+async def test_publishes_nothing_for_a_frame_without_frequencies():
+    assert await __NAME__Module().process(frame([None, None])) is None
+
+
+@pytest.mark.asyncio
+async def test_over_the_sample_recording():
+    module = __NAME__Module()
+    for f in SampleRecordingClient().frames:
+        result = await module.process(f)
+        assert result is not None and 49 < result.frequency_hz < 51
+
+
+# --- the pipeline: the module hosted, results on the transport -------------------
+
+
+@pytest.fixture
+def _own_transport(monkeypatch):
+    with fresh_transport(monkeypatch) as transport:
+        yield transport
+
+
+@pytest.mark.asyncio
+async def test_the_pipeline_delivers_results(_own_transport, monkeypatch):
+    monkeypatch.delenv(family.DATA_CLIENTS_VARIABLE, raising=False)
+    async with api.lifespan(None):  # hosts the module in this process
+        pipeline = api.build_pipeline("42")
+        seen = Watch(pipeline)
+        await pipeline.start()
+        try:
+            with seen.subscribe(__NAME__Result) as results:
+                result = await asyncio.wait_for(results.get(), 2)
+            assert result.app.name == "__SLUG__"
+            assert api.state_message(pipeline).result is not None
+        finally:
+            await pipeline.stop()

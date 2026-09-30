@@ -1,0 +1,21 @@
+"""What every __LABEL__ pipeline is made of: the ``__SLUG__.*`` topics, a
+gateway over the configured sources, and the module. A worker hosts it with
+``PSWAMP_WORKER_FAMILIES=__PKG__.family:FAMILY``."""
+
+from pswamp_core.datagateway import DataGateway, gateway_from_env
+from pswamp_core.pipeline import PipelineFamily
+
+from .__PKG___module import __NAME__Module
+
+APP = "__SLUG__"
+
+#: The sources a deployment gets unless __UPPER___DATA_CLIENTS names others.
+DEFAULT_DATA_CLIENTS = "sample:pmu_test_streamer.sample_client:SampleRecordingClient"
+DATA_CLIENTS_VARIABLE = "__UPPER___DATA_CLIENTS"
+
+
+def gateway() -> DataGateway:
+    return gateway_from_env(DEFAULT_DATA_CLIENTS, variable=DATA_CLIENTS_VARIABLE)
+
+
+FAMILY = PipelineFamily(APP, gateway, (__NAME__Module,))

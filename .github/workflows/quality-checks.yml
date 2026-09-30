@@ -98,6 +98,15 @@ jobs:
           cache-dependency-glob: app/server-python/uv.lock
       - run: uv python install 3.11
 
+      # node for the smoke test's last step, check-generators.sh: it runs
+      # error_check.sh (tsc, eslint) over a freshly generated tree. Node 24, as in
+      # the Dockerfile.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: app/client-web/package-lock.json
+
       # Shares the type=gha layer cache with build-container.yml, so this build
       # is mostly a cache hit. `load: true` puts the image in the runner's daemon.
       - uses: docker/setup-buildx-action@v4
@@ -120,7 +129,7 @@ jobs:
             p-swamp:smoketest
 
       # SMOKETEST_URL = test this server, don't manage its lifecycle. The script
-      # waits for /healthz itself.
+      # waits for /healthz itself, and ends with check-generators.sh.
       - name: Smoke test the running image
         run: SMOKETEST_URL=http://127.0.0.1:8000 ./scripts/e2e-smoke-test.sh
 

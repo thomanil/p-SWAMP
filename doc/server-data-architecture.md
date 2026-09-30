@@ -594,6 +594,8 @@ design.
 
 ## Adding a module and its page
 
+Step by step, with tested code, logs and troubleshooting: `doc/module-cookbook.md`.
+
 **A provider** (a TSO's data source): implement `DataClient` in your own
 package, importing `pswamp_core.datagateway` and `pswamp_core.messages` only;
 declare `env_settings`; inherit `DataClientConformance` in a test; name the

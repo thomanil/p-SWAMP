@@ -1,0 +1,66 @@
+"""The __LABEL__ app's backend: the web edge over one core pipeline per client.
+
+    source ── DataGateway ── Player ──▶ topic __SLUG__.pmu.frame ──▶ __NAME__Module
+                    this socket ◀── pipeline.latest ◀── topic __SLUG__.…result ◀──┘
+
+One pipeline per browser client, built on its first connect and dropped when
+idle. server.py mounts this ``router`` under /api/__SLUG__.
+"""
+
+import contextlib
+from typing import Literal
+
+from fastapi import APIRouter, FastAPI, WebSocket
+from pydantic import BaseModel, Field
+from shared import connected_pipeline, get_logger, push_changes, serve_family, transport
+
+from pswamp_core.messages import PlayerStatus
+from pswamp_core.pipeline import Pipeline, PipelineRegistry
+
+from .family import FAMILY
+from .__PKG___module import __NAME__Result
+
+logger = get_logger("__SLUG__")
+
+
+def build_pipeline(client_id: str) -> Pipeline:
+    """One client's pipeline: a player that plays at once and loops a history."""
+    return Pipeline(client_id, FAMILY, transport(), autoplay=True, loop=True)
+
+
+REGISTRY: PipelineRegistry[Pipeline] = PipelineRegistry(
+    build_pipeline, max_pipelines=8, idle_seconds=300.0
+)
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with serve_family(FAMILY, REGISTRY):
+        yield
+
+
+class __NAME__State(BaseModel):
+    """The one message pushed on connect and on every change."""
+
+    type: Literal["state"] = "state"
+    player: PlayerStatus = Field(description="Which stream is open, and where it is.")
+    result: __NAME__Result | None = Field(
+        description="The module's latest result; null until the first."
+    )
+
+
+def state_message(pipeline: Pipeline) -> __NAME__State:
+    return __NAME__State(
+        player=pipeline.player.status(),
+        result=pipeline.latest.get(__NAME__Result),
+    )
+
+
+router = APIRouter()
+
+
+@router.websocket("/ws")
+async def ws_endpoint(ws: WebSocket) -> None:
+    async with connected_pipeline(ws, REGISTRY) as pipeline:
+        if pipeline is not None:
+            await push_changes(ws, pipeline, lambda: state_message(pipeline))

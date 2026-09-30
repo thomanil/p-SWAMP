@@ -1,11 +1,34 @@
-# Subapp templates
+# Generator templates
 
-What `../generate-new-subapp.sh` copies into a new subapp. Edit these to change
-what every new page/api starts life as; the script itself only derives names and
-patches the registries.
+What the two generators copy into a new app. Edit these to change what every
+new app starts life as; the scripts only derive names and patch the registries.
+Both run one engine, `../generate-new-subapp.sh`, which picks a set with
+`TEMPLATE_SET`.
+
+| Set | Script | What it writes |
+|---|---|---|
+| `subapp/` | `generate-new-subapp.sh` | A page and an api over a per-client counter, no pipeline: for prototyping a page |
+| `module/` | `generate-new-module-with-frontend.sh` | A module over the core pipeline, its family and api, and a page showing its result |
+
+Where each folder lands:
 
 - `server-python/` → `app/server-python/src/<pkg>/`
 - `client-web/` → `app/client-web/src/pages/<slug>/`
+- `tests/` (module set) → `app/server-python/tests/`
+
+The module set also appends `<pkg>.family:FAMILY` to the module-worker's
+`PSWAMP_WORKER_FAMILIES` in `docker-compose.yml` and `k8s/p-swamp-local.yaml`.
+`doc/module-cookbook.md` walks through every file of that set, and its code is
+the module set rendered for `peak-frequency`: change one, change the other.
+
+**`../check-generators.sh` proves both sets still work**: it generates one app
+of each in a throwaway worktree, runs `error_check.sh` and the module's tests,
+boots the server and drives both sockets. `e2e-smoke-test.sh` runs it as its
+last step, and so does CI: a template that stops matching the code around it
+fails a pull request.
+
+The rest of this file describes the `subapp/` set; its rules on comments,
+contract prose and names hold for `module/` too.
 
 A generated subapp comes out looking like the checked-in reference subapp
 (`app/server-python/src/reference_subapp/`,
@@ -40,6 +63,7 @@ called `use__NAME__Socket.ts.template`. The tokens, for the example name
 | `__NAME__` | `GridOverview` | the React component, the hook, the model class |
 | `__WS_PATH_CONST__` | `GRID_OVERVIEW_WS_PATH` | the ws path const in `lib/servers.ts` |
 | `__API_PATH_CONST__` | `GRID_OVERVIEW_API_PATH` | the REST prefix const, same file |
+| `__UPPER__` | `GRID_OVERVIEW` | an env variable prefix (`GRID_OVERVIEW_DATA_CLIENTS`) |
 | `__LABEL__` | `Grid Overview` | the nav entry and page title |
 
 The rendered Python has to pass `scripts/error_check.sh` — pyflakes lint plus a

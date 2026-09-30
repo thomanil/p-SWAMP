@@ -1,0 +1,13 @@
+import type { Wire } from '@/api/wire'
+import { __WS_PATH_CONST__ } from '@/lib/servers'
+import { useServerSocket } from '@/hooks/useServerSocket'
+
+/** What the server pushes, generated from the api contract — the model
+ *  declared in app/server-python/src/__PKG__/api.py, not a hand-copy of it. */
+export type __NAME__State = Wire['__NAME__State']
+
+/** The __LABEL__ app: the module's state arrives on the socket. */
+export function use__NAME__Socket() {
+  const { message, status, connected } = useServerSocket<__NAME__State>(__WS_PATH_CONST__)
+  return { state: message, status, connected }
+}
