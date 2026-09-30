@@ -71,7 +71,7 @@ are non-blank, and in brackets Python without comments or docstrings:
 | `core/src` | 5607 (3744) | 5255 (3461) |
 | server app `src` | 3786 (2524) | 3406 (2244) |
 | core + app tests | 4128 (3747) | 3995 (3595) |
-| docs (`doc/*.md`, AGENTS.md, core README) | 4080 | 3685 |
+| docs (`doc/*.md`, AGENTS.md, core README) | 4080 | 3440 |
 | e2e specs (Playwright) | 112 | 492 |
 | diff against `main`, excluding the generated contract and STEP notes | +22443 / −536 | +21370 / −550 |
 
@@ -81,7 +81,9 @@ mechanisms 2 → 1; transport variables in compose/k8s 8 → 3; worker entry
 points 3 → 1 (generic); in-process-or-remote branches in the apps 12 → 0;
 copies of the socket handshake 5 → 1 and of the push loop 6 → 1; compose
 services 6 → 5; gateway routing concepts (segments, priority, watermark, gap
-policy, hand-off) all gone; the architecture doc 1116 → 645 lines.
+policy, hand-off) all gone; the architecture doc 1116 → 740 lines, with the
+diagrams doc (a comparison with Louis Pauchet's draft) dropped and its class
+diagram of the messages folded in.
 
 ## Verified
 

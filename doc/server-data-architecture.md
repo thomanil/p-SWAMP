@@ -34,7 +34,7 @@ flowchart TB
         player["Player<br/>replays a history · tails a live feed"]:::data
         view["latest + changes()<br/>the newest message of each class"]:::data
     end
-    subgraph transport["Transport — in-memory or Kafka: same topics, same keys<br/>topic = &lt;app&gt;.&lt;message class&gt; · record key = pipeline key"]
+    subgraph transport["Transport — in-memory or Kafka: same topics, same keys"]
         direction LR
         frames[["&lt;app&gt;.pmu.frame"]]
         results[["&lt;app&gt;.&lt;result&gt;"]]
@@ -59,9 +59,9 @@ flowchart TB
 
 **Every arrow carries a pydantic model** (`PmuFrame`, `PlayerStatus`,
 `SeekCommand`, …): JSON with a schema version end to end, and the browser's
-TypeScript types are generated from the same classes. Thick arrows are data,
-dotted ones commands; the same legend is used in every diagram here and in
-`server-data-architecture-diagrams.md`.
+TypeScript types are generated from the same classes. A topic is
+`<app>.<message class>` and a record's key is its pipeline's key, over either
+transport. Thick arrows are data, dotted ones commands, in every diagram here.
 
 ## The layers
 
@@ -110,6 +110,106 @@ about 1.2x on the wire once a broker's batch compression collapses the
 repeats, and in return any single frame is enough to work from -- a module
 reads the layout off the frame in hand, a late worker is primed by its first
 input, and a changed layout is simply the next frame's header.
+
+Every message, and what derives from what:
+
+```mermaid
+classDiagram
+    class BaseModel["pydantic.BaseModel"]
+
+    class DataModel {
+        +version: str, a Literal pinned per subclass
+        +mRID: str, optional
+        +timestamp: datetime, optional, coerced to UTC
+        +topic: ClassVar from the class name, PmuFrame → pmu.frame
+        -_sent_at: float, stamped on receipt, never serialised
+        +topic_name()
+    }
+    BaseModel <|-- DataModel
+
+    class PmuFrame {
+        +mRID: str, required: the stream
+        +timestamp: datetime, required: the PMU time
+        +header: PmuHeader
+        +values: list of float or null
+        +quality: list of int, optional
+    }
+    class PmuHeader {
+        +station, channel, measurement, units: per column
+        +data_rate: float
+        +freq_encoding: absolute_hz
+        +cimReferenceId: str, optional
+        +header_id: content hash, computed and cached
+        +columns(measurement)
+    }
+    DataModel <|-- PmuFrame
+    PmuFrame *-- PmuHeader : rides inside every frame
+
+    class Command {
+        +request_id: str, generated
+        +client_id: str, optional
+        +name: from the class, e.g. switch.source
+    }
+    class PlayerCommand {
+        Play · Pause · Refresh
+        Step: n
+        Seek: to or offset_s
+        Speed: speed
+        SwitchSource: source
+        Replay: start or offset_s, end or end_offset_s, play
+    }
+    Command <|-- PlayerCommand
+    class PlayerStatus {
+        +mode: live or replay
+        +cursor, speed, paused, loop, ended
+        +source, sources, can_seek
+        +coverage_start, coverage_end, range_end
+        +frame_interval_s: float, optional
+        +error: str, optional
+    }
+    class StreamChanged {
+        +cursor
+    }
+    class PipelineClosed {
+        +reason: idle, capacity, shutdown
+    }
+    DataModel <|-- Command
+    DataModel <|-- PlayerStatus
+    DataModel <|-- StreamChanged
+    DataModel <|-- PipelineClosed
+
+    class ResultEnvelope~T~ {
+        +timestamp: the instant the result is about
+        +app: AppIdentity, name and uuid
+        +parameters: dict
+        +request_id: str, optional, copied from a Command
+        +result: T
+    }
+    class AppStatusMessage {
+        +app: AppIdentity
+        +status: AppStatus
+    }
+    class ErrorEvent {
+        +source: player, a module name, a client name
+        +message: str
+        +detail: str, optional
+        +request_id: str, optional
+    }
+    DataModel <|-- ResultEnvelope
+    DataModel <|-- AppStatusMessage
+    DataModel <|-- ErrorEvent
+
+    class RemoteDataQuery {
+        +version, query_id, model: a topic string, start, end, mrid
+    }
+    class RemoteDataResult {
+        +kind: record, end or error
+        +model, record, count, error
+        one NDJSON line of the response
+    }
+    BaseModel <|-- RemoteDataQuery
+    BaseModel <|-- RemoteDataResult
+```
 
 *Where.* `core/src/pswamp_core/messages/`: `data_model.py`, `pmu.py`,
 `results.py` (what modules emit), `commands.py`, `control.py` (player state,
@@ -386,8 +486,8 @@ sequenceDiagram
 
     B->>E: POST /playback/source {name: "live"}
     Note over E: REGISTRY.peek (404 without a pipeline)<br/>player.validate
-    alt refused (no such source; a transport command while live)
-        E-->>B: 409, with the player's reason; nothing published
+    alt refused (no such source, or a transport command while live)
+        E-->>B: 409 with the player's reason, and nothing published
     else accepted
         E->>T: SwitchSourceCommand on pmu-test-streamer.switch.source.command
         E-->>B: CommandAck {applied: "switch.source"}
