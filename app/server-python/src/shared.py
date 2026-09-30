@@ -30,37 +30,40 @@ What is genuinely defined here is `SocketRegistry` — the scaffold apps' socket
 bookkeeping, which `pswamp_web/` has no use for because its pages push from their
 own per-connection task rather than fanning out to a client's sockets.
 
-`event_queue` and `serve_updates` are the grid monitor's event-driven push loop
-(`pswamp_web/pump.py`), re-exported because they serve a core pipeline
-unchanged: the core bus kept `add_listener(topic, fn)`, with a message class as
-the topic, so a page over `pswamp_core` wakes on its result class the same way
-a monitor page wakes on a store topic.
+Then what every app over a core pipeline shares, which is all of its plumbing:
 
-`dispatch_command` is the one way an app over a core pipeline turns a POST
-into a command: find the client's pipeline (404 without one -- a command never
-builds a pipeline), `pipeline.dispatch` it (409 when its receiver refuses it
-now), acknowledge. `COMMAND_RESPONSES` documents those two answers on the
-route, so the published contract carries them.
+- `transport()` is the process's one transport (`PSWAMP_TRANSPORT`; unset, the
+  in-memory one), closed by this module's `lifespan`, which `server.py` enters
+  as a service before every app and leaves after them.
+- `serve_family(family, registry)` is an app's lifespan: it binds the
+  registry, forwards the family's `ErrorEvent`s to the layout's error tray
+  (`errors.forward_errors`), and -- when the transport is in-memory -- hosts the
+  family's modules right here, in this process.
+- `connected_pipeline(ws, registry)` and `push_changes(ws, pipeline, build)`
+  are a socket endpoint: accept and hold the client's pipeline, then send
+  `build()` on connect and on every change, coalesced.
+- `dispatch_command` is the one way a POST becomes a command: find the client's
+  pipeline (404 without one -- a command never builds a pipeline),
+  `pipeline.dispatch` it (409 when the player refuses it now), acknowledge.
+  `COMMAND_RESPONSES` documents those two answers on the route, so the
+  published contract carries them.
 
-`ErrorForwarderModule` and `HUB` come from the `errors` app package: every app
-that builds a core pipeline appends one forwarder to its module list, so a
-pipeline's `ErrorEvent`s reach the layout's error tray with the app's slug on
-them. Re-exported here so those apps import it from the one place they already
-import from; `errors` itself never imports `shared` (see its docstring), which
-is what keeps this from being a cycle.
+`errors` itself never imports `shared` (see its docstring): the transport is
+handed to its forwarder, which is what keeps this from being a cycle.
 """
 
+import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
-from fastapi import HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from errors.forwarder import ErrorForwarderModule
+from errors.forwarder import forward_errors
 from errors.hub import HUB
 from pswamp_web.log import get_logger
-from pswamp_web.pump import event_queue, serve_updates, wait_for_disconnect
+from pswamp_web.pump import wait_for_disconnect
 from pswamp_web.sessions import SessionRegistry
 from pswamp_web.wire import (
     CLIENT_ID_PATTERN,
@@ -71,8 +74,10 @@ from pswamp_web.wire import (
 )
 
 from pswamp_core.command_routing import CommandRefused
+from pswamp_core.host import hosts_for, serve_hosts
 from pswamp_core.messages import Command
-from pswamp_core.pipeline import PipelineRegistry
+from pswamp_core.pipeline import CapacityError, Pipeline, PipelineFamily, PipelineRegistry
+from pswamp_core.transport import Transport, transport_from_env
 
 __all__ = [
     "CLIENT_ID_PATTERN",
@@ -80,16 +85,20 @@ __all__ = [
     "HUB",
     "ClientId",
     "CommandAck",
-    "ErrorForwarderModule",
     "SocketRegistry",
+    "connected_pipeline",
     "dispatch_command",
-    "event_queue",
     "get_logger",
+    "lifespan",
+    "push_changes",
     "read_client_id",
     "send_state",
-    "serve_updates",
+    "serve_family",
+    "transport",
     "wait_for_disconnect",
 ]
+
+logger = get_logger("shared")
 
 
 class SocketRegistry(SessionRegistry[WebSocket]):
@@ -163,8 +172,8 @@ def dispatch_command(
 
     404 when the client has no pipeline (a command never builds one); 409 when
     the receiver refuses it in its current state, with its reason as the
-    detail. Otherwise the command is on the pipeline's bus and the ack says so:
-    the effect arrives on the socket, never in this reply.
+    detail. Otherwise the command is on its topic and the ack says so: the
+    effect arrives on the socket, never in this reply.
     """
     client_id = command.client_id or ""
     pipeline = registry.peek(client_id)
@@ -183,3 +192,136 @@ def dispatch_command(
         raise HTTPException(status_code=409, detail=str(refused)) from refused
     logger.info("client %s: %s (request %s)", client_id, command.name, command.request_id)
     return CommandAck(applied=command.name)
+
+
+# --- the transport, one per process -----------------------------------------------
+
+_TRANSPORT: Transport | None = None
+
+
+def transport() -> Transport:
+    """The process's transport, built on first use from ``PSWAMP_TRANSPORT``."""
+    global _TRANSPORT
+    if _TRANSPORT is None:
+        _TRANSPORT = transport_from_env()
+        logger.info(
+            "transport: %s (%s)", _TRANSPORT.name,
+            "modules hosted in this process" if _TRANSPORT.in_process else "modules hosted by workers",
+        )
+    return _TRANSPORT
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Close the transport once every app is done with it."""
+    global _TRANSPORT
+    try:
+        yield
+    finally:
+        closing, _TRANSPORT = _TRANSPORT, None
+        if closing is not None:
+            await closing.close()
+
+
+@contextlib.asynccontextmanager
+async def serve_family(family: PipelineFamily, registry: PipelineRegistry) -> AsyncIterator[None]:
+    """An app's lifespan: its registry bound to the loop, its errors forwarded
+    to the tray, and -- with the in-memory transport -- its modules hosted here.
+    On the way out every pipeline stops (each saying ``PipelineClosed``)."""
+    registry.bind(asyncio.get_running_loop())
+    link = transport()
+    tasks = [asyncio.create_task(forward_errors(link, family.app), name=f"{family.app}.errors")]
+    if link.in_process:
+        tasks.append(asyncio.create_task(serve_hosts(hosts_for(family, link)), name=f"{family.app}.hosts"))
+    elif family.modules:
+        logger.info(
+            "%s: modules %s are hosted by a worker", family.app, ", ".join(m.name for m in family.modules)
+        )
+    try:
+        yield
+    finally:
+        await registry.stop_all()
+        registry.bind(None)
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+
+# --- a socket over a pipeline ------------------------------------------------------
+
+
+@contextlib.asynccontextmanager
+async def connected_pipeline(ws: WebSocket, registry: PipelineRegistry) -> AsyncIterator[Pipeline | None]:
+    """Accept one socket and hold its client's pipeline for as long as it lives.
+
+    Yields ``None`` when the connection was refused. The ordering of ``accept``
+    is the point: no usable client id is closed *before* accepting (1008); at
+    capacity the socket is accepted first and then closed with 1013, because a
+    code only reaches the browser on an established connection, and the web
+    client treats 1013 as terminal; a pipeline that fails to start is 1011.
+    """
+    client_id = read_client_id(ws)
+    if client_id is None:
+        await ws.close(code=1008)  # policy violation
+        yield None
+        return
+    await ws.accept()
+    try:
+        pipeline = await registry.acquire(client_id)
+    except CapacityError:
+        logger.warning("refused client %s: all %s pipelines in use", client_id, registry.max_pipelines)
+        await ws.close(code=1013)  # try again later
+        yield None
+        return
+    except Exception:
+        logger.exception("failed to start pipeline for client %s", client_id)
+        await ws.close(code=1011)  # unexpected server error
+        yield None
+        return
+    try:
+        yield pipeline
+    finally:
+        registry.release(client_id)
+
+
+async def push_changes(
+    ws: WebSocket,
+    pipeline: Pipeline,
+    build: Callable[[], BaseModel],
+    *,
+    min_interval: float = 0.0,
+    tick: float | None = None,
+) -> None:
+    """Send ``build()`` now and on every change of ``pipeline`` until the
+    client disconnects.
+
+    Coalesces: a wake-up means "something changed", and the message is built
+    from the pipeline's current state, so however much arrived meanwhile one
+    message goes. ``min_interval`` caps the rate (a 50x replay changes 2500
+    times a second); ``tick`` sends anyway after that long without a change
+    (readings that move with the clock, not with a message). A client that is
+    gone by the time a message is sent ends the connection, quietly: that is a
+    disconnect, not an error.
+    """
+    with pipeline.changes() as changes:
+        try:
+            await send_state(ws, build())
+        except WebSocketDisconnect:
+            return
+
+        async def push() -> None:
+            while True:
+                await changes.wait(tick)
+                await send_state(ws, build())
+                if min_interval:
+                    await asyncio.sleep(min_interval)
+
+        pusher = asyncio.create_task(push())
+        try:
+            await wait_for_disconnect(ws)
+        finally:
+            pusher.cancel()
+            with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
+                await pusher

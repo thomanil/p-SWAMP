@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Louis Pauchet <louis.pauchet@sintef.no>
 # SPDX-License-Identifier: Apache-2.0
 
-"""Behaviour of the gateway's time-range routing across data clients.
+"""Behaviour of the gateway: named sources, one of them active, and the writers.
 
-Lifted from the test_pswamp draft (``tests/test_data_gateway.py``); the cases
-under "added in p-SWAMP" (coverage union, produce failures surfaced, live
-fan-out, and the capability rules) are new.
+Lifted from the test_pswamp draft (``tests/test_data_gateway.py``), without its
+routing across clients; the cases under "added in p-SWAMP" (the active source
+and the switch, produce failures surfaced, live fan-out) are new.
 """
 
 from __future__ import annotations
@@ -17,14 +17,7 @@ from datetime import timedelta
 import pytest
 from support import HISTORY, LIVE, Measurement, at, collect, measurement
 
-from pswamp_core.datagateway import (
-    Capability,
-    Coverage,
-    DataGapError,
-    DataGateway,
-    ProduceError,
-    TimeRange,
-)
+from pswamp_core.datagateway import Capability, Coverage, DataGateway, ProduceError, TimeRange
 from pswamp_core.datagateway.clients import InMemoryClient
 from pswamp_core.util.time import utcnow
 
@@ -49,17 +42,6 @@ class TrackingClient(InMemoryClient):
             self.closed = True
 
 
-class ReplayingClient(InMemoryClient):
-    """Client that always replays its whole window, ignoring the requested start."""
-
-    async def consume(self, model, time_range, mRID=None) -> AsyncIterator[Measurement]:
-        for record in self.records:
-            if time_range.end is not None and record.timestamp >= time_range.end:
-                return
-
-            yield record
-
-
 async def test_single_client_history():
     client = InMemoryClient(
         "csv",
@@ -70,7 +52,6 @@ async def test_single_client_history():
     gateway = DataGateway([client])
 
     assert await collect(gateway.consume(Measurement)) == ["m0", "m1", "m2"]
-
 
 async def test_request_window_is_honoured():
     client = InMemoryClient(
@@ -84,125 +65,6 @@ async def test_request_window_is_honoured():
     stream = gateway.consume(Measurement, start=at(1), end=at(3))
 
     assert await collect(stream) == ["m1", "m2"]
-
-
-async def test_stitches_across_two_clients():
-    cold = InMemoryClient(
-        "cold",
-        [Measurement],
-        [measurement(index, at(index)) for index in range(3)],
-        priority=10,
-        capabilities=HISTORY,
-    )
-    warm = InMemoryClient(
-        "warm",
-        [Measurement],
-        [measurement(index, at(index)) for index in range(1, 5)],
-        priority=5,
-        capabilities=HISTORY,
-    )
-    gateway = DataGateway([cold, warm])
-
-    stream = gateway.consume(Measurement)
-    result = await collect(stream)
-
-    assert result == ["m0", "m1", "m2", "m3", "m4"]
-    assert [segment.client.name for segment in stream.segments] == ["cold", "warm"]
-
-
-async def test_overlapping_records_are_emitted_once():
-    cold = InMemoryClient(
-        "cold",
-        [Measurement],
-        [measurement(0, at(0)), measurement(1, at(1))],
-        priority=10,
-        capabilities=HISTORY,
-        coverage_fn=lambda: Coverage(TimeRange(at(0), at(2))),
-    )
-    bus = ReplayingClient(
-        "bus",
-        [Measurement],
-        [measurement(index, at(index)) for index in range(4)],
-        priority=5,
-        capabilities=HISTORY,
-        coverage_fn=lambda: Coverage(TimeRange(at(0), at(4))),
-    )
-    gateway = DataGateway([cold, bus])
-
-    assert await collect(gateway.consume(Measurement)) == ["m0", "m1", "m2", "m3"]
-
-
-async def test_gap_is_skipped_by_default():
-    early = InMemoryClient("early", [Measurement], [measurement(0, at(0))], capabilities=HISTORY)
-    late = InMemoryClient("late", [Measurement], [measurement(9, at(90))], capabilities=HISTORY)
-    gateway = DataGateway([early, late])
-
-    assert await collect(gateway.consume(Measurement)) == ["m0", "m9"]
-
-
-async def test_gap_raises_under_strict_policy():
-    early = InMemoryClient("early", [Measurement], [measurement(0, at(0))], capabilities=HISTORY)
-    late = InMemoryClient("late", [Measurement], [measurement(9, at(90))], capabilities=HISTORY)
-    gateway = DataGateway([early, late], on_gap="raise")
-
-    with pytest.raises(DataGapError):
-        await collect(gateway.consume(Measurement))
-
-
-async def test_live_source_is_opened_only_once_replay_catches_up():
-    now = utcnow()
-    history = [
-        measurement(index, now - timedelta(seconds=30 - index * 10))
-        for index in range(3)
-    ]
-
-    # The temporal database keeps ingesting while we replay, so its end advances.
-    advancing_ends = iter(
-        [now - timedelta(seconds=20), now - timedelta(seconds=10), now]
-    )
-    last_end = [now]
-
-    def db_coverage() -> Coverage:
-        last_end[0] = next(advancing_ends, last_end[0])
-        return Coverage(TimeRange(now - timedelta(seconds=30), last_end[0]))
-
-    db = TrackingClient(
-        "timescale",
-        [Measurement],
-        history,
-        priority=10,
-        capabilities=HISTORY,
-        coverage_fn=db_coverage,
-    )
-    bus = TrackingClient(
-        "kafka",
-        [Measurement],
-        [],
-        priority=5,
-        capabilities=LIVE,
-        coverage_fn=lambda: Coverage(
-            TimeRange(utcnow() - timedelta(seconds=20), utcnow()), live=True
-        ),
-    )
-
-    gateway = DataGateway([db, bus])
-    stream = gateway.consume(Measurement, end=now + timedelta(seconds=5))
-
-    bus.publish(measurement(3, now + timedelta(seconds=1)))
-    bus.publish(measurement(4, now + timedelta(seconds=10)))
-
-    result = await asyncio.wait_for(collect(stream), timeout=5)
-
-    assert result == ["m0", "m1", "m2", "m3"]
-    assert [segment.client.name for segment in stream.segments] == [
-        "timescale",
-        "timescale",
-        "timescale",
-        "kafka",
-    ]
-    assert stream.segments[-1].live is True
-    assert bus.consume_calls == 1
-
 
 async def test_closing_a_stream_releases_the_client_iterator():
     client = TrackingClient(
@@ -222,7 +84,6 @@ async def test_closing_a_stream_releases_the_client_iterator():
 
     assert client.closed is True
 
-
 async def test_produce_stamps_missing_timestamp():
     client = InMemoryClient("csv", [Measurement], capabilities=HISTORY)
     gateway = DataGateway([client])
@@ -233,16 +94,6 @@ async def test_produce_stamps_missing_timestamp():
     assert payload.timestamp is not None
     assert client.records == [payload]
 
-
-async def test_disabled_gateway_rejects_calls():
-    gateway = DataGateway(None)
-
-    assert gateway.enabled is False
-
-    with pytest.raises(RuntimeError):
-        gateway.consume(Measurement)
-
-
 async def test_duplicate_client_names_are_rejected():
     with pytest.raises(ValueError, match="Duplicate"):
         DataGateway(
@@ -251,28 +102,6 @@ async def test_duplicate_client_names_are_rejected():
                 InMemoryClient("csv", [Measurement], capabilities=HISTORY),
             ]
         )
-
-
-# --- added in p-SWAMP -------------------------------------------------------
-
-
-async def test_coverage_is_the_union_over_clients():
-    cold = InMemoryClient(
-        "cold", [Measurement], [measurement(i, at(i)) for i in range(3)], capabilities=HISTORY
-    )
-    warm = InMemoryClient(
-        "warm", [Measurement], [measurement(i, at(i)) for i in range(2, 6)], capabilities=LIVE
-    )
-    gateway = DataGateway([cold, warm])
-
-    coverage = await gateway.coverage(Measurement)
-
-    assert coverage is not None
-    assert coverage.range.start == at(0)
-    assert coverage.range.contains(at(5))
-    assert coverage.live is True
-    assert await gateway.coverage(Measurement, mRID="nope") is None
-
 
 async def test_produce_failures_are_surfaced():
     class Broken(InMemoryClient):
@@ -288,7 +117,6 @@ async def test_produce_failures_are_surfaced():
 
     assert set(excinfo.value.failures) == {"bad"}
     assert len(good.records) == 1  # the healthy client still wrote
-
 
 async def test_in_memory_live_delivery_fans_out_to_every_consumer():
     client = InMemoryClient("bus", [Measurement], capabilities=LIVE)
@@ -311,99 +139,120 @@ async def test_in_memory_live_delivery_fans_out_to_every_consumer():
     await second.aclose()
 
 
-# --- declared capabilities are honoured by routing ----------------------------
+# --- added in p-SWAMP: one active source ------------------------------------
 
 
-def _live_only(name: str, since: timedelta = timedelta(seconds=60), **kwargs) -> TrackingClient:
-    """A client that can tail but holds no history: its coverage is now-relative
-    and live, like a broker subscription with no retention."""
+def _history(name: str, first: int, last: int) -> TrackingClient:
+    return TrackingClient(
+        name, [Measurement], [measurement(i, at(i)) for i in range(first, last)], capabilities=HISTORY
+    )
+
+
+def _live(name: str) -> TrackingClient:
     return TrackingClient(
         name,
         [Measurement],
         [],
-        capabilities=Capability.LIVE_CONSUME,
-        coverage_fn=lambda: Coverage(TimeRange(utcnow() - since, None), live=True),
-        **kwargs,
+        capabilities=LIVE,
+        coverage_fn=lambda: Coverage(TimeRange(utcnow() - timedelta(seconds=1), None), live=True),
     )
 
 
-async def test_produce_only_client_contributes_no_coverage_and_no_segment():
-    sink = TrackingClient(
-        "sink", [Measurement], [measurement(i, at(i)) for i in range(3)],
-        capabilities=Capability.PRODUCE,
+async def test_the_first_source_listed_is_active_and_only_it_is_read():
+    cold, warm = _history("cold", 0, 3), _history("warm", 3, 6)
+    gateway = DataGateway([cold, warm])
+
+    assert gateway.sources == ["cold", "warm"]
+    assert gateway.source == "cold" and gateway.active is cold and gateway.live is False
+    assert await collect(gateway.consume(Measurement)) == ["m0", "m1", "m2"]
+    coverage = await gateway.coverage(Measurement)
+    assert coverage is not None and coverage.range.start == at(0)
+    assert warm.consume_calls == 0
+
+
+async def test_switch_makes_another_source_active():
+    cold, warm = _history("cold", 0, 3), _history("warm", 3, 6)
+    gateway = DataGateway([cold, warm])
+
+    assert gateway.switch("warm") is warm
+    assert gateway.source == "warm"
+    assert await collect(gateway.consume(Measurement)) == ["m3", "m4", "m5"]
+    assert cold.consume_calls == 0
+
+
+async def test_active_can_be_named_and_live_is_the_active_sources_kind():
+    gateway = DataGateway([_history("cold", 0, 3), _live("feed")], active="feed")
+
+    assert gateway.source == "feed" and gateway.live is True
+    coverage = await gateway.coverage(Measurement)
+    assert coverage is not None and coverage.live is True
+    gateway.switch("cold")
+    assert gateway.live is False
+
+
+async def test_an_unknown_source_is_refused():
+    gateway = DataGateway([_history("cold", 0, 3)])
+
+    with pytest.raises(ValueError, match="no source named 'nope'"):
+        gateway.switch("nope")
+    with pytest.raises(ValueError, match="no source named 'nope'"):
+        DataGateway([_history("cold", 0, 3)], active="nope")
+
+
+async def test_a_client_declaring_history_and_live_is_refused():
+    hybrid = InMemoryClient(
+        "both", [Measurement], capabilities=Capability.HISTORY_CONSUME | Capability.LIVE_CONSUME
     )
-    gateway = DataGateway([sink])
+    with pytest.raises(ValueError, match="one or the other"):
+        DataGateway([hybrid])
+
+
+async def test_a_produce_only_client_is_no_source():
+    sink = TrackingClient("sink", [Measurement], capabilities=Capability.PRODUCE)
+    gateway = DataGateway([sink, _history("cold", 0, 3)])
+
+    assert gateway.sources == ["cold"]
+    await gateway.produce(Measurement(value=1.0, mRID="m9"))
+    assert len(sink.records) == 1
+    with pytest.raises(ValueError):
+        gateway.switch("sink")
+
+
+async def test_a_gateway_without_a_source_refuses_to_consume():
+    gateway = DataGateway(None)
+
+    assert gateway.sources == [] and gateway.source is None
+    assert await gateway.coverage(Measurement) is None
+    with pytest.raises(RuntimeError, match="no source"):
+        gateway.consume(Measurement)
+
+
+async def test_a_failing_coverage_is_recorded_and_cleared():
+    class Flaky(InMemoryClient):
+        down = True
+
+        async def coverage(self, model, mRID=None):
+            if self.down:
+                raise ConnectionError("cannot reach the store")
+            return await super().coverage(model, mRID)
+
+    flaky = Flaky("store", [Measurement], [measurement(0, at(0))], capabilities=HISTORY)
+    gateway = DataGateway([flaky])
 
     assert await gateway.coverage(Measurement) is None
-    assert await collect(gateway.consume(Measurement)) == []
-    assert sink.consume_calls == 0
+    assert gateway.coverage_failure == "ConnectionError: cannot reach the store"
+    flaky.down = False
+    assert await gateway.coverage(Measurement) is not None
+    assert gateway.coverage_failure is None
 
 
-async def test_history_segments_never_go_to_a_live_only_client():
-    history = InMemoryClient(
-        "history", [Measurement], [measurement(i, at(i)) for i in range(3)], capabilities=HISTORY
-    )
-    live = _live_only("live", priority=10)
-    gateway = DataGateway([history, live])
+async def test_the_stream_drops_untimestamped_payloads_and_stops_at_the_end():
+    class Sloppy(InMemoryClient):
+        async def consume(self, model, time_range, mRID=None) -> AsyncIterator[Measurement]:
+            yield Measurement(mRID="none", value=0.0)
+            for i in range(5):
+                yield measurement(i, at(i))  # ignores the requested end
 
-    stream = gateway.consume(Measurement, at(0), at(3))
-    result = await asyncio.wait_for(collect(stream), timeout=2)
+    gateway = DataGateway([Sloppy("sloppy", [Measurement], capabilities=HISTORY)])
 
-    assert result == ["m0", "m1", "m2"]
-    assert live.consume_calls == 0
-    assert all(not segment.live for segment in stream.segments)
-
-
-async def test_live_handoff_requires_live_consume():
-    """A history-only client whose coverage *claims* live is never tailed."""
-    now = utcnow()
-    liar = TrackingClient(
-        "liar", [Measurement], [measurement(0, now - timedelta(seconds=1))],
-        capabilities=HISTORY,
-        coverage_fn=lambda: Coverage(TimeRange(now - timedelta(seconds=30), None), live=True),
-    )
-    gateway = DataGateway([liar])
-
-    stream = gateway.consume(Measurement, now - timedelta(seconds=2), now + timedelta(seconds=0.2))
-    result = await asyncio.wait_for(collect(stream), timeout=2)
-
-    assert result == ["m0"]
-    assert all(not segment.live for segment in stream.segments)
-
-
-async def test_live_only_client_is_offered_only_from_the_handoff_margin():
-    """Asking for the last 30 s of a client that can only tail skips straight to
-    the hand-off margin: it is never handed a stretch of the past."""
-    now = utcnow()
-    margin = timedelta(seconds=1)
-    live = _live_only("live")
-    gateway = DataGateway([live], live_handoff_margin=margin)
-
-    stream = gateway.consume(Measurement, now - timedelta(seconds=30), now + timedelta(seconds=0.2))
-    live.publish(measurement(7, now + timedelta(seconds=0.05)))
-    result = await asyncio.wait_for(collect(stream), timeout=2)
-
-    assert result == ["m7"]
-    assert len(stream.segments) == 1
-    assert stream.segments[0].live is True
-    assert stream.segments[0].range.start >= now - margin - timedelta(seconds=0.5)
-    assert live.consume_calls == 1
-
-
-async def test_coverage_filters_by_capability():
-    history = InMemoryClient(
-        "history", [Measurement], [measurement(i, at(i)) for i in range(3)], capabilities=HISTORY
-    )
-    live = _live_only("live")
-    gateway = DataGateway([history, live])
-
-    seekable = await gateway.coverage(Measurement, capability=Capability.HISTORY_CONSUME)
-    tailable = await gateway.coverage(Measurement, capability=Capability.LIVE_CONSUME)
-    everything = await gateway.coverage(Measurement)
-
-    assert seekable is not None and seekable.live is False
-    assert seekable.range.start == at(0) and seekable.range.end is not None
-    assert tailable is not None and tailable.live is True and tailable.range.end is None
-    assert everything is not None and everything.live is True and everything.range.start == at(0)
-    assert gateway.supports(Measurement, Capability.LIVE_CONSUME)
-    assert gateway.supports(Measurement, Capability.PRODUCE)  # HISTORY includes PRODUCE
+    assert await collect(gateway.consume(Measurement, at(0), at(2))) == ["m0", "m1"]

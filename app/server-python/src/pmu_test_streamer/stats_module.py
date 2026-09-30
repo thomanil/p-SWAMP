@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""A module in miniature: per-frame statistics, consumed from and published to
-the bus.
+"""A module in miniature: per-frame statistics, off one topic and onto another.
 
 The point is the shape, not the arithmetic. ``FrameStatsModule`` reads
-``PmuFrame`` off the pipeline's bus and publishes ``FrameStatsResult`` back onto
-it -- a different message class on a different topic -- and the page subscribes
-to *that*, never to the module. Nothing in ``api.py`` names this module beyond
-constructing it. That is STEP 1 A3 ("a module reads a topic, analyses, writes a
+``PmuFrame`` off the app's frame topic and publishes ``FrameStatsResult`` --
+a different message class on a different topic -- and the page reads *that*,
+never the module. Nothing names this module beyond ``family.py``, which lists
+it; whoever hosts the family runs it. That is STEP 1 A3 ("a module reads a topic, analyses, writes a
 different-typed result to another topic") on the smallest possible example.
 
 It needs the stream's layout to know which columns are which, and reads it off

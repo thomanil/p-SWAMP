@@ -6,8 +6,8 @@ something *operational* has gone wrong.
 
 A provider timed out, a module's ``process`` raised, a query was refused by a
 remote service -- each is already a ``logger.error`` line in the process that
-saw it. ``ErrorEvent`` is that line as a message on the pipeline's bus, so the
-edge can show it to the person whose pipeline it was, on whatever page they
+saw it. ``ErrorEvent`` is that line as a message on the app's error topic,
+under the pipeline's key, so the edge can show it to the person whose pipeline it was, on whatever page they
 are looking at, rather than only to whoever reads the server log. The log stays
 the source of truth; this is a copy of it addressed to the client.
 
@@ -18,8 +18,8 @@ an ``ErrorEvent`` says a piece of the machinery is not running correctly.
 Who publishes, today: ``Player`` when a provider fails mid-stream, ``Module.run``
 when ``process`` raises, and any module that wants to say more (a batch module
 whose query failed, carrying the ``request_id`` of the command that asked).
-Providers do not: a ``DataClient`` has no bus, and its failures reach the
-player or a module, which publish.
+Providers do not: a ``DataClient`` publishes nothing, and its failures reach
+the player or a module, which publish.
 """
 
 from __future__ import annotations

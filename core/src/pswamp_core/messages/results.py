@@ -13,7 +13,7 @@ its topic**::
     class FrameStatsResult(ResultEnvelope[FrameStats]): ...   # topic frame.stats.result
 
 ``request_id`` is set when the result answers a ``Command`` (a batch job, a
-report), so a shared bus can route it back to the client that asked.
+report), so an answer published on a shared topic can be matched to the command that asked.
 """
 
 from __future__ import annotations

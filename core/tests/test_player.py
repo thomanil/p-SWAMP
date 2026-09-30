@@ -2,8 +2,8 @@
 # Copyright Contributors to the p-SWAMP Project.
 
 """The player: pacing, pause/resume, step, seek, loop, commands over the bus --
-and, over a gateway holding both an archive and a live feed, that mode follows
-the stream that is open rather than the union of what the clients hold."""
+and, over a gateway with a history and a live source, that mode follows the
+active source and only an explicit switch changes it."""
 
 from __future__ import annotations
 
@@ -12,16 +12,14 @@ import time
 from datetime import timedelta
 
 import pytest
-from support import HISTORY, Measurement, at, measurement, take
+from support import HISTORY, Measurement, Tap, at, measurement, take
 
-from pswamp_core.bus import InProcessBus, Overflow
 from pswamp_core.command_routing import CommandInbox
 from pswamp_core.datagateway import Capability, Coverage, DataGateway, Player, TimeRange
 from pswamp_core.datagateway.clients import InMemoryClient
-from pswamp_core.datagateway.player import PlayerError
+from pswamp_core.datagateway.player import PLAYER_COMMANDS, PlayerError
 from pswamp_core.messages import (
     ErrorEvent,
-    GoLiveCommand,
     PauseCommand,
     PlayCommand,
     PlayerStatus,
@@ -31,7 +29,9 @@ from pswamp_core.messages import (
     SpeedCommand,
     StepCommand,
     StreamChanged,
+    SwitchSourceCommand,
 )
+from pswamp_core.subscription import Overflow
 from pswamp_core.util.time import utcnow
 
 
@@ -50,11 +50,10 @@ async def rig(history_client):
     """A bus, a gateway over ten one-second-apart frames, and an unpaced player
     whose commands arrive off the bus, as in a pipeline. Yields the pieces and
     stops the player afterwards."""
-    bus = InProcessBus()
-    bus.bind(asyncio.get_running_loop())
+    bus = Tap()
     gateway = DataGateway([history_client])
     player = Player(gateway, bus, model=Measurement, paced=False)
-    inbox = CommandInbox(bus, player)
+    inbox = CommandInbox(bus.subscribe(*PLAYER_COMMANDS, overflow=Overflow.GROW), player, bus)
     inbox.start()
     yield bus, gateway, player
     await inbox.stop()
@@ -63,14 +62,13 @@ async def rig(history_client):
 
 @pytest.fixture
 async def mixed_rig(history_client):
-    """An archive and a live-only feed in one gateway, an unpaced player over
-    both. Yields (bus, live client, player)."""
-    bus = InProcessBus()
-    bus.bind(asyncio.get_running_loop())
+    """A history source and a live one in one gateway (the history named first,
+    so active), an unpaced player over it. Yields (bus, live client, player)."""
+    bus = Tap()
     live = live_only_client()
     gateway = DataGateway([history_client, live])
     player = Player(gateway, bus, model=Measurement, paced=False)
-    inbox = CommandInbox(bus, player)
+    inbox = CommandInbox(bus.subscribe(*PLAYER_COMMANDS, overflow=Overflow.GROW), player, bus)
     inbox.start()
     yield bus, live, player
     await inbox.stop()
@@ -96,7 +94,7 @@ async def test_starts_paused_and_reports_replay_mode(rig):
     assert status.paused is True
     assert status.mode == "replay"
     assert status.can_seek is True
-    assert status.can_go_live is False
+    assert status.source == "history" and status.sources == ["history"]
     assert status.coverage_start == at(0)
     assert status.cursor is None
     assert status.ended is False
@@ -201,7 +199,7 @@ async def test_seek_by_offset_command(rig):
 
 
 async def test_loop_restarts_from_coverage_start(history_client):
-    bus = InProcessBus()
+    bus = Tap()
     gateway = DataGateway([history_client])
     player = Player(gateway, bus, model=Measurement, paced=False, loop=True, autoplay=True)
     with bus.subscribe(Measurement, overflow=Overflow.GROW) as frames, bus.subscribe(
@@ -215,7 +213,7 @@ async def test_loop_restarts_from_coverage_start(history_client):
     assert player.ended is False
 
 
-async def test_commands_over_the_bus_drive_the_player(rig):
+async def test_commands_off_their_inbox_drive_the_player(rig):
     bus, _, player = rig
     await player.start()
     with bus.subscribe(Measurement, overflow=Overflow.GROW) as frames, bus.subscribe(
@@ -230,13 +228,12 @@ async def test_commands_over_the_bus_drive_the_player(rig):
         assert [m.mRID for m in got] == ["m0", "m1", "m2"]
         bus.publish(PauseCommand())
         await wait_status(statuses, lambda s: s.paused)
-        bus.publish(PlayCommand(target="someone-else"))  # not for this player
         await asyncio.sleep(0.02)
         assert player.paused is True
 
 
 async def test_pacing_spaces_frames_by_speed(history_client):
-    bus = InProcessBus()
+    bus = Tap()
     gateway = DataGateway([history_client])
     # 1 s frames at 50x → 20 ms apart; five frames take at least 80 ms.
     player = Player(gateway, bus, model=Measurement, paced=True, speed=50, autoplay=True)
@@ -250,10 +247,8 @@ async def test_pacing_spaces_frames_by_speed(history_client):
 
 
 async def test_a_live_only_gateway_starts_live_and_cannot_be_sought():
-    """With nothing to replay the player starts live and playing. (A client
-    that also holds history starts in replay: see the mixed cases below.)"""
-    bus = InProcessBus()
-    bus.bind(asyncio.get_running_loop())
+    """With a live source active the player starts live and playing."""
+    bus = Tap()
     live = live_only_client()
     gateway = DataGateway([live])
     player = Player(gateway, bus, model=Measurement, paced=False)
@@ -264,7 +259,7 @@ async def test_a_live_only_gateway_starts_live_and_cannot_be_sought():
             assert status.mode == "live"
             assert status.paused is False
             assert status.can_seek is False
-            assert status.can_go_live is True
+            assert status.source == "live" and status.sources == ["live"]
             assert status.coverage_start is None
             with pytest.raises(PlayerError):
                 await player.seek(at(1))
@@ -294,7 +289,7 @@ async def test_resume_after_end_restarts_from_the_beginning(rig):
 
 def test_speed_must_be_positive():
     with pytest.raises(PlayerError):
-        Player(DataGateway([InMemoryClient("x", Measurement, capabilities=HISTORY)]), InProcessBus(), speed=0)
+        Player(DataGateway([InMemoryClient("x", Measurement, capabilities=HISTORY)]), Tap(), speed=0)
 
 
 async def test_pause_then_step_plays_the_parked_frame_in_order(rig):
@@ -320,10 +315,10 @@ async def test_pause_then_step_plays_the_parked_frame_in_order(rig):
         assert next_one.timestamp == stepped.timestamp + player.frame_interval
 
 
-# --- an archive and a live feed in one gateway ---------------------------------
+# --- a history source and a live source in one gateway ---------------------------
 
 
-async def test_mixed_gateway_starts_in_replay_and_never_reads_the_live_client(mixed_rig):
+async def test_the_active_history_is_replayed_and_the_live_source_never_read(mixed_rig):
     bus, live, player = mixed_rig
     live_reads = 0
     original = live.consume
@@ -341,7 +336,7 @@ async def test_mixed_gateway_starts_in_replay_and_never_reads_the_live_client(mi
         status = player.status()
         assert status.mode == "replay"
         assert status.can_seek is True
-        assert status.can_go_live is True
+        assert status.source == "history" and status.sources == ["history", "live"]
         assert status.coverage_start == at(0) and status.coverage_end is not None
         player.resume()
         got = await take(frames, 10)
@@ -351,10 +346,10 @@ async def test_mixed_gateway_starts_in_replay_and_never_reads_the_live_client(mi
     assert player.mode == "replay"
 
 
-async def test_replay_is_paced_although_a_live_client_exists(history_client):
-    """The regression for deriving mode from the coverage union: an archive
-    beside a live feed used to be "live" from its first frame, and unpaced."""
-    bus = InProcessBus()
+async def test_replay_is_paced_although_a_live_source_exists(history_client):
+    """A live source beside the active history changes nothing about the
+    replay: it is paced, as any replay is."""
+    bus = Tap()
     gateway = DataGateway([history_client, live_only_client()])
     player = Player(gateway, bus, model=Measurement, paced=True, speed=50, autoplay=True)
     with bus.subscribe(Measurement, overflow=Overflow.GROW) as frames:
@@ -367,8 +362,8 @@ async def test_replay_is_paced_although_a_live_client_exists(history_client):
     assert elapsed >= 0.075
 
 
-async def test_replay_loops_at_the_end_of_history_over_a_mixed_gateway(history_client):
-    bus = InProcessBus()
+async def test_replay_loops_at_the_end_of_history_beside_a_live_source(history_client):
+    bus = Tap()
     gateway = DataGateway([history_client, live_only_client()])
     player = Player(gateway, bus, model=Measurement, paced=False, loop=True, autoplay=True)
     with bus.subscribe(Measurement, overflow=Overflow.GROW) as frames:
@@ -379,35 +374,45 @@ async def test_replay_loops_at_the_end_of_history_over_a_mixed_gateway(history_c
     assert player.mode == "replay"
 
 
-async def test_go_live_switches_mode_and_delivers_published_records(mixed_rig):
+async def test_switching_to_the_live_source_changes_mode_and_delivers_its_records(mixed_rig):
     bus, live, player = mixed_rig
     with bus.subscribe(Measurement, overflow=Overflow.GROW) as frames, bus.subscribe(
         PlayerStatus, overflow=Overflow.GROW
     ) as statuses, bus.subscribe(StreamChanged, overflow=Overflow.GROW) as changes:
         await player.start()
         await take(changes, 1)
-        bus.publish(GoLiveCommand())
+        bus.publish(SwitchSourceCommand(source="live"))
         status = await wait_status(statuses, lambda s: s.mode == "live")
         assert status.paused is False
         assert status.can_seek is False
-        assert status.can_go_live is True
-        assert status.coverage_start == at(0)  # the seekable history is still reported
+        assert status.source == "live"
+        assert status.coverage_start is None  # a live source has no seekable history
         (changed,) = await take(changes, 1)
         assert changed.cursor is not None and changed.cursor > at(10)
-        await asyncio.sleep(0.01)  # the run task opens the live segment
+        await asyncio.sleep(0.01)  # the run task opens the live stream
         stamp = utcnow()
         live.publish(measurement(100, stamp))
         (frame,) = await take(frames, 1)
         assert frame.mRID == "m100"
         assert player.cursor == stamp
-        assert player._stream is not None and player._stream.segments[-1].live is True
+        assert player._stream is not None and player._stream.client is live
+
+
+async def test_an_unknown_source_is_refused_before_anything_changes(mixed_rig):
+    _, _, player = mixed_rig
+    await player.start()
+    with pytest.raises(PlayerError, match="no source named 'nope'"):
+        player.validate(SwitchSourceCommand(source="nope"))
+    with pytest.raises(PlayerError, match="no source named 'nope'"):
+        await player.switch_source("nope")
+    assert player.status().source == "history" and player.mode == "replay"
 
 
 async def test_live_mode_refuses_the_transport_controls(mixed_rig):
     bus, live, player = mixed_rig
     with bus.subscribe(PlayerStatus, overflow=Overflow.GROW) as statuses:
         await player.start()
-        await player.go_live()
+        await player.switch_source("live")
         for refused in (player.pause, player.resume, lambda: player.set_speed(2.0)):
             with pytest.raises(PlayerError):
                 refused()
@@ -415,6 +420,10 @@ async def test_live_mode_refuses_the_transport_controls(mixed_rig):
             await player.step()
         with pytest.raises(PlayerError):
             await player.seek(at(1))
+        with pytest.raises(PlayerError):
+            await player.replay()
+        with pytest.raises(PlayerError):
+            player.validate(ReplayCommand())
         # Over the bus a refusal changes nothing, and is reported with its request id.
         cursor = player.cursor
         with bus.subscribe(ErrorEvent, overflow=Overflow.GROW) as errors:
@@ -437,19 +446,19 @@ def _drain(subscription) -> list[PlayerStatus]:
     return out
 
 
-async def test_replay_returns_to_the_history_start_paused(mixed_rig):
+async def test_switching_back_to_the_history_lands_paused_at_its_start(mixed_rig):
     bus, live, player = mixed_rig
     with bus.subscribe(Measurement, overflow=Overflow.GROW) as frames, bus.subscribe(
         PlayerStatus, overflow=Overflow.GROW
     ) as statuses:
         await player.start()
-        await player.go_live()
+        await player.switch_source("live")
         await wait_status(statuses, lambda s: s.mode == "live")
-        bus.publish(ReplayCommand())
+        bus.publish(SwitchSourceCommand(source="history"))
         status = await wait_status(statuses, lambda s: s.mode == "replay")
         assert status.paused is True
         assert status.can_seek is True
-        assert status.cursor == at(0)
+        assert status.source == "history" and status.coverage_start == at(0)
         await player.step()
         (frame,) = await take(frames, 1)
         assert frame.mRID == "m0"
@@ -524,8 +533,7 @@ class FailsAfterTwo(InMemoryClient):
 
 
 async def test_a_provider_failure_ends_the_stream_with_the_error_and_the_player_survives():
-    bus = InProcessBus()
-    bus.bind(asyncio.get_running_loop())
+    bus = Tap()
     from support import measurements
 
     client = FailsAfterTwo("flaky", Measurement, measurements(10), capabilities=HISTORY)
@@ -603,8 +611,7 @@ async def test_a_player_over_an_unreachable_source_starts_stopped_with_its_error
     """The store's URL cannot be reached when the page connects: the pipeline
     still starts, so the page sees *why* (the client's own error, named after
     the client) and a refresh finds the store once it is back."""
-    bus = InProcessBus()
-    bus.bind(asyncio.get_running_loop())
+    bus = Tap()
     from support import measurements
 
     client = InMemoryClient("remote_data", Measurement, measurements(10), capabilities=HISTORY)
@@ -627,17 +634,17 @@ async def test_a_player_over_an_unreachable_source_starts_stopped_with_its_error
             assert event.detail == "remote_data: ConnectionError: cannot reach http://remote-data:8100: ConnectError: refused"
             assert status.error == event.detail and status.paused and status.ended
             assert status.coverage_start is None and status.mode == "replay" and not status.can_seek
-            assert gateway.coverage_failures == {"remote_data": "ConnectionError: cannot reach http://remote-data:8100: ConnectError: refused"}
+            assert gateway.coverage_failure == "ConnectionError: cannot reach http://remote-data:8100: ConnectError: refused"
             client.coverage = original  # type: ignore[method-assign]
             await player.refresh()
             assert player.status().error is None and player.status().coverage_start == at(0)
-            assert gateway.coverage_failures == {}
+            assert gateway.coverage_failure is None
             player.resume()
             got = await take(frames, 2)
             assert [m.mRID for m in got] == ["m0", "m1"]
         finally:
             await player.stop()
-    # A gateway with no client for the model at all is still a refusal to start.
+    # A gateway whose source does not serve the model is still a refusal to start.
     with pytest.raises(PlayerError):
         await Player(DataGateway([InMemoryClient("x", NumberOnly, capabilities=HISTORY)]), bus, model=Measurement).start()
 
@@ -656,8 +663,7 @@ async def test_a_live_stream_that_ends_is_not_looped():
             for record in self.records:
                 yield record
 
-    bus = InProcessBus()
-    bus.bind(asyncio.get_running_loop())
+    bus = Tap()
     live = Finite(
         "finite",
         Measurement,

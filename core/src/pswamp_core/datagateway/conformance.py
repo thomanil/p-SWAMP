@@ -34,10 +34,9 @@ make a live client *produce* anything -- a provider's own test asserts that its
 tail carries data; the suite asserts only that a tail behaves.
 
 The history cases are the test_pswamp draft's ``test_data_gateway.py``
-generalised over any client and any model; cases that need *several* clients
-(stitching, gaps, live hand-off) stay in ``core/tests/test_data_gateway.py``.
-Every case goes through a ``DataGateway``, so what is checked is what the core
-will ask of the client, not the client in isolation.
+generalised over any client and any model. Every case goes through a
+``DataGateway`` with the client as its one source, so what is checked is what
+the core will ask of the client, not the client in isolation.
 """
 
 from __future__ import annotations
@@ -82,11 +81,13 @@ class DataClientConformance:
 
     # -- what the client declares ---------------------------------------------
 
-    async def test_declares_a_consume_capability(self, client_under_test: DataClient):
-        """A provider is a source: it must be readable one way or the other."""
-        assert client_under_test.capabilities & (
+    async def test_declares_exactly_one_consume_capability(self, client_under_test: DataClient):
+        """A provider is a source: a history or a live feed, never both -- the
+        gateway refuses a client that declares both."""
+        consume = client_under_test.capabilities & (
             Capability.HISTORY_CONSUME | Capability.LIVE_CONSUME
         )
+        assert consume in (Capability.HISTORY_CONSUME, Capability.LIVE_CONSUME)
 
     async def test_supports_the_model(self, client_under_test, conformance_model):
         assert client_under_test.supports(conformance_model)

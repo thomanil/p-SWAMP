@@ -27,8 +27,9 @@
 #   5. /openapi.json has the commands  — the api describes itself
 #   6. the counter flow                — POST commands in, state down the socket
 #   7. the streamer flow               — play, and the stats MODULE's result comes down the
-#                                        socket: over the broker from the stats-worker container
-#                                        under compose, in-process under a bare `docker run` (CI)
+#                                        socket: over the broker from the module-worker container
+#                                        under compose, from the server's own host under a bare
+#                                        `docker run` (CI)
 #   8. the explorer flow               — count a range, play a bounded range: over REST, streamed
 #                                        back from the remote-data-stub container under compose,
 #                                        over the sample recording under a bare `docker run` (CI)
@@ -224,7 +225,7 @@ if [ "${#FAILURES[@]}" -ne 0 ]; then
   for f in "${FAILURES[@]}"; do printf '  - %s\n' "$f"; done
   if [ "$STARTED_STACK" -eq 1 ]; then
     printf '\nLast 50 lines of server, worker and stub logs:\n'
-    docker compose logs --tail 50 server stats-worker remote-data-stub
+    docker compose logs --tail 50 server module-worker mode-estimation-worker remote-data-stub
   fi
   exit 1
 fi

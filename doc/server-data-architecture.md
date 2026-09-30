@@ -1,93 +1,85 @@
 # The server data architecture
 
-How PMU data moves from a data source to a browser in the p-SWAMP server, and
-what each piece on the way is for. The PMU test streamer was its first slice;
-the last section lists what is still open.
+How PMU data moves from a source to a browser in the p-SWAMP server, how a
+command moves back, and what each piece on the way is for.
 
 The code is the `pswamp_core` package under `core/`. Its only dependency is
 pydantic, plus aiokafka behind the `kafka` extra and httpx behind
 `remote-data`. The PMU test streamer (`app/server-python/src/pmu_test_streamer/`,
 route `/pmu-test-streamer`) is the worked example of every piece and the source
-of the snippets below. "Adding things" is the recipe for your own module and
-its page; "Running a module as a separate service" explains that recipe's
-optional last step.
+of the snippets below; "Adding a module and its page" is the recipe for your
+own.
 
-**The building blocks** are described from the data outward -- provider,
-gateway, player, bus, module, pipeline, edge -- since each depends on the one
-before. **The worked example** ("What happens when you click Live") runs the
-other way, from the browser button up to the data clients, since that is how a
-request travels.
+## The model in five lines
 
-## The layers
-
-The core is a stack of eight layers, numbered from the bottom; the `L` numbers
-below refer to it. **Dependencies point down where it matters:** a provider
-needs only L1, the L2 contract and its settings helpers (`EnvSetting` from
-`datagateway/config.py`), so it can be written outside the repo, and
-modules and the pipeline sit above the bus and command routing, so a module
-can move to another process without touching its neighbours. The known
-exceptions: the provider contract imports its settings helpers from
-`datagateway/config.py` (listed under L7), the player imports `CommandRefused`
-from command routing, `datagateway/__init__.py` re-exports `Player`, and
-`remote.py` uses `transport/`.
-
-| | Layer | What it is | Where |
-|---|---|---|---|
-| L1 | Messages | The wire models: `DataModel` and every message derived from it -- `PmuFrame` (carrying its `PmuHeader`), the typed commands, `PlayerStatus`, `ResultEnvelope`, `ErrorEvent`. pydantic only; what every arrow carries | `messages/` |
-| L2 | Gateway | The provider contract (`DataClient`, its capabilities) and the `DataGateway` that stitches providers into one time-addressed stream | `datagateway/` |
-| L3 | Player | Paces a gateway stream and owns the transport controls: play, pause, step, seek, speed, replay, live | `datagateway/player.py` |
-| L4 | Bus | In-process publish/subscribe typed on message classes; one per pipeline. Beside it, command routing: each typed command to the one receiver that declared it, or `CommandRefused` | `bus/`, `command_routing.py` |
-| L5 | Modules | Analysis: consume one message class off the bus, publish another | `modules.py`, `remote.py` |
-| L6 | Pipeline | One stream's gateway, player, bus and modules as a unit, and the registry that keeps one per key | `pipeline.py` |
-| L7 | Hosting | Which process each piece runs in, from the environment: providers and transports by name, a module as its own service | `transport/`, `datagateway/config.py`, `remote.main` |
-| L8 | Web edge | The app package: POSTs that become commands, the socket that pushes state | `app/server-python/src/<app>/` |
-
-Not every layer is a hop: L1 is the vocabulary of the others, L6 the box
-around L2–L5, L7 deployment. The pictures below follow a frame and a command,
-so they show only L2–L5 and L8.
-
-## The idea in one picture
+```
+DATA DOWN    source → DataClient (the active one) → DataGateway → Player
+             → topic <app>.pmu.frame (key = pipeline) → Module → topic <app>.<result> → edge → socket → browser
+COMMANDS UP  browser → POST → edge → validate at the player (the 409) → topic <app>.<command> → Player | Module
+             a Module may publish a command too (e.g. SwitchSourceCommand)
+STATE        the edge builds one state model per change: the newest result per class (Latest) + the local player
+WHERE        transport unset → InMemoryTransport, modules hosted in the server; set → Kafka, modules in the worker
+```
 
 ```mermaid
 flowchart TB
-    subgraph providers["L2 · DataClient — the repo's own providers, in one gateway; capabilities declared, and routing honours them"]
-        direction LR
-        rec["SampleRecordingClient<br/>the committed sample recording<br/>HISTORY_CONSUME"]
-        live["LiveSyntheticClient<br/>the same rows, re-stamped on the wall clock<br/>LIVE_CONSUME"]
-    end
-    gw["L2 · DataGateway<br/>consume(PmuFrame, start, end)<br/>→ one stitched, time-addressed stream<br/>seek = a new stream from start<br/>a chunk = a bounded [start, end)"]
-    player["L3 · Player<br/>replay: paces a bounded stream over the history;<br/>pause · step · seek · loop<br/>live: an open stream from now, as it arrives;<br/>no transport"]
-    bus["L4 · InProcessBus<br/>publish/subscribe typed on message classes<br/>one per pipeline"]
-    mod["L5 · FrameStatsModule"]
-    ws["L8 · WebSocket endpoint<br/>subscribes PmuFrame · PlayerStatus · FrameStatsResult<br/>→ one PmuStreamState per change"]
-    browser(["browser"])
-    post["POST …/playback/seek<br/>POST …/playback/live"]
+    classDef data fill:#e8f1fb,stroke:#3b6ea5,color:#000
+    classDef cmd fill:#fff4dd,stroke:#b8860b,color:#000
+    classDef edge fill:#eeeeee,stroke:#555,color:#000
 
-    rec --> gw
-    live --> gw
-    gw --> player
-    player -- "PmuFrame, and PlayerStatus on every change" --> bus
-    bus -- PmuFrame --> mod
-    mod -- FrameStatsResult --> bus
-    bus --> ws
-    ws -- "down the socket" --> browser
-    browser -.-> post
-    post -. "GoLiveCommand, SeekCommand, … via pipeline.dispatch" .-> bus
-    bus -. "the player's inbox → Player.handle() → go_live()" .-> player
+    sources["Sources<br/>a recording · a live feed · a remote data service"]:::data
+    subgraph pipeline["Pipeline — in the server, one per client key"]
+        direction TB
+        gw["DataGateway<br/>named sources, one active"]:::data
+        player["Player<br/>replays a history · tails a live feed"]:::data
+        view["latest + changes()<br/>the newest message of each class"]:::data
+    end
+    subgraph transport["Transport — in-memory or Kafka: same topics, same keys<br/>topic = &lt;app&gt;.&lt;message class&gt; · record key = pipeline key"]
+        direction LR
+        frames[["&lt;app&gt;.pmu.frame"]]
+        results[["&lt;app&gt;.&lt;result&gt;"]]
+        commands[["&lt;app&gt;.&lt;command&gt;"]]
+    end
+    host["ModuleHost → Module<br/>one instance per key<br/>in the server, or in a worker"]:::data
+    edge["Edge (FastAPI)<br/>POST → typed command · socket ← one state model per change"]:::edge
+    browser(["Browser"]):::edge
+
+    sources ==> gw ==> player
+    player ==>|"frames"| frames ==> host
+    host ==>|"results"| results ==> view
+    player ==>|"status · the frame at the cursor"| view
+    view ==> edge ==>|"state"| browser
+
+    browser -.->|"POST"| edge
+    edge -.->|"player.validate: the 409"| commands
+    host -.->|"a module may command too"| commands
+    commands -.->|"player commands"| player
+    commands -.->|"module commands"| host
 ```
 
 **Every arrow carries a pydantic model** (`PmuFrame`, `PlayerStatus`,
-`SeekCommand`, …) -- that is L1: JSON with a schema version end to end, and the
-browser's TypeScript types are generated from the same classes. **Nothing
-above the bus knows what is below it**: the endpoint and the module subscribe
-to message classes, the player writes to the bus. Swapping a provider (top
-row) changes nothing else; a deployment's own provider -- a TSO's remote data
-service, a broker feed -- takes the place of either one shown.
+`SeekCommand`, …): JSON with a schema version end to end, and the browser's
+TypeScript types are generated from the same classes. Thick arrows are data,
+dotted ones commands; the same legend is used in every diagram here and in
+`server-data-architecture-diagrams.md`.
 
-**L5 is the one box that can leave the process.** In the compose and minikube
-stacks it does -- the module runs in the `stats-worker` container, reached over
-Kafka -- and nothing else in the picture changes (see "Running a module as a
-separate service").
+## The layers
+
+The core is a stack of layers, numbered from the bottom. **Dependencies point
+down**: a provider needs only L1 and the L2 contract, so it can be written
+outside the repo; a module needs L1 and the module base, and never sees the
+transport, so where it runs is not its concern.
+
+| | Layer | What it is | Where |
+|---|---|---|---|
+| L1 | Messages | The wire models: `DataModel` and every message derived from it -- `PmuFrame` (carrying its `PmuHeader`), the typed commands, `PlayerStatus`, `ResultEnvelope`, `ErrorEvent`, `PipelineClosed`. pydantic only; what every arrow carries | `messages/` |
+| L2 | Gateway | The provider contract (`DataClient`) and the `DataGateway`: named sources, one active, read as one time-addressed stream | `datagateway/` |
+| L3 | Player | Paces the active source's stream and owns the transport controls and the source switch | `datagateway/player.py` |
+| L4 | Transport | Keyed publish/subscribe, one topic per class per app: `InMemoryTransport` or `KafkaTransport`, and the `Outbox` in front of it. Beside it, command routing: a command's class is its address | `transport/`, `subscription.py`, `command_routing.py` |
+| L5 | Modules | Analysis: consume one message class, publish another; hosted one instance per key by a `ModuleHost` | `modules.py`, `host.py`, `keep_up.py` |
+| L6 | Pipeline | What an app's pipelines are made of (`PipelineFamily`), one pipeline per key (gateway + player + topics), and the registry that keeps them | `pipeline.py` |
+| L7 | Hosting | Which transport a deployment runs (`PSWAMP_TRANSPORT`), which families a worker hosts (`PSWAMP_WORKER_FAMILIES`), and which providers a gateway has (`*_DATA_CLIENTS`) | `transport_from_env`, `worker.py`, `datagateway/config.py` |
+| L8 | Web edge | The app package: POSTs that become commands, the socket that pushes state | `app/server-python/src/<app>/` |
 
 ## The building blocks
 
@@ -98,245 +90,171 @@ separate service").
 `mRID` identity, a UTC `timestamp`, and a **topic derived from the class name**.
 
 ```python
-from typing import Literal
-from pswamp_core.messages import DataModel
-
 class LineTrip(DataModel):            # topic: "line.trip"
     version: Literal["v1"] = "v1"
-    timestamp: datetime               # required: the event's own time
+    timestamp: datetime
     line: str
 
-LineTrip.topic                        # "line.trip"
 LineTrip.model_validate_json(text)    # the whole codec; a "v2" payload fails here
 ```
 
 *Why.* No pickle and no numpy on the wire means a message can be logged,
-inspected, validated on receipt, and published into the browser contract
-without an adapter. The set of `DataModel` subclasses *is* the topic catalogue,
-with the schema attached to each entry.
-
-*Where.* `core/src/pswamp_core/messages/`: `data_model.py` (the base),
-`pmu.py` (measurements), `results.py` (what modules emit), `commands.py`
-(the typed commands: the `Command` base and the player's), `control.py`
-(player state).
+validated on receipt, and published into the browser contract without an
+adapter. The set of `DataModel` subclasses *is* the topic catalogue.
 
 The measurement shape is **one instant of every channel, carrying its layout**:
+`PmuFrame` (timestamp, mRID, `values`, with NaN as null on the wire) holds its
+`PmuHeader` (station / channel / measurement / units per column, the data rate,
+and a cached content hash `header_id`). The layout rides inside every frame:
+about 1.2x on the wire once a broker's batch compression collapses the
+repeats, and in return any single frame is enough to work from -- a module
+reads the layout off the frame in hand, a late worker is primed by its first
+input, and a changed layout is simply the next frame's header.
 
-```python
-PmuFrame    # per instant: timestamp, mRID, header, values: list[float | None]  (NaN is null on the wire)
-PmuHeader   # nested in every frame: station / channel / measurement / units per column, data_rate;
-            # header_id is a content hash, computed and cached, so a consumer can spot a change cheaply
-```
-
-`PmuHeader` is the config-frame analogue; `header.columns(measurement="f")`
-is the query p-SWAMP's applications already make of a labelled window. It
-rides inside every frame: ~1 KB repeated per frame for the sample (about 3.4x
-a bare frame, ~1.2x once a broker's batch compression collapses the repeats).
-In return any single frame is enough to work from: a module reads the layout
-off the frame it is processing, a late-starting worker is primed by its first
-input, a live source describes itself, and a changed layout is simply the next
-frame's header. The measurement is in the docstring of `messages/pmu.py`.
+*Where.* `core/src/pswamp_core/messages/`: `data_model.py`, `pmu.py`,
+`results.py` (what modules emit), `commands.py`, `control.py` (player state,
+`PipelineClosed`), `errors.py`.
 
 ### Providers — `pswamp_core.datagateway.DataClient`
 
-*What.* The contract a data source implements. Three abstract methods and a
-declaration of what the source can do:
+*What.* The contract a data source implements: `coverage`, `consume`,
+`produce`, and a declaration of what it can do.
 
 ```python
-from pswamp_core.datagateway import Capability, Coverage, DataClient, TimeRange
-
 class SampleRecordingClient(DataClient):
     capabilities = Capability.HISTORY_CONSUME          # a file cannot tail live data
-
-    async def coverage(self, model, mRID=None) -> Coverage | None:
-        return Coverage(TimeRange(first_frame.timestamp, last_frame.timestamp + interval))
-
-    async def consume(self, model, time_range, mRID=None):   # an async iterator
+    async def coverage(self, model, mRID=None): return Coverage(TimeRange(first, last + interval))
+    async def consume(self, model, time_range, mRID=None):
         for frame in self.frames:
             if time_range.contains(frame.timestamp):
                 yield frame
-
     async def produce(self, data): raise TypeError("read-only")
 ```
 
-*Why.* Capabilities replace the old nine-method duck type, where half the
-`seek` implementations were `pass`. The core never asks a provider for what it
-did not declare, and the planner enforces it: a history segment goes only
-to a `HISTORY_CONSUME` client, the live hand-off only to a `LIVE_CONSUME` one,
-and a client that can only tail is offered only from the hand-off margin on.
-`coverage` is re-asked on every call because most real stores have now-relative
-windows. **History lives with the provider** — the repo persists nothing; a
-TSO's store, behind its remote data service, is a `DataClient`, and that is how
-"no database in the repo" and "navigate history" coexist.
+*Why.* A client is **one source**: a history (`HISTORY_CONSUME`: replayed,
+seekable) or a live feed (`LIVE_CONSUME`: tailed from now), never both -- the
+gateway refuses a client that declares both. The core never asks a provider for
+what it did not declare. **History lives with the provider**: the repo persists
+nothing; a TSO's store, behind its remote data service, is a `DataClient`.
 
-*Where.* The contract: `core/src/pswamp_core/datagateway/data_client_model.py`.
-The reference client (`InMemoryClient`): `datagateway/clients/in_memory.py`. Two
-providers written *outside* the core, as a TSO's would be, both under
-`app/server-python/src/pmu_test_streamer/`: `sample_client.py` (the recording:
-history) and `live_client.py` (a synthetic live feed: `LIVE_CONSUME` only, the
-recording's rows re-stamped on the wall clock at 20 Hz). Both serve only
-`PmuFrame`, and since each frame carries its layout, either alone is enough
-for a page to render a table.
+A provider is **chosen and configured from the environment**, never in code --
+`PSWAMP_DATA_CLIENTS="sample:pmu_test_streamer.sample_client:SampleRecordingClient,live:…"`,
+each client reading its own `{NAME}_{SETTING}` block -- and proves itself with
+the **conformance suite** (`DataClientConformance`: inherit it, supply three
+fixtures; the cases follow the declared capability).
 
-A provider proves itself with the **conformance suite** — inherit it, supply
-three fixtures. The cases follow the declared capabilities: the history cases
-skip for a tail-only client, whose `conformance_records` is `[]`, and the live
-cases skip for a history-only one:
-
-```python
-from pswamp_core.datagateway.conformance import DataClientConformance
-
-class TestMyClient(DataClientConformance):
-    @pytest.fixture
-    def client_under_test(self): return MyClient("mine")
-    @pytest.fixture
-    def conformance_model(self): return PmuFrame
-    @pytest.fixture
-    def conformance_records(self, client_under_test): return list(client_under_test.frames)
-```
-
-A provider is **chosen and configured from the environment**, never in code:
-
-```
-PSWAMP_DATA_CLIENTS="live:acme_tso.pmu:KafkaFeed,history:acme_tso.pmu:TimescaleClient"
-HISTORY_DSN=postgres://…          # each client reads its own {NAME}_{SETTING} block
-```
-
-The local k8s manifest (`k8s/p-swamp-local.yaml`) is the worked example, with
-the repo's own providers: it names both in `PSWAMP_DATA_CLIENTS` and points
-`LIVE_PATH` at a ConfigMap-mounted file
-(`k8s/deployment_pmu_data_file_example.txt`, every value counting up by one per
-frame), so the live feed visibly comes from outside the image.
-
-```python
-gateway = gateway_from_env(
-    default="sample:pmu_test_streamer.sample_client:SampleRecordingClient,"
-            "live:pmu_test_streamer.live_client:LiveSyntheticClient"
-)
-MyClient.show_config("history")   # prints the variables a deployment must set
-```
+*Where.* `datagateway/data_client_model.py` (the contract), `config.py`,
+`conformance.py`, `clients/in_memory.py` (the reference client). Two providers
+written *outside* the core, as a TSO's would be:
+`pmu_test_streamer/sample_client.py` (the recording) and `live_client.py` (a
+synthetic live feed, the recording's rows re-stamped on the wall clock at
+20 Hz). `k8s/p-swamp-local.yaml` points the live feed at a ConfigMap-mounted
+file, so it visibly comes from outside the image.
 
 ### The gateway — `pswamp_core.datagateway.DataGateway`
 
-*What.* One object over any number of providers, with two verbs:
+*What.* The configured providers as named **sources**, one of them **active**:
 
 ```python
+gateway.sources                                  # ["sample", "live"], in configured order
+gateway.source, gateway.live                     # the active one, and whether it is a live feed
+gateway.switch("live")                           # another source is active from now on
 gateway.consume(PmuFrame, start=t0, end=None)    # a seek: from t0, onwards
 gateway.consume(PmuFrame, start=t0, end=t1)      # a chunk: exactly [t0, t1)
-await gateway.produce(message)                   # to every client that can store it
 ```
 
-*Why.* "Jump to a time" and "query a chunk" are the same call, which is why they
-are provider capabilities and not bus features. Behind `consume`, a
-`SegmentPlanner` picks, one segment at a time, whichever client covers the
-cursor (highest priority wins, coverage re-asked at every boundary), and a
-`DataStream` stitches the segments into one iterator with a watermark that
-drops duplicates across overlapping sources. A history store can carry a replay
-right up to now and hand over to a live source only then. This layer is Louis
-Pauchet's `test_pswamp` draft, lifted.
+*Why.* One source at a time means a stream always has one provider behind it,
+so which one is never a question of coverage, priority or timing: the first
+source configured is active, and only an explicit switch changes it. "Jump to
+a time" and "query a chunk" are the same call. An **enricher** hook runs on
+every payload the stream yields (see "A CIM reference on the frame"). This
+layer is Louis Pauchet's `test_pswamp` draft, lifted, without its routing of
+one stream across several clients.
 
-*Where.* `datagateway/data_gateway.py`, `planner.py`, `stream.py`,
-`time_range.py`.
+*Where.* `datagateway/data_gateway.py`, `stream.py`, `time_range.py`, `enrich.py`.
 
 ### The player — `pswamp_core.datagateway.Player`
 
-*What.* Paces a gateway stream and owns the replay controls.
+*What.* Paces the active source's stream and owns the controls.
 
 ```python
-player = Player(gateway, bus, model=PmuFrame, speed=1.0, loop=True)
-await player.start()          # opens gateway.consume(PmuFrame, start, history_end); paused
+player = Player(gateway, sink, model=PmuFrame, speed=1.0, loop=True)
+await player.start()                 # a history replayed from its start, paused; a live source tailed
 player.resume(); player.pause(); player.set_speed(2.0)
-await player.step(-1)         # one frame back
-await player.seek(t)          # a NEW stream from t, announced as StreamChanged
-await player.go_live()        # a NEW, open-ended stream from now; mode "live"
-await player.replay()         # back to the recording's start, paused; mode "replay"
-await player.replay(t0, t1)   # a BOUNDED replay of [t0, t1): ends paused at t1, never loops
-player.status()               # PlayerStatus: mode, cursor, speed, paused, can_seek, can_go_live, coverage, range_end, error…
+await player.step(-1)                # one frame back
+await player.seek(t)                 # a NEW stream from t, announced as StreamChanged
+await player.switch_source("live")   # a NEW stream on another source; its kind sets the mode
+await player.replay(t0, t1)          # a BOUNDED replay of [t0, t1): ends paused at t1, never loops
+player.status()                      # PlayerStatus: mode, source, sources, cursor, speed, can_seek, error, …
 ```
 
-A bounded replay (a `ReplayCommand` with `end`, and `play=True` to start it)
-ends paused at `end` even on a looping player. A provider that raises mid-stream
--- or whose coverage call fails, at start or later -- ends the stream paused
-with `PlayerStatus.error` set to the client's own error and an `ErrorEvent` on
-the bus: from `player` for a mid-stream failure, naming the client for a
-coverage failure. The pipeline still starts, so the page connects and shows
-why. A `RefreshCommand` asks the gateway again; a play or seek that finds
-the source clears the error.
+*Why.* The gateway yields as fast as the provider reads; a person watching a
+disturbance needs real time, and needs to scrub. The decisions made once:
 
-*Why.* The gateway yields as fast as the provider reads; a human watching a
-disturbance needs real time, and needs to scrub. The decisions made here, once:
-
-- **Seek is a new stream** -- a stream's watermark rightly refuses to go
-  backwards.
-- **Mode is which stream is open.** A *replay* is a bounded stream over the
-  history coverage, paced, looping at its end; *live* is an open-ended stream
-  from now, delivered as it arrives, with no transport controls. Nothing
-  switches on its own: an archive beside a live feed replays paced and
-  seekable (`can_seek`) and offers the switch (`can_go_live`), so a page
-  renders no dead buttons.
+- **Mode is the active source's kind.** A history is *replayed*: paced,
+  seekable, looping at its end. A live source is *tailed*: delivered as it
+  arrives, with no transport controls. The status carries `sources`, `mode` and
+  `can_seek`, so a page renders no dead buttons.
+- **Seek is a new stream**; a stream only ever moves forward.
 - **Pacing drops time rather than bursting** when the loop falls behind.
-- **Commands come from the bus, typed** (see "Commands" below), so a POST, a
-  test and a future Qt widget drive the player the same way. Its `validate`
-  says synchronously whether a command applies in the current mode, which is
-  where every 409 about playback comes from.
-- **The next-frame read is a task awaited outside the lock** (learned the hard
-  way), so a live feed gone quiet never blocks the switch back to replay.
+- **A provider failure ends the stream loudly**: paused, `PlayerStatus.error`
+  set, an `ErrorEvent` published. The pipeline still starts, so the page
+  connects and shows why; a `RefreshCommand` asks again.
+- **The next-frame read is a task awaited outside the lock**, so a live feed
+  gone quiet never blocks a switch away from it.
+
+It publishes into a *sink* -- its pipeline -- and never waits on it.
 
 *Where.* `datagateway/player.py`.
 
-### The bus — `pswamp_core.bus.InProcessBus`
+### The transport — `pswamp_core.transport`
 
-*What.* Publish/subscribe inside one process, typed on message classes. A
-subscription to a base class receives every subclass.
+*What.* The one publish/subscribe in the core: **one topic per message class,
+namespaced by the app, and the pipeline key on every record.**
 
 ```python
-bus = InProcessBus()
-with bus.subscribe(PmuFrame, PlayerStatus, overflow=Overflow.DROP_OLDEST, maxsize=64) as sub:
-    async for message in sub: ...
-bus.add_listener(ResultEnvelope, store.remember)   # synchronous, every message, in order
-bus.publish(frame)                                  # from the loop
-bus.publish_threadsafe(result)                      # from a thread: the ONE crossing point
+await transport.publish(frame, app="pmu-test-streamer", key="42")   # topic pmu-test-streamer.pmu.frame
+with transport.subscribe(FrameStatsResult, app="pmu-test-streamer", key="42") as results:
+    async for key, result in results: ...                          # key "42" only
+with transport.subscribe(PmuFrame, app="pmu-test-streamer") as frames:
+    async for key, frame in frames: ...                            # every key: a host's view
 ```
 
-*Why.* It is what decouples the player from the endpoint and the module from
-both. The overflow policy is per subscription because a live stream and a
-completeness-first replay want different answers to "the consumer is slow":
-`DROP_OLDEST` for frames, `LATEST_ONLY` for state, `GROW` for commands.
-`publish_threadsafe` is the seam through which the desktop package's blocking
-application threads will publish when they are bridged in; it exists now so a
-second mechanism never appears.
+Two implementations, and the deployment picks one with `PSWAMP_TRANSPORT`:
+`InMemoryTransport` (unset: one process, no port) and `KafkaTransport`
+(`kafka:pswamp_core.transport.kafka:KafkaTransport` plus
+`KAFKA_BOOTSTRAP_SERVERS`). An `Outbox` sits in front of it for each pipeline
+key: the player and modules publish synchronously and never wait, a broker
+acknowledges, and when the outbox is full it drops the oldest *data* message
+-- never a command or an error -- and says so.
 
-*Why not the gateway alone.* They answer different questions. The gateway
-answers "where do the records for this time range come from?" -- a pull, one
-reader, facing the source. The bus answers "who needs this message now?" -- a
-push, many readers, facing the consumers. The player pulls from one and
-publishes onto the other. A page needs the bus side:
+*Why.*
 
-- Each frame has several readers (the module, the socket, `Latest`) where a
-  `DataStream` has one; a `consume()` per reader would mean a stream and a
-  clock each, and a seek that has to find them all.
-- Much of the traffic is not source data: results, `PlayerStatus` and
-  `ErrorEvent` originate inside the pipeline, and a `Command` travels the
-  other way, from a POST to the player or a module.
-- Overflow is per reader, so a slow browser tab drops its own frames and never
-  stalls the analysis.
+- **One mechanism, not two.** A module is always reached over the transport,
+  so "in-process" and "in a worker" are not two code paths but two transports.
+- **The in-memory transport behaves as a broker does**: every message is
+  serialised to JSON and parsed back, and a topic carries exactly one class (a
+  subscriber to `ResultEnvelope` hears no subclass). So a message that would not
+  survive the wire fails in a hermetic test, not in the deployment.
+- **The app is part of the topic**, so two apps whose modules read `PmuFrame`
+  under the same browser client id never read each other's frames.
+- **A transport is not a provider.** It carries what was published, in order,
+  and never reads a timestamp -- a replay whose timestamps jump back at every
+  loop crosses it unharmed. A broker *as a source* would be a `DataClient`.
+- **One Kafka consumer per process**, assigned every topic the process listens
+  to, reading a new topic from its end. (One consumer per topic, some fifty in
+  the server, starved each other of the broker.)
 
-The bus is what keeps every provider single-consumer. A broker cannot stand in
-for it, since a time-addressed stream drops the timestamps a replay sends
-backwards (see "Running a module as a separate service"). A broker's place is
-behind the bus, as the *transport* to a module that has left the process,
-reached through a `RemoteModule`, so the page never notices the move.
-
-*Where.* `core/src/pswamp_core/bus/__init__.py`. `Latest` in the same module
-keeps the newest message per class — what a freshly connected socket renders
-from.
+*Where.* `core/src/pswamp_core/transport/__init__.py` (`Transport`,
+`InMemoryTransport`, `Outbox`, `transport_from_env`), `transport/kafka.py`,
+`subscription.py` (a consumer's queue and its overflow policy).
 
 ### Modules — `pswamp_core.modules.Module`
 
-*What.* Consume one message class, publish another.
+*What.* Consume one message class, publish another; answer commands, if it
+declares any.
 
 ```python
-class FrameStats(BaseModel): mean_frequency_hz: float | None; ...
 class FrameStatsResult(ResultEnvelope[FrameStats]):     # topic: frame.stats.result
     version: Literal["v1"] = "v1"
 
@@ -344,773 +262,384 @@ class FrameStatsModule(Module):
     name = "frame-stats"
     input_model = PmuFrame
     output_model = FrameStatsResult
-    async def process(self, frame: PmuFrame) -> FrameStats | None:
-        ...
+    async def process(self, frame: PmuFrame) -> FrameStats | None: ...
 ```
 
-*Why.* A contributor's module is the analysis and two class attributes; `run`
-subscribes, calls, wraps in the envelope (`timestamp`, `app` identity,
-`parameters`, `request_id`) and publishes. The page that shows it subscribes to
-`FrameStatsResult`, never to the module. This is the coroutine module; the
-desktop package's thread-based `SnapshotApp`s are bridged to the same bus and
-the same envelope when `GatewayIO` lands (deferred; see the last section).
+*Why.* A contributor's module is the analysis and two class attributes: `run`
+reads its input queue, calls `process`, wraps the result in the envelope
+(`timestamp`, `app`, `parameters`, `request_id`) and publishes it into its
+`out`. A module never sees the transport. **A `ModuleHost` runs it**: one
+instance per pipeline key, built on the first message for that key, fed off the
+app's topics, and dropped when the pipeline says `PipelineClosed` (or, as a
+backstop, after five minutes of silence). A module that answers commands lists
+their concrete classes in `commands` and implements `handle` (and `validate`,
+if it can refuse one). A module that reads the gateway itself -- a batch
+question over a range -- gets one in `setup`, built by the app's family from
+the same configuration the pipeline's player reads, wherever it is hosted.
 
-A module may also **answer commands**: it lists the command classes in
-`commands` and implements `handle` (and `validate`, if it can refuse one);
-what `handle` returns is published in its `output_model`, carrying the
-command's `request_id`. A module that only answers commands sets
-`input_model = None`. See "Commands" below.
+*Where.* `core/src/pswamp_core/modules.py`, `host.py`, `keep_up.py`;
+`pmu_test_streamer/stats_module.py` (a module that reduces a frame, re-deriving
+its columns when `header_id` changes); `time_series_explorer/row_count_module.py`
+(a module that answers a command by reading the gateway).
 
-*Where.* `core/src/pswamp_core/modules.py`;
-`app/server-python/src/pmu_test_streamer/stats_module.py` (a module that
-*reduces* a frame; it derives its column indexes from `frame.header` on the
-first frame and again whenever a frame's `header_id` differs, so it has no
-`setup`, and the same instance runs unchanged in another process).
+### Pipeline, family and registry — `pswamp_core.pipeline`
 
-### Pipeline and registry — `pswamp_core.pipeline`
-
-*What.* One stream's gateway, bus, player and modules, and the registry that
-builds one per key, caps them and evicts them.
+*What.* What an app's pipelines are made of, declared once; one pipeline per
+key; and the registry that builds, caps and evicts them.
 
 ```python
-async def build_pipeline(client_id: str) -> Pipeline:
-    gateway = gateway_from_env(DEFAULT_DATA_CLIENTS)
-    bus = InProcessBus()
-    player = Player(gateway, bus, model=PmuFrame, loop=True)
-    modules = [FrameStatsModule(), ErrorForwarderModule(client_id, "pmu-test-streamer")]  # the tray's copy
-    return Pipeline(client_id, gateway, bus, player, modules)
+FAMILY = PipelineFamily("pmu-test-streamer", gateway_factory, (FrameStatsModule,))   # <app>/family.py
 
-REGISTRY = PipelineRegistry(build_pipeline, max_pipelines=8, idle_seconds=300)
+REGISTRY = PipelineRegistry(lambda key: Pipeline(key, FAMILY, transport(), loop=True))
 pipeline = await REGISTRY.acquire(client_id)   # builds on first connect; one per key
+pipeline.latest.get(FrameStatsResult)          # the newest result, as the edge reads it
+with pipeline.changes() as changes: ...        # a wake-up on every change, coalesced
 REGISTRY.peek(client_id)                       # a command's view: never builds
 ```
 
-*Why.* The key is the unit of isolation, and **everything inside a pipeline is
-built fresh for its key**: the factory runs once per key, so each gets its own
-gateway (and client instances), bus, player and modules. A **replay is keyed
-per client**: a visitor exploring
-recorded data wants their own clock. A **live stream would be keyed per
-stream**: every operator sees the same instant and the analysis runs once.
-Same class, different key. The registry is the grid monitor's `HubRegistry`
-moved down and generalised: per-key lock so five simultaneous sockets build one
-pipeline, idle grace so a reload rejoins, LRU eviction at the cap, refusal when
-nothing is reclaimable. See "What is per client, what is shared" below.
+*Why.* The **family** is the one description both sides share: the server
+builds a pipeline per key from it, and a host -- in the server or in a worker --
+hosts its modules from it. A **pipeline** is a gateway, a player and the
+family's topics under one key; it publishes the player's frames to the
+modules, listens for their results, and keeps the newest message of each
+class (`latest`) with a wake-up (`changes()`) for the socket. That local view
+is not a bus: an endpoint builds its message from current state, so however
+much arrived meanwhile it sends one. The key is the unit of isolation: a
+**replay is keyed per client**, because a visitor exploring recorded data wants
+their own clock. The registry keeps one pipeline per key, lets it outlive its
+sockets for an idle grace period so a reload rejoins, reclaims the
+least-recently-used idle one at the cap, and refuses when none can be.
 
-*Where.* `core/src/pswamp_core/pipeline.py`.
+*Where.* `core/src/pswamp_core/pipeline.py`; each app's `family.py`.
 
 ### Commands — `pswamp_core.command_routing`
 
-*What.* An operator's action as a typed message, routed by its class to the
-one receiver that declared it, checked before it is published, applied in order.
+*What.* An operator's action as a typed message whose **class is its address**,
+travelling on its own topic.
 
 ```python
-class SeekCommand(PlayerCommand):             # topic: seek.command; name: "seek"
-    to: datetime | None = None
-    offset_s: float | None = None              # exactly one of the two, validated on construction
-
 pipeline.dispatch(SeekCommand(client_id=id, offset_s=12))
-#   resolve: which receiver declared SeekCommand?   the player (commands = (PlayerCommand,))
-#   player.validate(cmd)                            raises CommandRefused -> the POST's 409
-#   bus.publish(cmd)                                only once both passed
-# ... the player's CommandInbox: validate again, then await player.handle(cmd)
+#   a player command?  player.validate(cmd)     raises CommandRefused → the POST's 409
+#   a module command?  accepted as it is        the module checks it where it runs
+#   then               outbox → topic pmu-test-streamer.seek.command, key = client id
+# ... the receiver's CommandInbox: validate again, then await receiver.handle(cmd)
 ```
 
-A **receiver** is the player or a module: a `name`, the `commands` it handles,
-`validate` (synchronous, in-memory state only) and `handle`. The pipeline's
-receivers are the player and every module that declares commands; it opens one
-`CommandInbox` per receiver at start. Two receivers of one class are told
-apart by the command's optional `target` (a receiver's name); otherwise
-dispatch refuses the ambiguity.
+*Why.* The class is the address and the arguments are validated fields: a
+family refuses two receivers of one class, and a declared class must be
+concrete, since a topic carries one class. **The player lives with the edge**,
+so its commands are checked before they are published and a refusal is an
+honest 409. A module may be in another process, so its commands are accepted
+and checked where it runs; a refusal there -- or anything that fails while
+applying a command -- is an `ErrorEvent` carrying the command's `request_id`, on
+the error tray. Commands travel on topics even to the player, so a **module
+can command the player** exactly as the edge does (a `SwitchSourceCommand`, say).
 
-*Why.* A command used to be one `Command(verb, args)` broadcast to every
-listener, each filtering for itself: no one owned "no such receiver" or
-"unknown verb", and a refusal arrived after the acknowledgement, in the log.
-Now the class is the address and the arguments are validated fields; the
-check made at dispatch gives the POST an honest 409; and what the inbox still
-refuses -- the state moved between the two, say a seek queued behind a switch
-to live -- is an `ErrorEvent` with the command's `request_id`, on the error
-tray. The inbox subscribes when it is built, so a command published the moment
-a pipeline has started is never lost.
-
-*Where.* `core/src/pswamp_core/command_routing.py` (routing, the inbox,
-`CommandRefused`); `core/src/pswamp_core/messages/commands.py` (the base and
-the player's commands). A module's own commands live beside the module, as its
-result does: `CountRangeCommand` in `time_series_explorer/row_count_module.py`.
+*Where.* `core/src/pswamp_core/command_routing.py` (the inbox,
+`CommandRefused`); `messages/commands.py` (the base and the player's
+commands; `PLAYER_COMMANDS` in `player.py`). A module's own commands live
+beside the module, as `CountRangeCommand` does in `row_count_module.py`.
 
 ### The web edge — the app package
 
-*What.* What is left in `pmu_test_streamer/api.py` once the core does the rest:
-which messages to forward down the socket, and which POSTs build which typed
-command -- each handed to `shared.dispatch_command`, which maps "no pipeline"
-to 404 and `CommandRefused` to 409. The browser contract is unchanged: commands up as `POST`, state
-down one socket, an acknowledgement that never carries state, everything
-generated into `doc/api/openapi.json`.
+*What.* What is left in an app's `api.py` once the core does the rest: which
+state to build for the socket, and which POSTs build which typed command.
 
-*Where.* `app/server-python/src/pmu_test_streamer/api.py`; the page in
-`app/client-web/src/pages/pmu-test-streamer/`. The streamer pushes with its
-own `subscribe_updates` and `serve_stream`, since it coalesces four message
-classes. A page that wakes on one result class uses the grid monitor's loop,
-`event_queue` + `serve_updates` in `pswamp_web/pump.py` (re-exported by
-`shared.py`), which serves a core pipeline unchanged; `frequency_peek/api.py`
-does. The client-id handshake is not yet shared; see "Adding things".
+```python
+@router.post("/playback/source", responses=COMMAND_RESPONSES)
+async def source(client_id: ClientId, body: SourceBody) -> CommandAck:
+    return dispatch_command(REGISTRY, SwitchSourceCommand(client_id=client_id, source=body.name), logger)
 
-## How data flows: source to browser
-
-```mermaid
-flowchart TB
-    file["1 · sample_data.txt<br/>parsed once, lazily, into 60 PmuFrame (20 Hz, 5 stations),<br/>each carrying the one PmuHeader"]
-    subgraph clients["2 · providers"]
-        direction LR
-        rec["SampleRecordingClient<br/>coverage() = [first frame, last frame + 50 ms)<br/>capabilities = HISTORY_CONSUME"]
-        live["LiveSyntheticClient<br/>coverage() = [now - 50 ms, ∞) live<br/>capabilities = LIVE_CONSUME"]
-    end
-    subgraph gateway["3 · DataGateway.consume"]
-        direction LR
-        gwr["replay: consume(PmuFrame, start, history_end)<br/>bounded to the history<br/>planner: one segment, the recording, not live;<br/>the live client is offered only from now - 5 s on,<br/>so it never enters a replay<br/>stream: frames in order, watermark,<br/>closed when the segment ends"]
-        gwl["live, after go_live(): consume(PmuFrame, now, None)<br/>open-ended<br/>planner: one live segment on the live client,<br/>tailed as frames tick"]
-    end
-    player["4 · Player<br/>replay: waits until each frame is due at speed, then bus.publish(frame);<br/>on stream end, loop → a new consume() from the history start<br/>live: publishes each frame as it arrives;<br/>pause/step/seek/speed refused"]
-    bus["5 · InProcessBus"]
-    mod["FrameStatsModule.process(frame)"]
-    ws["6 · ws endpoint<br/>subscribe(PmuFrame, PlayerStatus, FrameStatsResult, StreamChanged)<br/>wake → drain what else is pending<br/>→ ONE PmuStreamState → send_state(ws)"]
-    browser["7 · browser<br/>useServerSocket → usePmuStreamSocket<br/>→ FrameTable + controls"]
-
-    file --> rec
-    file --> live
-    rec --> gwr
-    live --> gwl
-    gwr --> player
-    gwl --> player
-    player --> bus
-    bus -- PmuFrame --> mod
-    mod -- FrameStatsResult --> bus
-    bus --> ws
-    ws --> browser
+@router.websocket("/ws")
+async def ws_endpoint(ws: WebSocket) -> None:
+    async with connected_pipeline(ws, REGISTRY) as pipeline:
+        if pipeline is not None:
+            await push_changes(ws, pipeline, lambda: state_message(pipeline))
 ```
 
-Step 6 coalesces: each message is the frame at the cursor (with its layout
-inside), the player's status and the latest module result. A slow socket sees
-the newest state, never a backlog. The page keeps the last layout it saw, so
-the table stays laid out while no frame is at the cursor (a replay paused at
-its start after a stream switch).
+*Why.* Everything else is shared, in `shared.py`: `transport()` (one per
+process), `serve_family` (an app's lifespan: its registry, its errors forwarded
+to the tray, and -- with the in-memory transport -- its modules hosted in the
+server), `connected_pipeline` (1008, 1013, 1011), `push_changes` (one message on
+connect and one per change, coalesced), and `dispatch_command` (404 without a
+pipeline, 409 when refused). The browser contract is unchanged: commands up as
+POSTs, state down one socket, an acknowledgement that never carries state,
+everything generated into `doc/api/openapi.json`.
 
-## What happens when you click Live: the chain, walked from the browser up
+*Where.* `app/server-python/src/<app>/api.py`, `shared.py`; the pages in
+`app/client-web/src/pages/`.
 
-One command on the PMU test streamer, step by step, naming the code at each.
-"Live" changes the most; the other seven (`replay`, `play`, `stop`, `forward`,
-`back`, `seek`, `speed`) take the same path and differ only in what the player
-does at step 6.
+## A command's round trip
 
-**1. The button.** `PmuTestStreamerPage.tsx` renders the Recorded | Live switch
-from the last `PmuStreamState` it received: `Live` is enabled when
-`player.can_go_live` is true and pressed when `player.mode === "live"`. Its
-`onClick` calls `goLive()` from the page's own hook, and only when the page is
-not already live -- the page never fires a command that would change nothing.
-
-**2. The hook.** `usePmuStreamSocket.ts` has one `useCallback` per command.
-`goLive` is `fireCommand('pmu-test-streamer', postCommand('/api/pmu-test-streamer/playback/live'))`.
-`postCommand` (`src/lib/commands.ts`) is typed against the generated
-`schema.ts`, so a wrong path is a `tsc` error; it appends `?client_id=` from
-`src/lib/clientId.ts` (one id per browser profile, in `localStorage`) and
-resolves the url against the serving origin (`src/lib/servers.ts`). Under Vite
-that is the dev server, whose `/api` proxy forwards to the compose server; in
-the image it is the server itself. `fireCommand` awaits the POST and logs a
-failure. Nothing on the page waits for the reply: the effect arrives on the
-socket like any other change.
-
-**3. The route.** `server.py` mounts the streamer's `router` under
-`/api/pmu-test-streamer`. The handler `live()` in `pmu_test_streamer/api.py`
-builds the command and hands it on: `dispatch(GoLiveCommand(client_id=client_id))`.
-Building it generates its `request_id`.
-
-**4. Dispatch: find, route, check, publish, acknowledge.** `shared.dispatch_command`:
-
-- `REGISTRY.peek(client_id)` finds this client's pipeline. A command never
-  *builds* one -- no page open, no pipeline, 404.
-- `pipeline.dispatch(command)` (`core/…/command_routing.py`) routes it by its
-  class: `GoLiveCommand` is a `PlayerCommand`, which only the player declared.
-  It calls `player.validate(command)`, which refuses `GoLiveCommand` without a
-  live source, and any transport command while live, with `CommandRefused` --
-  a **409** with the player's reason, and nothing is published.
-- Otherwise the command is published on **that pipeline's bus** and the reply
-  is `CommandAck(applied="go.live")`. The ack means *dispatched*: the player
-  has not run yet. The streamer then logs the roster.
-
-**5. The bus.** `InProcessBus.publish` delivers the command synchronously to
-every subscription whose class matches: the player's `CommandInbox`, which
-subscribed to `PlayerCommand` with `Overflow.GROW` when the pipeline started,
-so no command is ever dropped. The bus is per pipeline, so the command reaches
-this client's player and no other.
-
-**6. The player applies it.** The inbox reads the command, calls
-`player.validate` again (the state may have moved since dispatch) and awaits
-`player.handle`, which picks the control by the command's class:
-`GoLiveCommand` → `go_live()`, `ReplayCommand` → `replay()`, `PlayCommand` →
-`resume()`, and so on. A refusal or failure here becomes an `ErrorEvent`
-carrying the `request_id`, which the error tray shows.
-
-**7. The switch.** `go_live()` takes the player's lock and calls
-`_switch_stream(utcnow(), live=True)`; `replay()` calls
-`_switch_stream(history_start, live=False)`. This is the one place a stream is
-replaced, and it does five things in order: re-read what the gateway offers
-(`coverage(model, capability=HISTORY_CONSUME)` for the seekable range,
-`supports(model, LIVE_CONSUME)` for whether live exists) and check the range
-against it, first, so a refused range leaves the current stream exactly as it
-was; bump the generation (so a frame the run loop had parked from the old
-stream is discarded); cancel the read task in flight on the old stream; close
-the old `DataStream`; and open the new one
-with `gateway.consume(model, start, end)` -- `end` is the history's end for a
-replay, so it runs out and loops, and `None` for live, so it never ends. Then it
-sets the `_live` flag, which is what `mode` reports, and publishes
-`StreamChanged`. Back in `go_live()` the player unpauses (live has no pause);
-in `replay()` it pauses (the same state the page opens in). Both publish a
-`PlayerStatus`.
-
-**8. The gateway plans a segment.** `gateway.consume()` returned a `DataStream`
-without touching any client; the player's next read (a task, awaited outside
-the lock) is what drives it. `DataStream._iterate` asks `SegmentPlanner.next_segment`
-for the segment at the cursor. The planner calls `coverage()` on every
-consuming client and keeps the offers that contain the cursor, honouring what
-each client declared:
-
-- `SampleRecordingClient.coverage()` is the fixed window
-  `[2026-01-01 00:00:00.050, +3.0 s)`; a `HISTORY_CONSUME` client, so it may
-  serve a history segment.
-- `LiveSyntheticClient.coverage()` is `[now - 50 ms, ∞) live`; a `LIVE_CONSUME`
-  -only client, so it is *offered* only from `now - 5 s` (the hand-off margin)
-  on, and *eligible* only for the live hand-off.
-
-For **live**, the cursor is `now`: only the live client covers it, the hand-off
-applies, and the planner returns one open-ended live `Segment` on it. For
-**replay**, the cursor is the recording's first instant: only the recording
-covers it, and the planner returns one history `Segment` bounded to the
-recording's end. The two clients never compete, and neither is ever asked for
-what it did not declare.
-
-**9. The data client serves it.** The stream calls the chosen client's
-`consume(PmuFrame, segment.range)`:
-
-- `LiveSyntheticClient.consume` registers an `asyncio.Queue` in its `_tails`
-  and yields whatever the ticker puts there. The ticker has been running since
-  `Pipeline.start` called `gateway.open()`; every 50 ms it takes the next row of
-  the recording, stamps it `utcnow()`, and puts it on every tailing queue. The
-  queue is removed in `finally`, so a switch away stops the delivery.
-- `SampleRecordingClient.consume` iterates its sixty parsed frames and yields
-  those inside the range. The frames were parsed once, lazily, from
-  `sample_data.txt`, and each carries the recording's header.
-
-That is the top of the chain. From here everything runs **back down**, and it
-is the same path for both sources: the read task parks the frame; the run loop
-paces it (replay) or passes it straight through (live) and `bus.publish`es it;
-`FrameStatsModule` and the socket's subscription both receive it;
-`FrameStatsModule` publishes a `FrameStatsResult`; the endpoint's push task
-wakes, drains what else is pending, builds one `PmuStreamState` from the
-player's status, its `last_frame` and the latest stats result, and
-`send_state`s it.
-The page renders that message -- the badge turns red, the transport row
-disables, the readout shows a wall-clock time -- because the *server* said the
-mode is live, not because a button was pressed.
+Switching the streamer's source changes the most; every other command takes
+the same path and differs only in what its receiver does. A module command
+(the explorer's count) differs in one place, shown last.
 
 ```mermaid
 sequenceDiagram
     participant B as browser
-    participant A as api.py
-    participant Bus as bus
+    participant E as edge (api.py)
+    participant T as transport
     participant P as player
     participant G as gateway
-    participant C as LiveSyntheticClient
-    participant M as FrameStatsModule
-    participant E as ws endpoint
+    participant M as FrameStatsModule (hosted)
 
-    Note over B: Live button → goLive()
-    B->>A: POST /api/pmu-test-streamer/playback/live?client_id=…
-    Note over A: live() → dispatch_command()<br/>REGISTRY.peek (404) · pipeline.dispatch:<br/>route by class · player.validate (409)
-    A->>Bus: publish(GoLiveCommand)
-    A-->>B: CommandAck
-    Bus->>P: GoLiveCommand, on the player's inbox (this pipeline only)
-    Note over P: inbox → validate · handle → go_live()<br/>→ _switch_stream(now, live=True)<br/>re-read coverage · generation++ · cancel read · close stream
-    P->>G: consume(PmuFrame, now, None)
-    Note over P: _live = True
-    P->>Bus: StreamChanged · PlayerStatus
-    Note over G: DataStream → SegmentPlanner:<br/>coverage() of each client → one live Segment
-    G->>C: consume(PmuFrame, segment.range)
-    Note over C: a queue in _tails, fed by the 20 Hz ticker
-    Note over B,E: and back down
-    C-->>G: PmuFrame
-    G-->>P: PmuFrame, parked by the read task
-    P->>Bus: publish(PmuFrame), unpaced: live
-    Bus->>M: PmuFrame
-    M->>Bus: FrameStatsResult
-    Bus->>E: PmuFrame · PlayerStatus · FrameStatsResult
-    E->>B: one PmuStreamState → send_state(ws)
-    Note over B: renders mode "live": red badge,<br/>transport disabled, wall-clock readout
+    B->>E: POST /playback/source {name: "live"}
+    Note over E: REGISTRY.peek (404 without a pipeline)<br/>player.validate
+    alt refused (no such source; a transport command while live)
+        E-->>B: 409, with the player's reason; nothing published
+    else accepted
+        E->>T: SwitchSourceCommand on pmu-test-streamer.switch.source.command
+        E-->>B: CommandAck {applied: "switch.source"}
+        T->>P: the pipeline's command inbox
+        P->>G: switch("live") · consume(PmuFrame, now, None)
+        P-->>E: PlayerStatus (mode "live") into latest · changes()
+        loop each frame the live feed stamps
+            G-->>P: PmuFrame
+            P->>T: PmuFrame on pmu-test-streamer.pmu.frame
+            T->>M: the instance for this key: process
+            M->>T: FrameStatsResult on …frame.stats.result
+            T-->>E: into latest · changes()
+            E->>B: one PmuStreamState down the socket
+        end
+    end
+    Note over B,M: A module command (POST /count) is accepted without a check:<br/>the module validates it where it runs, and a refusal comes back<br/>as ErrorEvent(request_id) on the error tray
 ```
 
-The command carries a `request_id`, generated on the server and logged with
-the command; a module answering a command copies it onto its `ResultEnvelope`, so a
-result on a shared bus can be routed back to the client that asked. (Returning
-it to the browser in the acknowledgement is the one edge change still pending;
-see the last section.)
+1. **The button.** The page renders one button per name in `player.sources`,
+   pressed for `player.source`, and fires only on a change. `switchSource(name)`
+   is a `postCommand` typed against the generated `schema.ts`.
+2. **The edge** builds the `SwitchSourceCommand` (which generates its
+   `request_id`) and hands it to `dispatch_command`; the ack means *published*,
+   not applied.
+3. **The player applies it** off its inbox: the gateway switches, the old
+   stream closes and a new one opens -- a history at its start (paused), a live
+   feed from now (playing) -- and the status says so.
+4. **And back down**, the same for every source: frames to the hosted module,
+   results back into `latest`, one state message per change. The page turns red
+   because the *server* says the mode is live, not because a button was pressed.
 
-## What is per client, what is shared
-
-| | in the streamer today (per client, replay or live) | for a shared live feed (designed, not yet built) |
-|---|---|---|
-| pipeline key | the browser's client id | the stream name |
-| provider | the recording plus the synthetic live feed, opened per pipeline | the deployment's live and history clients |
-| player | one per client: own cursor, own speed, own recorded/live switch; live has no transport | one per stream, always live; "pause" is view state |
-| modules | run once per pipeline | run once per stream, results shared |
-| bus | one per pipeline | one per stream |
-| socket | one per page per client | one per page per client, subscribed to the shared bus |
-
-### One gateway per client, concretely
-
-"One pipeline per client" is easy to read as one *player* per client over
-shared plumbing. It is not: the gateway and its data clients are per client
-too. On a new client id the registry calls `build_pipeline(client_id)`, whose
-`gateway_from_env(...)` **instantiates the clients named in the spec** -- a new
-`SampleRecordingClient` and `LiveSyntheticClient` -- in a new `DataGateway`.
-`Pipeline.start` then calls `gateway.open()`, which starts this client's live
-ticker. Eight browsers in live mode are eight tickers; evicting a pipeline
-calls `gateway.close()` and stops one.
-
-Only one thing is shared across pipelines: the **parsed recording**.
-`load_sample()` is `lru_cache`d by path, so the sixty frames (and the one
-header they all point at) are read from `sample_data.txt` once per process, and
-every `SampleRecordingClient` holds the same frozen objects. That is safe
-because nothing writes to them; the live client copies each row's `values`
-before stamping it. (The registry and the event loop are shared too, of
-course.)
-
-Why not one gateway for all clients, with a player each? Because the gateway
-holds the *provider's* state, and that is per consumer as soon as anything
-tails: a live client holds a queue per open `consume()`, a broker client would
-hold a subscription per consumer, a database client a cursor. The `DataClient`
-contract has no consumer identity, on purpose, so a provider stays simple to
-write; keeping the gateway inside the pipeline keeps every provider
-single-consumer.
-
-The cost is what the registry caps. A streamer pipeline is a handful of
-`asyncio` tasks (the player's run and read tasks, one `CommandInbox` task per
-receiver, one per module including the error forwarder, the live ticker) and the objects above -- no threads, no copies of the recording --
-so it is cheap next to the grid monitor's four-thread hubs. `MAX_PIPELINES` and
-`IDLE_EVICT_SECONDS` in `api.py` are the bounds, pinned by the registry's
-tests. Every socket a browser opens carries the same `client_id`, so all its
-pages land on one pipeline; another browser is another pipeline, which is why
-two browsers in recorded mode can sit at different frames, and two in live
-mode -- with this synthetic feed -- see different ticks.
-
-That is the honest limit. The streamer's live feed is per client because the
-gateway is: right for a synthetic source, wrong for a real one, where every
-viewer must see the same instant and the analysis must run once. The answer is
-the table's right-hand column -- one pipeline keyed by the *stream*, its
-gateway and live client shared by every viewer, with only replay cursors and
-view state per client. It is still a design.
-
-## Adding things
-
-**A provider** (a TSO's data source, or a new recording format): implement
-`DataClient` in your own package, importing `pswamp_core.datagateway` and
-`pswamp_core.messages` only; declare `env_settings`; inherit
-`DataClientConformance` in a test with your three fixtures; name the class in
-`PSWAMP_DATA_CLIENTS`. Nothing in this repo changes. `sample_client.py` is the
-model.
-
-**A module, and the page that shows it**: one app package with its own
-pipeline. The streamer is that shape with more in it, so each step names the
-piece of `pmu_test_streamer/` to copy. `frequency_peek/` is the recipe at its
-smallest: one core module on a live-only page, with no commands.
-
-1. `./scripts/generate-new-subapp.sh my-thing "My Thing"` for the folders and
-   the four registry entries; replace the counter it writes, delete its
-   `model.py` (and the `*_API_PATH` const if the page has no commands).
-2. **The module**, in its own file: a pydantic result body, the envelope
-   (`class MyThingResult(ResultEnvelope[MyThingBody])`, topic `my.thing.result`),
-   and a `Module` subclass with `name`, `input_model`, `output_model` and
-   `process`. Read the layout off `frame.header` when it matters, re-deriving
-   on a changed `header_id` (`stats_module.py` does); `setup` only for
-   something a module needs from the gateway itself (`row_count_module.py`
-   keeps the gateway, and says so with `reads_gateway = True`). A module that
-   answers a command declares its command class beside it and lists it in
-   `commands`, with a `handle` returning the result body
-   (`row_count_module.py`). Import only `pswamp_core`.
-3. **The pipeline**, copied from the streamer's `build_pipeline`, `REGISTRY`
-   and `lifespan`. The module list there is the only registry a module has;
-   keep its `ErrorForwarderModule(client_id, "my-thing")` at the end, since
-   that is what puts the pipeline's `ErrorEvent`s on the error tray. Build the
-   player with `model=PmuFrame` (or your input class). Name the provider in the `gateway_from_env` spec string and give the app its
-   own `variable=`; don't import `pmu_test_streamer`. A page with no transport
-   wants `Player(..., autoplay=True, loop=True)`, or it shows dashes for ever.
-4. **The socket**: a state model exported as `WS_MESSAGE`, carrying the
-   envelope as it is (and the frame at the cursor, if the page shows one --
-   its layout comes inside it); `state_message` reading
-   `pipeline.latest.get(MyThingResult)`; and the grid monitor's push loop
-   from `shared.py`, which serves a core bus unchanged:
-
-   ```python
-   with event_queue(pipeline.bus, MyThingResult) as updates:
-       await serve_updates(ws, updates, lambda event: state_message(pipeline))
-   ```
-
-   Open the queue before building the opening message. The handshake around
-   it (`read_client_id`, `accept`, `REGISTRY.acquire`, 1013 on
-   `CapacityError`, `release`) is not shared yet -- copy the streamer's
-   `connected_pipeline` and point it at your registry.
-5. **Commands**, if any: one `POST` per operation, each building one typed
-   command and returning `dispatch_command(REGISTRY, command, logger)` from
-   `shared.py` (404 without a pipeline, 409 when refused); pass
-   `responses=COMMAND_RESPONSES` so the contract carries both. The explorer's
-   `api.py` is the model.
-6. **The page**: `useServerSocket<Wire['MyThingState']>(MY_THING_WS_PATH)`;
-   the component reads the module's fields as written.
-7. `generate-api-contract.sh`, `error_check.sh`,
-   `run-python-server-tests.sh`; restart the server script (a new package
-   needs the rebuild). Tests: call `process` directly, and run the pipeline
-   with `player.paced = False` reading the bus.
-8. **Optional: run the module as its own service.** In-process is the default
-   and costs nothing; if you need this, four edits, none to the module (its
-   input carries everything it needs, as `stats_module.py` shows):
-   - `build_pipeline`: `RemoteModule(MyThingModule, transport, key)` where
-     `MyThingModule()` was, with the transport from
-     `transport_from_env("MY_THING_MODULE_TRANSPORT")` built once per process
-     and closed in `lifespan` (`stats_modules` / `module_transport` in the
-     streamer's `api.py`); unset, the list holds the module itself;
-   - `worker.py`: `raise SystemExit(main(MyThingModule, "MY_THING_MODULE_TRANSPORT"))`
-     from `pswamp_core.remote`;
-   - the variable on both sides in compose and `k8s/`, and a worker service
-     that is the same image with that command (copy `stats-worker`);
-   - a test running `ModuleHost(MyThingModule, broker)` beside the pipeline
-     over `InMemoryTransport` (copy the streamer's).
-
-**If the new module publishes a new data shape/type.** Nothing in `core/`
-changes: the bus, `Latest`, the gateway and the player are all typed on
-whatever `DataModel` subclass you hand them (the core's own tests run the
-chain on a non-PMU `Measurement`). What has to be done:
-
-- **Declare it once, as a `DataModel` subclass, where every consumer can
-  import it.** The class *is* the type and the topic -- the bus routes by
-  `isinstance`, so the module and whatever reads its output must import the
-  same class, not two look-alikes. Consumed only inside the app package: beside
-  the module, as `FrameStatsResult` is in `stats_module.py`. Consumed by
-  another app package, a provider outside the repo, or the desktop package:
-  in `core/src/pswamp_core/messages/`, so importing it needs nothing but the
-  core. Never import another app package to get at its types.
-- Pin `version: Literal["v1"]`; give it a `timestamp` if a player will pace it
-  or an envelope will carry it.
-- A module's output is always `ResultEnvelope[YourBody]`; the payload sits
-  under `.result`, and a downstream module subscribes to the envelope class.
-  A stage that must publish a *bare* message (a cleaned `PmuFrame` for the
-  existing PMU modules to consume as if from a source) has no `Module` path
-  today: it needs its own `run` calling `bus.publish`, or a decision to give
-  `Module` one.
-- If the type is an *input* rather than a result, something has to serve it:
-  a provider answering `coverage`/`consume` for that class, and a
-  `Player(model=YourType)` in the pipeline. One player streams one class.
-- A `PmuHeader` is the PMU stream's layout, not the core's: a new type has no
-  header unless you nest one in it, as `PmuFrame` does, and the page sends
-  what it needs.
-- Regenerate the contract; the browser type follows from the state model.
-
-Don't add the module to the *streamer's* pipeline and put the page in
-another package: two apps sharing a pipeline is the right-hand column of the
-table above, a decision about the key, not a shortcut.
-
-## Running a module as a separate service
-
-*What.* The module's slot in the pipeline's module list is taken by a stand-in
-that carries the module's input class out to a broker topic and its result
-class back; a worker process runs the real module, one instance per pipeline
-key. Nothing in the module changes, and nothing above the bus notices.
+## Where things run
 
 ```mermaid
 flowchart LR
-    subgraph web["web process — one pipeline per client"]
+    classDef data fill:#e8f1fb,stroke:#3b6ea5,color:#000
+    subgraph one["One process: PSWAMP_TRANSPORT unset (a bare docker run, CI, the tests)"]
         direction TB
-        gw["gateway"] --> player["Player"] --> bus["InProcessBus"]
-        post["POST"] --> cmd["PlayerCommand"] --> player
-        rm["RemoteModule(FrameStatsModule, key = client id)"]
-        ws["socket<br/>subscribes FrameStatsResult as before"]
-        bus -- "PmuFrame, via the outbox" --> rm
-        rm -- FrameStatsResult --> bus
-        bus --> ws
+        s1["server<br/>pipelines + edge"]:::data
+        m1["InMemoryTransport<br/>JSON round trip · exact topics"]
+        h1["ModuleHosts<br/>started in the server's lifespan"]:::data
+        s1 <==> m1 <==> h1
     end
-    subgraph broker["Kafka"]
+    subgraph many["compose / k8s: PSWAMP_TRANSPORT = Kafka"]
         direction TB
-        t1[["pmu.frame"]]
-        t2[["frame.stats.result"]]
+        s2["server<br/>pipelines + edge"]:::data
+        k[("Kafka<br/>one consumer per process<br/>~1 min retention")]
+        w1["module-worker<br/>streamer · frequency peek ·<br/>explorer · islanding"]:::data
+        w2["mode-estimation-worker<br/>N4SID, its own CPU limit"]:::data
+        stub["remote-data-stub"]
+        s2 <==> k
+        k <==> w1
+        k <==> w2
+        s2 -->|"REST, streamed answers"| stub
+        w1 -->|"REST: the row count's own gateway"| stub
     end
-    subgraph worker["stats-worker process — one per deployment"]
-        direction TB
-        kt["KafkaTransport<br/>one consumer per topic,<br/>demultiplexed by record key"]
-        host["ModuleHost(FrameStatsModule)<br/>one module + bus per key"]
-        kt --> host
-    end
-    rm -- "publish, key = client id" --> t1
-    t1 --> kt
-    host --> t2
-    t2 -- "subscribe, key = client id" --> rm
 ```
 
-`RemoteModule(FrameStatsModule, transport, key)` has the module's `name`,
-`input_model` and `output_model`. Its `run` drains the input class off the
-local bus onto its topic (a `DROP_OLDEST` subscription, so a slow broker costs
-frames, not memory) and publishes what arrives on the result topic back onto
-the bus. `ModuleHost(FrameStatsModule,
-transport)` subscribes to the input topic across every key; the first input for
-a key builds that key's bus, module and forwarder, and a key idle for
-`idle_seconds` is evicted.
+*What.* The boxes are the same in both columns; only the transport differs.
+With nothing configured the server builds an `InMemoryTransport` and starts a
+`ModuleHost` per module class in its own lifespan. With
+`PSWAMP_TRANSPORT` naming Kafka, the server hosts nothing and the workers --
+the same image, running `python -m pswamp_core.worker` -- host the families
+named in `PSWAMP_WORKER_FAMILIES` (`pmu_test_streamer.family:FAMILY,…`). A
+worker is configured like the server in one more way: a hosted module that
+reads the gateway gets one built from the same `*_DATA_CLIENTS` variables, so
+those go to the worker too.
 
-**A module's commands cross too.** If the module declares `commands`, the
-`RemoteModule` is the pipeline's receiver for them: its `handle` publishes each
-command on its class's topic under the key, the host tails those topics and
-puts each on the key's bus, and the hosted module's own inbox checks and
-applies it; the answer comes back on the result topic, and a refusal as an
-`ErrorEvent` carrying the `request_id`. The stand-in's `validate` accepts
-everything, since the module's state is in the worker. Two things are refused
-when the `RemoteModule` or `ModuleHost` is built: a module that reads the
-gateway itself (`reads_gateway`; a worker has no providers), and a declared
-command class with subclasses (a topic carries one class, so list the concrete
-ones). The player never leaves the server, so its commands never cross.
+*Why.* A heavy module gets a process -- and a CPU limit -- of its own without
+touching its code or its page, and a deployment that wants no broker runs one
+container. The player, and so every player command, stays in the server either
+way. The in-memory mode is not a test double: it is the same code path with a
+different transport, which is what lets CI's single container exercise every
+page.
 
-One variable, read by both sides, is the whole switch:
+*Where.* `transport_from_env`, `host.py` (`hosts_for`, `serve_hosts`),
+`worker.py`; `shared.serve_family`; `module-worker` and
+`mode-estimation-worker` in `docker-compose.yml` and `k8s/p-swamp-local.yaml`.
 
-```
-PMU_TEST_STREAMER_MODULE_TRANSPORT=kafka:pswamp_core.transport.kafka:KafkaTransport
-KAFKA_BOOTSTRAP_SERVERS=kafka:9092                # KAFKA_TOPIC_PREFIX optional
-```
+## What is per client, what is shared
 
-Unset, the module runs in-process; `mem:pswamp_core.transport:InMemoryTransport`
-is the portless value every test uses. Compose runs six services and `k8s/`
-the matching six Deployments; the three this needs are `kafka` (the Apache
-image, one KRaft node, no volume), the server and `stats-worker`. The smoke test plays the streamer and waits for the
-module's result either way.
+| | per client today | for a shared live feed (designed, not yet built) |
+|---|---|---|
+| pipeline key | the browser's client id | the stream name |
+| gateway | its own, with its own client instances (and live ticker) | the deployment's live and history clients, once |
+| player | one per client: own cursor, speed and source | one per stream, always live; "pause" is view state |
+| modules | one instance per key, in a host | one per stream, results shared |
+| topics | shared by every key of the app; the record key keeps them apart | the same |
+| socket | one per page per client | one per page per client |
 
-*Why.* Three decisions:
+The gateway lives inside the pipeline because it holds the *provider's* state,
+and that is per consumer as soon as anything tails: a live client holds a
+queue per open `consume()`, a database client a cursor. The `DataClient`
+contract has no consumer identity, on purpose, so a provider stays simple to
+write. Only the parsed recordings are shared across pipelines (`lru_cache`d
+and never written to). The cost is what the registry caps: a streamer pipeline
+is a handful of tasks and no threads.
 
-- **The hop is a transport, not a provider.** An earlier sketch had the broker
-  as a bus via `gateway.produce`/`consume`. The streamer's replay frames are stamped
-  in January and go *backwards* at every loop; a time-addressed `DataStream`
-  would drop them. A `Transport` carries what the bus said, in order, and
-  never reads a timestamp. A broker as a *source* is still a `DataClient`.
-- **The pipeline key is the record key.** One topic per class, never per
-  client, so eight pipelines are three topics and the worker tells them apart
-  by key. No `DataModel` gains a field (ADR-005), and the streamer stays per
-  client with every command intact, since the player never leaves the server.
-- **The input is all the worker needs.** A frame carries its layout, so a
-  worker that starts late -- or a key that was evicted and rebuilt -- is primed
-  by the first frame it sees, and a changed layout is just the next frame. The
-  price is the layout repeated in every record, about 1.2x on the wire once
-  the broker's batch compression has collapsed it.
+That is the honest limit: the streamer's live feed is per client because the
+gateway is -- right for a synthetic source, wrong for a real one, where every
+viewer must see the same instant and the analysis must run once. The answer is
+the right-hand column: one pipeline keyed by the *stream*. It is still a
+design.
 
-This landed ahead of the measurements the design asked for before adding a
-broker; the numbers to produce next are listed in the last section.
+## Adding a module and its page
 
-*Where.* `core/src/pswamp_core/transport/` (`Transport`, `InMemoryTransport`,
-`transport_from_env`; `kafka.py`), `core/src/pswamp_core/remote.py`
-(`RemoteModule`, `ModuleHost`, `main`); the streamer's `stats_modules`,
-`module_transport` and `worker.py`; `kafka` and `stats-worker` in
-`docker-compose.yml` and `k8s/p-swamp-local.yaml`; `core/tests/test_remote.py`
-and the last cases of `app/server-python/tests/test_pmu_test_streamer.py`.
+**A provider** (a TSO's data source): implement `DataClient` in your own
+package, importing `pswamp_core.datagateway` and `pswamp_core.messages` only;
+declare `env_settings`; inherit `DataClientConformance` in a test; name the
+class in the app's `*_DATA_CLIENTS`. Nothing in this repo changes;
+`sample_client.py` is the model.
+
+**A module and the page that shows it** is one app package. `frequency_peek/`
+is the recipe at its smallest (one module, a live-only page, no commands);
+the streamer is the same shape with more in it.
+
+1. `./scripts/generate-new-subapp.sh my-thing "My Thing"` for the folders and
+   registry entries; replace the counter it writes.
+2. **The module**, in its own file: a pydantic result body, the envelope
+   (`class MyThingResult(ResultEnvelope[MyThingBody])`), and a `Module` with
+   `name`, `input_model`, `output_model` and `process`. Read the layout off
+   `frame.header`. A command it answers is a concrete class beside it, listed
+   in `commands`, with `handle` returning the result body. Import only
+   `pswamp_core`.
+3. **The family**, `my_thing/family.py`:
+   `FAMILY = PipelineFamily("my-thing", gateway, (MyThingModule,))`, where
+   `gateway()` is `gateway_from_env(DEFAULT_DATA_CLIENTS, variable="MY_THING_DATA_CLIENTS")`.
+   This is the only registry a module has.
+4. **The pipeline and lifespan**, in `api.py`: `Pipeline(key, FAMILY,
+   transport(), ...)` in the registry's factory (`autoplay=True, loop=True` for
+   a page without a transport row), and `lifespan` entering
+   `serve_family(FAMILY, REGISTRY)` -- which also forwards errors to the tray
+   and hosts the module in-process when there is no broker.
+5. **The socket**: a state model exported as `WS_MESSAGE`, built from
+   `pipeline.latest.get(MyThingResult)` and the player; the endpoint is
+   `connected_pipeline` + `push_changes` from `shared.py`.
+6. **Commands**, if any: one POST per operation returning
+   `dispatch_command(REGISTRY, command, logger)`, with
+   `responses=COMMAND_RESPONSES`.
+7. **The page**: `useServerSocket<Wire['MyThingState']>(MY_THING_WS_PATH)`.
+8. **Deployment**: add `my_thing.family:FAMILY` to `PSWAMP_WORKER_FAMILIES` of
+   a worker in compose and k8s (and its `*_DATA_CLIENTS`, if the module reads
+   the gateway). Nothing else changes.
+9. `generate-api-contract.sh`, `error_check.sh`, `run-python-server-tests.sh`,
+   and a Playwright spec under `e2e/`. Tests: call `process` directly; run the
+   pipeline inside the app's `lifespan`, which hosts the module in-process.
+
+**A new data type** needs nothing from `core/`: declare it once as a
+`DataModel` subclass where every consumer can import it -- beside the module
+if only that app uses it, in `core/src/pswamp_core/messages/` otherwise -- pin
+`version: Literal["v1"]`, and give it a `timestamp` if a player will pace it.
+A topic carries one class, so its producer and consumers must import the same
+class. An *input* type needs a provider serving it and a
+`Pipeline(..., model=YourType)`.
 
 ## A remote data service as a provider
 
-*What.* `RemoteDataClient` (`datagateway/clients/remote_data.py`,
-the `pswamp-core[remote-data]` extra) is a `DataClient` over a deployment's own
-remote data service: a small REST api the deployment runs in front of whatever
-store holds its history. A range query goes up as `POST /v1/queries`; the
-records come back as that call's streamed response, one `RemoteDataResult`
-line each (NDJSON), closed by an `end` (or `error`) line; coverage is
-`GET /v1/coverage`. **The contract is `doc/remote-data-integration-contract.md`**,
-in HTTP terms alone, since the service may be built on any stack;
-`scripts/check-remote-data-service.sh` checks a running service against it,
-and CI runs it against the stub. Configuration is the `REMOTE_DATA_*` block.
+*What.* `RemoteDataClient` (`datagateway/clients/remote_data.py`, the
+`pswamp-core[remote-data]` extra) is a `DataClient` over a deployment's own
+data service: a small REST api in front of whatever store holds its history.
+A range query goes up as `POST /v1/queries`; the records come back as that
+call's streamed response, one NDJSON line each, closed by an `end` (or
+`error`) line; coverage is `GET /v1/coverage`. **The contract is
+`doc/remote-data-integration-contract.md`**, in HTTP terms alone;
+`scripts/check-remote-data-service.sh` checks a running service against it.
 
-```mermaid
-sequenceDiagram
-    participant A as api.py
-    participant M as RowCountModule
-    participant G as gateway
-    participant R as RemoteDataClient
-    participant S as remote data service
-    participant D as any store
+*Why.* Decoupling: p-SWAMP asks for a range and gets it back; which store
+answers is the deployment's choice. The answer comes back on the connection
+that asked, which keeps the contract small -- no correlation id, no second
+channel, no cancel route (closing the connection is the cancel) -- and gives
+backpressure for free. A command never reaches a data client: it stops at the
+player or a module, which asks the gateway for a range like anyone else.
+`/time-series-explorer` drives it two ways: **play-range** (the player's
+bounded replay) and **count** (`RowCountModule`, answering a
+`CountRangeCommand` from its own gateway -- in the module worker under
+compose). The dummy service `core/examples/remote_data_stub/` stands in for a
+deployment's service in compose and k8s.
 
-    A->>M: POST /count → CountRangeCommand(t0, t1), routed by class
-    Note over M: the command stops here:<br/>the rest is a method call
-    M->>G: consume(PmuFrame, t0, t1)
-    G->>R: consume(PmuFrame, t0, t1)
-    R->>S: POST /v1/queries
-    S->>D: the range
-    loop as fast as the reader pulls
-        D-->>S: a record
-        S-->>R: one NDJSON line on the open response
-        R-->>G: PmuFrame
-    end
-    S-->>R: kind "end", then the body closes
-    G-->>M: PmuFrame, one per record
-    M->>A: RowCountResult (request_id = the command's), via the bus and the socket
-```
+*Where.* Everything of the contract is under `core/`:
+`messages/remote_data.py`, `datagateway/clients/remote_data.py`, and outside
+the package `examples/remote_data_stub/` and
+`examples/check_remote_data_service.py`. Tests:
+`core/tests/test_remote_data_service.py` (the conformance suite over the stub,
+in-process), `test_remote_data_client.py` (the lazy pull, cancel by closing).
 
-A command never reaches a data client: it stops at the player or a module,
-which asks the gateway for a range like anyone else. That keeps the
-`DataClient` contract free of commands and of the bus; the `request_id` stays
-in the pipeline, and the connection itself is what ties an answer to its
-query. Play-range
-takes the same path, with `Player.replay(t0, t1)` in the module's place. This
-holds only in-process for now: a worker has no providers, so a module that
-reads the gateway (`reads_gateway`) is refused when its `RemoteModule` or
-`ModuleHost` is built. The intended fix is a worker that builds its own gateway from the same
-environment, so the command crosses the process as a message and the gateway
-call stays a method call (see the last section).
+## Errors and keeping up
 
-*Why.* Decoupling. p-SWAMP asks for a range and gets it back; which store
-answers -- a time-series database, a historian, an archive -- is the
-deployment's choice, and it can change that choice without a change here.
-The answer comes back on the connection that asked, which is what keeps the
-contract small: no correlation id on a line, no second channel to agree on, no
-cancel route (closing the connection is the cancel), and backpressure for
-free -- the client reads a line only when the player wants the next frame, so a
-service writing through socket flow control reads its store at replay speed.
-The price is a connection held open for as long as a replay plays, paused
-included, which a proxy in between must neither buffer nor cut short. (It was
-a Kafka topic at first; the correlation machinery, a consumer per pipeline
-decoding every other pipeline's answers, and the unbounded per-query queue
-were why it changed.) The dummy service `core/examples/remote_data_stub/` (a
-three-second sample tiled to a minute, `python -m remote_data_stub` with
-`core/examples` on `PYTHONPATH`) stands in for a
-deployment's service in compose and k8s, playing the part of a time-series
-store, so the whole path runs from this repo. `/time-series-explorer` drives
-it two ways: **play-range** (the player's bounded replay, above) and **count**
-(`RowCountModule`, answering a `CountRangeCommand`: the worked example of a
-module that takes commands). The page keeps its time-series name because that is
-what is queried on the other end. Open points are in the last section.
+*What.* `ErrorEvent` is what a pipeline publishes when something
+*operational* fails: the player's provider raised, a module's `process`
+raised, a command was refused where it ran. Every one goes on the app's error
+topic (`<app>.error.event`) under the pipeline key; one `forward_errors` task
+per app (started by `serve_family`) hands them to a per-client hub, and
+`/api/errors/ws` pushes them to the layout's `<ErrorTray>` on every page. Not
+an alarm: grid alarms are a correctly running application's result.
 
-*Where.* Everything of the contract is under `core/`: `messages/remote_data.py`
-and `datagateway/clients/remote_data.py` in the package; outside it,
-`examples/remote_data_stub/` and `examples/check_remote_data_service.py`
-(driven by `scripts/check-remote-data-service.sh`). The page is
-`time_series_explorer/` in the web backend, and the stub runs as
-`remote-data-stub` in `docker-compose.yml` and `k8s/p-swamp-local.yaml`. Tests:
-`core/tests/test_remote_data_service.py` runs the conformance suite over the
-client wired to the stub in-process (`httpx.ASGITransport`, which buffers the
-body, so it proves the contract); `core/tests/test_remote_data_client.py`
-pins the lazy pull and cancel-by-closing over a line-by-line body.
+A module that **falls behind** says so the same way. Its `KeepUpMonitor`
+watches its input queue: input the `DROP_OLDEST` queue discarded, and how long
+each input had been in flight when read (the transport stamps the send time,
+`messages.sent_at()`; never on the wire). Past the module's `keep_up` policy --
+by default any drop, or input older than 2 s -- it reports once on falling
+behind, at most every 5 s while behind, once on catching up. The pipeline's
+outbox does the same for publishing ("the server-side publisher … cannot
+publish").
 
-## The error topic
+*Why.* Dropping stale frames is right for a live stream, and silent; under
+load that silence hides exactly what an operator needs to know. The load
+tests exercise it. `/islanding-stream` runs p-SWAMP's islanding detector over
+the 700-channel N44 recording with the replay speed as the knob: the first
+limit is the server's one event loop, at ~2000 published 41 KB frames a second.
+`/mode-estimation` runs N4SID identification (~0.6 s of CPU per data-second
+per client): **a CPU-bound module must leave the event loop** -- in a thread or
+process pool, with one BLAS thread per identification, since BLAS's default
+threading inside a pool multiplies the CPU and collapses throughput. Every
+topic has about a minute's retention, enforced every 10 s by the compose and
+k8s brokers: the broker's defaults let a fast replay fill the disk.
 
-*What.* `ErrorEvent` (`messages/errors.py`) is what a pipeline publishes when
-something *operational* fails: the player's provider raised, a module's
-`process` raised. The bus is per pipeline, so the edge adds one hop: an
-`ErrorForwarderModule` per pipeline (`app/server-python/src/errors/`, via
-`shared.py`) copies them into a per-client hub tagged with the app's slug, and
-`/api/errors/ws` pushes them to the layout's `<ErrorTray>` on every page. Not an
-alarm: grid alarms are a correctly running application's result.
-
-*Where.* `messages/errors.py`; `datagateway/player.py` (`_on_stream_error`),
-`modules.py`; `app/server-python/src/errors/`; `hooks/useErrorFeed.ts`,
-`components/ErrorTray.tsx`.
-
-## Keeping up with a topic
-
-*What.* A module that falls behind its input says so on the error topic.
-`Module.run` watches its own input queue with a `KeepUpMonitor`: input the
-`DROP_OLDEST` queue discarded, and, for input that crossed a transport, how
-long it had been in flight when read (the transport stamps each message with
-the broker record's send time, `messages.sent_at()`; not a field, never on the
-wire). Past the module's `keep_up` policy -- by default any drop, or input older
-than 2 s -- it publishes an `ErrorEvent`: once on falling behind, at most every
-5 s while behind, once on catching up. The same check runs on the two queues
-either side of a worker hop: the `RemoteModule`'s outbox in the server ("the
-server-side publisher … cannot publish"), and the `ModuleHost`'s shared input
-feed in the worker. The host now forwards a hosted module's `ErrorEvent`s
-under the pipeline key, and the `RemoteModule` puts the ones for its key and
-module back on its pipeline's bus, so a failure in the worker reaches the same
-tray as one in-process.
-
-*Why.* Dropping stale frames is the right policy for a live stream, and it is
-silent. Under load that silence hides exactly the thing an operator needs to
-know: the results on screen are computed from a fraction of the data, or from
-data seconds old. `/islanding-stream` is where this is exercised: p-SWAMP's
-islanding detector as a module, over the N44 line-trip recording (700
-channels, 50 Hz), with the replay speed as the load knob. Measured there in
-compose, eight clients at real time take about a fifth of a core per side;
-the first limit is the server's one event loop, at ~2000–2400 published
-41 KB frames a second in total (building, serialising and producing each
-frame), while the worker never fell behind. Its topics carry their own prefix
-(`ISLANDING_TOPIC_PREFIX`): two apps with the same input class on one broker
-would otherwise read each other's frames under the same client key. And every
-topic the transport creates has about a minute's retention, enforced every
-10 s by the compose and k8s brokers: the broker's defaults let a fast replay
-fill the disk.
-
-**A CPU-bound module must leave the event loop.** `/mode-estimation` runs
-p-SWAMP's N4SID identification (~0.6 s of CPU per data-second per client) the
-same way, and there the analysis is the load. Run on the loop, one
-identification stalls every client the worker serves, and the report blames
-their input; in a thread or process pool the worker's loop stays at a small
-fraction of the work, a client whose identification is still running when the
-next falls due skips it (`KeepUpMonitor.note`, "identifications skipped"), and
-the capacity limit is the arithmetic of the algorithm. BLAS libraries thread
-by default, which inside a pool multiplies the CPU and collapses throughput,
-so that worker runs with one BLAS thread per identification.
-
-*Where.* `modules.py` (`KeepUp`, `KeepUpMonitor`), `remote.py`,
-`messages/data_model.py` (`sent_at`), the two transports;
-`app/server-python/src/islanding_stream/`, `mode_estimation/`;
-`islanding-worker` and `mode-estimation-worker` in `docker-compose.yml` and
-`k8s/p-swamp-local.yaml`; `core/tests/test_keep_up.py`,
-`app/server-python/tests/test_islanding_stream.py`, `test_mode_estimation.py`.
+*Where.* `messages/errors.py`; `keep_up.py`; `transport/__init__.py`
+(`Outbox`); `app/server-python/src/errors/`; `hooks/useErrorFeed.ts`,
+`components/ErrorTray.tsx`; `islanding_stream/`, `mode_estimation/`.
 
 ## A CIM reference on the frame
 
 *What.* The gateway stamps every PMU frame with an optional
-`PmuHeader.cimReferenceId`: an id for the grid (CIM) data that applies to the
-frame. An **enricher** passed to `DataGateway` runs on every payload
-`DataStream` yields; `CimReferenceEnricher` decides the reference once per
-layout (`reference_for`) and stamps it on every frame with that layout.
-Anything later in the pipeline reads it off the frame: the islanding module
-returns it with its result. **It is a stub:** `reference_for` returns one
-configured placeholder (`ISLANDING_STREAM_CIM_REFERENCE`, or `none`). A
-lookup against a CIM model overrides that one method.
+`PmuHeader.cimReferenceId`: an id for the grid (CIM) data that applies to it.
+An **enricher** passed to `DataGateway` runs on every payload the stream
+yields; `CimReferenceEnricher` decides the reference once per layout. **It is
+a stub**: one configured placeholder (`ISLANDING_STREAM_CIM_REFERENCE`, or
+`none`); a lookup against a CIM model overrides one method.
 
-*Why.* The gateway is where every reader's frames pass, so stamping there
-means every reader sees the same reference, decided once, early. As an
-optional field it is additive: providers, player, bus and transport are
-untouched, a provider's frame arrives with `None`, old readers ignore it, and
-`header_id` (the layout's hash) does not change. It travels with the frame,
-so a module in a worker gets it with no configuration of its own. It carries
-a reference rather than the grid data itself, which would cost several KB a
-frame on every hop.
+*Why.* The gateway is where every reader's frames pass, so every reader sees
+the same reference, decided once, early. It travels with the frame, so a
+hosted module gets it with no configuration of its own, and it is a reference
+rather than the grid data itself, which would cost several KB a frame.
 
-*Where.* `messages/pmu.py` (`PmuHeader.cimReferenceId`);
-`datagateway/enrich.py` (`Enricher`, `CimReferenceEnricher`);
-`DataGateway(enrichers=...)`; `app/server-python/src/islanding_stream/api.py`
-(the wiring) and the islanding module's `cim_reference_id`;
-`core/tests/test_enrich.py`.
+*Where.* `messages/pmu.py`, `datagateway/enrich.py`,
+`islanding_stream/family.py` (the wiring) and the islanding module's
+`cim_reference_id`.
 
 ## What is deliberately not here yet
 
-Absent from this slice, on purpose:
-
-- the bridge from the desktop package's thread-based `SnapshotApp`s to the bus
-  (`GatewayIO`, `AppIO`) and the thread-hosted player that goes with it;
-- the grid monitor re-pointed at the core (it still runs the proof-of-concept
-  `Hub`/`Bus`/`HubRegistry` in `pswamp_web/`), and so its own hub wired into
-  the error topic;
-- `request_id` in the browser-facing acknowledgement; batch jobs beyond the
-  explorer's row count;
-- the draft's CSV provider and a broker *as history* (a topic's retention as a
-  time-addressed source; the transport is not one);
-- the fixes the first throughput measurements point at: cheaper frames on the
-  server (no re-validation of what a provider built, the header serialised
-  once per layout), producer batching and a pipelined `RemoteModule` outbox,
-  sub-millisecond pacing in the player, keyed partitions, and a per-app topic
-  prefix by default rather than by configuration;
-- proxy settings for the Remote Data Client's long-lived streamed responses
-  (buffering off, idle timeouts past the longest pause), and models beyond
-  `PmuFrame` in it;
-- a module that reads the gateway (`reads_gateway`, like the explorer's row
-  count) running *in the worker*. Its commands would cross already; what is
-  missing is a gateway there: `ModuleHost` hands every module
-  `DataGateway([])`, so it would need a gateway factory built from the same
-  environment as the pipeline's. Until then such a module is refused;
-- a `PmuFrameAssembler` for deployments that ingest per-PMU messages.
+- a live pipeline shared by every viewer (keyed by the stream, not the client);
+- the bridge from the desktop package's thread-based `SnapshotApp`s to a
+  pipeline, and the grid monitor re-pointed at the core (it still runs its own
+  `Hub`/`Bus` in `pswamp_web/`);
+- more than one replica of a worker: topics have one partition and workers no
+  consumer group, so a second replica would answer every frame twice;
+- a hosted module's gateway following the player's source switch (the
+  explorer's has one source, so it does not matter yet);
+- a short tombstone after `PipelineClosed`, so a frame still in flight does not
+  rebuild the instance until the idle sweep;
+- `request_id` in the browser-facing acknowledgement;
+- cheaper frames (no re-validation of what a provider built; the header
+  serialised once per layout), producer batching and keyed partitions;
+- a CSV provider, a broker *as history*, and a `PmuFrameAssembler` for
+  deployments that ingest per-PMU messages.

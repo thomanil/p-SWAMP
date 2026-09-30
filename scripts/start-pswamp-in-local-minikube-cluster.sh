@@ -96,20 +96,23 @@ kubectl create configmap p-swamp-pmu-data \
   --from-file=k8s/deployment_pmu_data_file_example.txt \
   --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f k8s/p-swamp-local.yaml
+# Workers this manifest no longer has (one per app, before the generic module
+# worker): `apply` never deletes what a manifest stopped naming, and their
+# commands no longer exist in the image.
+kubectl delete deployment p-swamp-stats-worker p-swamp-islanding-worker --ignore-not-found
 
 # `kubectl apply` won't restart pods if the manifest text is unchanged, even
 # though we just rebuilt :latest. Force a new pod so the fresh image is used.
 echo "Rolling out..."
 # The broker first: it is the one image pulled rather than built (hence the
 # longer timeout on a first run), and it is never restarted here -- it was not
-# rebuilt, and a restart would empty its topics for nothing. Then the five
-# pods built from the fresh image: the three module workers, the remote data stub
+# rebuilt, and a restart would empty its topics for nothing. Then the four
+# pods built from the fresh image: the two module workers, the remote data stub
 # (which the server's explorer page calls, so it is up before the server),
 # and the server.
 kubectl rollout status deployment/p-swamp-kafka --timeout=300s
-kubectl rollout restart deployment/p-swamp deployment/p-swamp-stats-worker deployment/p-swamp-islanding-worker deployment/p-swamp-mode-estimation-worker deployment/p-swamp-remote-data-stub
-kubectl rollout status deployment/p-swamp-stats-worker --timeout=120s
-kubectl rollout status deployment/p-swamp-islanding-worker --timeout=120s
+kubectl rollout restart deployment/p-swamp deployment/p-swamp-module-worker deployment/p-swamp-mode-estimation-worker deployment/p-swamp-remote-data-stub
+kubectl rollout status deployment/p-swamp-module-worker --timeout=120s
 kubectl rollout status deployment/p-swamp-mode-estimation-worker --timeout=120s
 kubectl rollout status deployment/p-swamp-remote-data-stub --timeout=120s
 kubectl rollout status deployment/p-swamp --timeout=120s

@@ -56,13 +56,15 @@ honest, and the worked examples and load tests of the shared core:
   the committed sample recording, and a synthetic live feed beside it, through
   the shared core (`core/`, see "Three Python projects in one repo" and
   `doc/server-data-architecture.md`): two providers behind the `DataClient`
-  contract in one `DataGateway`, a `Player` that either replays the recording
-  paced by the replay commands (back / play / stop / forward / seek / speed) or
-  tails the live feed with no transport at all, switched by two more commands
-  (replay / live) — each a `POST` that becomes a typed command on the client's
-  bus —
-  a module computing per-frame stats off that bus, and one pipeline per client.
-  The page shows a Recorded | Live switch and, while live, a red LIVE badge with
+  contract as the two sources of one `DataGateway`, one of them active, a
+  `Player` that either replays the recording paced by the replay commands
+  (back / play / stop / forward / seek / speed) or tails the live feed with no
+  transport at all, switched by one more command (`POST /playback/source`,
+  naming the source) — each a `POST` that becomes a typed command on its
+  topic —
+  a module computing per-frame stats off the frame topic, and one pipeline per
+  client.
+  The page shows one button per source and, while live, a red LIVE badge with
   every transport control disabled. It used
   to be the older demo the reference example replaced, and was slated for
   retirement; it is now **the worked example of a provider, a module and a page
@@ -105,12 +107,14 @@ honest, and the worked examples and load tests of the shared core:
   package, the stub and the black-box check in `core/examples/`, their tests in
   `core/tests/`. The stub imports nothing from `app/` and keeps its own
   fixture (`sample_frames.ndjson`) for that reason. The page asks
-  one range two ways, each a `POST` that becomes a typed command on the
-  client's bus: **play-range** (the *stream* case — the player replays exactly
+  one range two ways, each a `POST` that becomes a typed command on its
+  topic: **play-range** (the *stream* case — the player replays exactly
   `[start, end)` paced and ends paused there, a bounded replay the player grew
   for this) and **count** (the *batch* case — a `CountRangeCommand`, routed by
-  its class to the `RowCountModule`, pulling the range from the gateway itself, unpaced, and
-  answering with one result carrying the command's `request_id`). Its default
+  its class to the `RowCountModule`, pulling the range from its own gateway
+  (built from the same `TIME_SERIES_EXPLORER_DATA_CLIENTS`, wherever the module
+  is hosted), unpaced, and answering with one result carrying the command's
+  `request_id`). Its default
   provider is the sample recording, so CI's bare `docker run` exercises the
   page too; compose and k8s switch it to the Remote Data Client with
   `TIME_SERIES_EXPLORER_DATA_CLIENTS` and the `REMOTE_DATA_*` block.
@@ -121,13 +125,12 @@ honest, and the worked examples and load tests of the shared core:
   own provider (`n44_client.py`: 44 stations, 700 channels, 50 Hz; every frame
   ~41 KB). The page's replay speed (1x–50x) is the load knob; it shows the
   islands (6500/6700/6701 from ~20 s) and a keep-up table, and when any stage
-  falls behind — the module's queue, the server-side publisher, the worker's
-  shared feed — the core's `KeepUpMonitor` reports it on the error tray. With
-  `ISLANDING_STREAM_MODULE_TRANSPORT` set (compose, k8s) the module runs in
-  `islanding-worker` (`python -m islanding_stream.worker`); its transport has
-  **its own name and topic prefix** (`ISLANDING_*`, `islanding-stream.pmu.frame`),
-  and must keep them: the stats-worker tails the unprefixed `pmu.frame` under
-  the same client ids. What broke first, with numbers, is in
+  falls behind — the module's queue, the server-side publisher (the pipeline's
+  outbox) — the core's `KeepUpMonitor` reports it on the error tray. Under
+  compose and k8s the module runs in the `module-worker`, on this app's own
+  topics (`islanding-stream.pmu.frame`, …): every topic is `<app>.<model>`, so
+  the streamer's module, tailing `pmu-test-streamer.pmu.frame` under the same
+  client ids, never sees these frames. What broke first, with numbers, is in
   `STEP7-WIP-data-integration-heavy-module-load-test.md`.
   It is also **the worked example of a CIM reference on the frame**: its
   gateway has the stub enricher (`CimReferenceEnricher`,
@@ -144,8 +147,8 @@ honest, and the worked examples and load tests of the shared core:
   the grid's electromechanical modes from a 45 s window of every station's
   frequency, once per data-second: ~0.6 s of CPU each, 97 % of it LAPACK. It
   reads the N44 recording through the islanding stream's provider *by spec
-  string*, and runs in `mode-estimation-worker` (transport `modes`, prefix
-  `mode-estimation`). **How it runs is `MODE_ESTIMATION_EXECUTION`**:
+  string*, and under compose and k8s runs in a worker of its own,
+  `mode-estimation-worker` (topics `mode-estimation.*`, its own CPU limit). **How it runs is `MODE_ESTIMATION_EXECUTION`**:
   `thread` (the default, a pool of `MODE_ESTIMATION_POOL_SIZE`), `process`, or
   `inline` — the last blocks the worker's one event loop and stalls every
   client's stream, so it exists to be measured, not used. The worker sets
@@ -154,10 +157,11 @@ honest, and the worked examples and load tests of the shared core:
   `STEP7b-WIP-data-integration-heavy-algorithm-load-test.md`.
 
 Beside the pages, **the layout owns one socket of its own: the error tray.**
-`src/errors/` is the app package with no pipeline: every app that builds a core
-pipeline appends an `ErrorForwarderModule` (from `shared.py`) to its module
-list, which copies each `ErrorEvent` on that pipeline's bus — the player's
-provider failed, a module's `process` raised — into a per-client hub, and
+`src/errors/` is the app package with no pipeline: every `ErrorEvent` of an
+app's pipelines — the player's provider failed, a module's `process` raised, a
+command was refused where it ran — goes on the app's error topic
+(`<app>.error.event`), one `forward_errors` task per app (started by
+`shared.serve_family`) copies each into a per-client hub, and
 `/api/errors/ws` pushes them to `AppLayout`'s `<ErrorTray>`, so a failure in
 one page's replay is on screen whichever page the person is on. Errors here are
 *operational*; grid alarms stay the grid monitor's domain state.
@@ -187,8 +191,9 @@ either manifest to the other's level.
 The third is **`core/` — the shared data architecture, `pswamp-core`, imported
 as `pswamp_core`** (`core/pyproject.toml`, `core/src/pswamp_core/`,
 `core/tests/`, and `core/examples/` beside them): the wire messages, the provider contract and gateway, the player,
-the in-process bus, the module base, the pipeline registry, and the transport
-and remote-module pieces that let a module run as its own service. pydantic is
+the transport (the one publish/subscribe: in-memory or Kafka), the module base
+and its host, the pipeline family and registry, and the generic worker that
+hosts modules in their own process. pydantic is
 its only dependency by default, so a provider written outside this repo can
 import the contract and nothing else; two extras add what two optional pieces
 need, both imported lazily — `pswamp-core[kafka]` adds aiokafka for the Kafka
@@ -274,18 +279,28 @@ Consequences worth knowing before touching anything:
 
 ## Architecture
 
-Two deployables, one wire protocol — plus, for the PMU test streamer's stats
-module only, a worker container from the same image and the Apache Kafka broker
-it is reached through (`docker-compose.yml`'s `stats-worker` and `kafka`; the
-matching Deployments in `k8s/`), and, for the Time Series Explorer only, the
-dummy remote data service from the same image (`remote-data-stub`) that the
-explorer's provider queries over REST, reading each answer back as the streamed response,
-and, for the Islanding stream and the Mode estimation page, one more worker
-each from the same image (`islanding-worker`, `mode-estimation-worker`), each
-on its own prefixed topics.
-None is a dependency of the server: unset one variable and a module runs
-in-process, unset another and the explorer runs over the sample recording,
-which is what CI's e2e job runs.
+Two deployables, one wire protocol — plus, where a deployment wants modules in
+their own processes, the Apache Kafka broker and two workers from the same
+image (`docker-compose.yml`'s `kafka`, `module-worker` and
+`mode-estimation-worker`; the matching Deployments in `k8s/`), and, for the Time
+Series Explorer only, the dummy remote data service from the same image
+(`remote-data-stub`) that the explorer's provider queries over REST, reading
+each answer back as the streamed response. None is a dependency of the server:
+unset `PSWAMP_TRANSPORT` and the server hosts every module itself over the
+in-memory transport, unset `TIME_SERIES_EXPLORER_DATA_CLIENTS` and the explorer
+runs over the sample recording — which is what CI's e2e job runs.
+
+**The data architecture in five lines** (`doc/server-data-architecture.md` is
+the whole account, `core/` the code):
+
+```
+DATA DOWN    source → DataClient (the active one) → DataGateway → Player
+             → topic <app>.pmu.frame (key = pipeline) → Module → topic <app>.<result> → edge → socket → browser
+COMMANDS UP  browser → POST → edge → validate at the player (the 409) → topic <app>.<command> → Player | Module
+             a Module may publish a command too (e.g. SwitchSourceCommand)
+STATE        the edge builds one state model per change: the newest result per class (Latest) + the local player
+WHERE        transport unset → InMemoryTransport, modules hosted in the server; set → Kafka, modules in the worker
+```
 
 - **`app/server-python/`** — the authoritative state server. The code lives in
   `src/` (mirroring the web client's layout), with the manifests beside it.
@@ -311,26 +326,28 @@ which is what CI's e2e job runs.
   `HISTORY_CONSUME`), `live_client.py` (the second provider: `LIVE_CONSUME`
   only, the same rows re-stamped on the wall clock at 20 Hz by a ticker that
   runs between the gateway's `open` and `close`), `stats_module.py` (a `Module`
-  consuming `PmuFrame` off the bus and publishing `FrameStatsResult` onto it,
-  reading the channel layout off each frame's own `header`), and `api.py` (a
-  `PipelineRegistry` bound in its
-  `lifespan`, a socket that subscribes the client's bus *before* its first send
-  and coalesces into one `PmuStreamState` per change, and eight POSTs that each
-  build a typed player command and hand it to `shared.dispatch_command` — which
-  answers **409** when the player's `validate` refuses it in the current mode,
-  so the ack never claims a command the player would only drop).
+  consuming `PmuFrame` and publishing `FrameStatsResult`, reading the channel
+  layout off each frame's own `header`), `family.py` (what every pipeline of
+  the app is made of: its topics' namespace, its gateway, its module), and
+  `api.py` (a `PipelineRegistry` of `Pipeline(key, FAMILY, transport())`, a
+  lifespan that is `shared.serve_family`, a socket that is
+  `connected_pipeline` + `push_changes` — one `PmuStreamState` per change — and
+  POSTs that each build a typed player command and hand it to
+  `shared.dispatch_command`, which answers **409** when the player's `validate`
+  refuses it in the current mode, so the ack never claims a command the player
+  would only drop).
   Both providers are the default (`DEFAULT_DATA_CLIENTS`); `PSWAMP_DATA_CLIENTS`
   names others. `doc/server-data-architecture.md` walks through it.
-  **It is also the worked example of a module running as its own service.**
-  With `PMU_TEST_STREAMER_MODULE_TRANSPORT` naming a transport (the core's
-  `KafkaTransport`, with `KAFKA_BOOTSTRAP_SERVERS` beside it — what compose and
-  `k8s/` set), `build_pipeline` puts a `RemoteModule` in the module list instead
-  of `FrameStatsModule`, and `worker.py` (`python -m pmu_test_streamer.worker`,
-  a plain process from the same image, no port) runs the identical module, one
-  instance per client key, tailing `pmu.frame` and publishing
-  `frame.stats.result`. Unset (the tests, CI's `docker run`) the module runs
-  in-process. The player and every command stay in the server either way. See
-  "Running a module as a separate service" in that document.
+  **Where its module runs is the deployment's choice, not the app's.** The
+  pipeline always publishes frames on `pmu-test-streamer.pmu.frame` under the
+  client's key and listens on `pmu-test-streamer.frame.stats.result`; a
+  `ModuleHost` runs one `FrameStatsModule` per key. With `PSWAMP_TRANSPORT`
+  unset (the tests, CI's `docker run`) the host runs in the server, over
+  `InMemoryTransport`; with Kafka (compose, `k8s/`) it runs in the
+  `module-worker` (`python -m pswamp_core.worker`, naming
+  `pmu_test_streamer.family:FAMILY` in `PSWAMP_WORKER_FAMILIES`). The player,
+  and every player command's check, stay in the server either way. See "Where
+  things run" in that document.
   `sample_data.txt` beside it is a **one-off sample committed for testing** — 300
   *simulated* PMU records extracted by hand from the Nordic 44 simulation that now
   lives in this same repo under `examples/nordic44_rtsim/` (voltage phasor +
@@ -348,12 +365,14 @@ which is what CI's e2e job runs.
   `SocketRegistry`, defined there; `ClientId`, `CommandAck`,
   `CLIENT_ID_PATTERN`, `read_client_id`, `send_state`, `get_logger`
   re-exported from `pswamp_web/` (see "The p-SWAMP web layer" for why the
-  definitions live down there and the import runs inward); `event_queue`,
-  `serve_updates` and `wait_for_disconnect`, the grid monitor's push loop from
-  `pswamp_web/pump.py`, which serves a core pipeline unchanged;
-  `dispatch_command` + `COMMAND_RESPONSES`, the one way a POST sends a typed
-  command into a core pipeline (404 without one, 409 when refused); and
-  `ErrorForwarderModule` + `HUB` from `errors/`, for the error tray. It is
+  definitions live down there and the import runs inward); `transport()`, the
+  process's one transport, closed by `shared.lifespan` (entered via
+  `SERVICES`); `serve_family`, an app's lifespan over a core pipeline (its
+  registry, its errors forwarded to the tray, and its modules hosted in-process
+  when the transport is in-memory); `connected_pipeline` + `push_changes`, a
+  socket over a pipeline; `dispatch_command` + `COMMAND_RESPONSES`, the one way
+  a POST sends a typed command into a core pipeline (404 without one, 409 when
+  the player refuses it); and `HUB` from `errors/`, for the error tray. It is
   *not* an app package and never appears in `APPS`.
   Note the spelling split: a package dir must be a Python identifier
   (`reference_subapp`) while its URL prefix is hyphenated to match the page route
@@ -396,11 +415,11 @@ which is what CI's e2e job runs.
   `src/hooks/useServerSocket.ts` and the app's own hook
   (`useReferenceSubappSocket`) adds only its wire type and its commands.
   `/pmu-test-streamer` (`PmuTestStreamerPage`) is the data-architecture slice
-  beside it: a frame table, the stats module's result, a Recorded | Live switch,
-  and controls rendered from the player's own status — `mode` decides whether the
-  transport row is enabled at all (never while live, where a red LIVE badge says
-  why), `can_seek` whether seek and step-back are, `can_go_live` whether the
-  switch is. See "Adding a p-SWAMP view" and "Adding a page" below.
+  beside it: a frame table, the stats module's result, a source switch, and
+  controls rendered from the player's own status — `sources` and `source` are
+  the switch's buttons and which is pressed, `mode` decides whether the
+  transport row is enabled at all (never while live, where a red LIVE badge
+  says why), and `can_seek` whether seek and step-back are. See "Adding a p-SWAMP view" and "Adding a page" below.
 
 Key invariants to preserve:
 
@@ -480,13 +499,15 @@ Key invariants to preserve:
     The base and the player's commands are in
     `core/src/pswamp_core/messages/commands.py`; a module's own command class
     lives beside the module. A POST builds one and calls
-    `shared.dispatch_command`; `pipeline.dispatch` finds the one receiver that
-    declared the class, runs its synchronous `validate` (the 409), and only
-    then publishes. (A module in a worker is the exception: its stand-in
-    accepts, and the worker's refusal arrives as an `ErrorEvent` with the
-    command's `request_id`.) No verb strings, no `args` dicts, no per-app refusal
-    checks: a precondition belongs in the receiver's `validate`.
-    `core/src/pswamp_core/command_routing.py` is the whole mechanism.
+    `shared.dispatch_command`; `pipeline.dispatch` runs the player's
+    synchronous `validate` for a player command (the 409) and publishes the
+    command on its class's topic. A module command is published as it is: the
+    module may run in another process, so it checks the command where it runs,
+    and a refusal arrives as an `ErrorEvent` with the command's `request_id`.
+    A family refuses two receivers of one class. No verb strings, no `args`
+    dicts, no per-app refusal checks: a precondition belongs in the receiver's
+    `validate`. `core/src/pswamp_core/command_routing.py` and
+    `Pipeline.dispatch` are the whole mechanism.
   - **A command never answers with state.** It returns a small `CommandAck`
     (`{status, applied}`) and the resulting state arrives on the socket like any
     other change — so there is exactly one path for state and no ordering to
@@ -938,9 +959,9 @@ underlying tech). Start the server first, then the client:
 ```
 ./scripts/start-local-hotloaded-pswamp-server.sh      # state server on 127.0.0.1:8000 (docker compose up --watch --build; streams logs, Ctrl-C stops it)
                                                      # also live-syncs root src/, so desktop-package edits hot-reload too
-                                                     # brings up six containers: kafka, the server, the streamer's stats-worker,
-                                                     # the islanding-worker and mode-estimation-worker (those pages' modules),
-                                                     # and the explorer's remote-data-stub (a dummy remote data service behind the REST contract)
+                                                     # brings up five containers: kafka, the server, the module-worker (every page's
+                                                     # module but mode estimation's), the mode-estimation-worker, and the explorer's
+                                                     # remote-data-stub (a dummy remote data service behind the REST contract)
 ./scripts/start-local-hotloaded-pswamp-web-client.sh  # Vite/React web client w/ HMR on http://localhost:5173
 ```
 
@@ -1063,15 +1084,17 @@ separate envs and are hermetic to very different degrees:
   also excluded from the build context by `.dockerignore` and never copied — only
   `src/` is). Add a suite here for any new backend api with non-trivial lifecycle
   logic. **The same runner also runs `core/tests/`** — the shared core's own
-  suite (the gateway routing cases, the bus, the player, the registry, the
-  provider conformance suite) — through that second `testpaths` entry, so one
+  suite (the gateway, the player, the transport, the host, the pipeline, the
+  registry, the provider conformance suite) — through that second `testpaths` entry, so one
   command and one CI job cover both; the `pythonpath` entry for
   `core/examples` is what lets both suites import the remote data stub. `core/pyproject.toml`
   carries its own `[tool.pytest.ini_options]` too, so pointing pytest at
   `core/tests` directly (a node id, `pytest core/tests`) keeps the asyncio mode.
   `test_pmu_test_streamer.py` is the worked example of a provider inheriting
-  `DataClientConformance` with three fixtures, and its last cases run the stats
-  module as its own service over the portless `InMemoryTransport`. The Kafka
+  `DataClientConformance` with three fixtures; its pipeline cases run inside
+  the app's `lifespan`, which hosts the stats module in-process over the
+  in-memory transport (the same JSON round trip and exact topics as Kafka), and
+  `app_test_support.Watch` lets a test see what a pipeline takes in. The Kafka
   transport's own round trip in `core/tests/test_kafka_transport.py` is
   **skipped unless a broker is named**: `KAFKA_TEST_BOOTSTRAP_SERVERS=127.0.0.1:19092`
   runs it against the compose stack's Kafka (its EXTERNAL listener).
@@ -1112,9 +1135,9 @@ counts, POST reset, assert zero, and assert a second client id starts at zero �
 and then the streamer flow (`tools/smoketest_pmu_test_streamer.py`): connect,
 POST play, wait for a state carrying the stats module's result, POST stop —
 and then the explorer flow (`tools/smoketest_time_series_explorer.py`). Under
-compose the stats result crossed the broker from the stats-worker; under CI's bare
-`docker run` the same checks pass with the module in-process and the explorer
-on the sample recording. Two
+compose the stats result crossed the broker from the module-worker; under CI's bare
+`docker run` the same checks pass with the module hosted in the server and the
+explorer on the sample recording. Two
 things worth knowing before extending it:
 
 - **The WebSocket half is Python, and needs no new dependency.**
@@ -1302,7 +1325,7 @@ mind when editing that script:
 - **The deployable is named `p-swamp` everywhere** — local image tag
   (`p-swamp:latest`), k8s Deployment and Service, `app:` labels and selectors,
   and the container name; the other Deployments are `p-swamp-<role>`
-  (`p-swamp-stats-worker`, `p-swamp-kafka`, …).
+  (`p-swamp-module-worker`, `p-swamp-kafka`, …).
 - **The minikube NodePort is 30080**, set in `k8s/p-swamp-local.yaml` and
   repeated as `NODE_PORT` in `start-pswamp-in-local-minikube-cluster.sh`; keep
   the two in sync. It assumes p-swamp is the only thing claiming that port in the
@@ -1452,15 +1475,15 @@ What has to hold in the `static-errorcheck` job:
   `web-build` stage needs `app/client-web/` and the runtime stage needs root
   `src/` — so it can't be narrowed to `app/server-python/`.
 - **k8s manifest:** `p-swamp-local.yaml` is local-only (`imagePullPolicy: Never`, image
-  built into minikube). It holds six Deployments — the server, the streamer's
-  `p-swamp-stats-worker` (same image, different command, no Service), its
-  twins `p-swamp-islanding-worker` and `p-swamp-mode-estimation-worker` (which,
-  like the server, has a two-CPU limit), the
-  explorer's `p-swamp-remote-data-stub` (same image again, with a ClusterIP
+  built into minikube). It holds five Deployments — the server,
+  `p-swamp-module-worker` (same image, `python -m pswamp_core.worker`, no
+  Service; every page's module but mode estimation's), `p-swamp-mode-estimation-worker`
+  (the same, naming only its family, with a two-CPU limit like the server's),
+  the explorer's `p-swamp-remote-data-stub` (same image again, with a ClusterIP
   Service and `/healthz` probes, since the server calls it over HTTP) and
   `p-swamp-kafka` (the one *pulled* image, so `IfNotPresent`, on an
-  `emptyDir`) — and the start script rolls the first five out after waiting
-  for the broker. It is also **the worked example of configuring the PMU
+  `emptyDir`) — and the start script rolls the first four out after waiting
+  for the broker, and deletes the per-app workers an older manifest had. It is also **the worked example of configuring the PMU
   data sources from outside the image**: its env block spells out
   `PSWAMP_DATA_CLIENTS` and points the live feed's `LIVE_PATH` at
   `k8s/deployment_pmu_data_file_example.txt`, mounted read-only from a ConfigMap

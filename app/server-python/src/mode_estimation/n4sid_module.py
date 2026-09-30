@@ -69,8 +69,8 @@ from pswamp_core.messages import PmuFrame, PmuHeader, ResultEnvelope
 from pswamp_core.modules import KeepUpMonitor, Module
 
 if TYPE_CHECKING:
-    from pswamp_core.bus import Bus
     from pswamp_core.datagateway import DataGateway
+    from pswamp_core.subscription import Sink
 
 __all__ = ["N4SID", "ModeEstimationResult", "Modes", "N4SIDModule", "identify"]
 
@@ -272,7 +272,7 @@ class Modes(BaseModel):
     evaluations_skipped: int = Field(description="Of those, skipped because the previous one had not finished.")
     frames_in: int = Field(description="Frames processed since the previous result.")
     input_age_s: float | None = Field(
-        description="How long the last input had been in flight when it was read; null in-process."
+        description="How long the last input had been in flight when it was read."
     )
     input_dropped: int = Field(description="Input dropped by this module's queue so far.")
 
@@ -315,7 +315,7 @@ class N4SIDModule(Module):
         self._pending: _Pending | None = None
         self.evaluations = 0
         self.skipped = 0
-        self._bus: Bus | None = None
+        self._out: Sink | None = None
         self.eval_monitor = KeepUpMonitor(
             self.name,
             f"cannot identify every {EVAL_INTERVAL_S:g} s of data",
@@ -331,8 +331,8 @@ class N4SIDModule(Module):
             "execution": self.execution,
         }
 
-    async def setup(self, gateway: DataGateway, bus: Bus) -> None:
-        self._bus = bus
+    async def setup(self, gateway: DataGateway, out: Sink) -> None:
+        self._out = out
 
     def use_header(self, header: PmuHeader) -> None:
         self._header_id = header.header_id
@@ -402,8 +402,8 @@ class N4SIDModule(Module):
         return finished
 
     def _note_skips(self, n: int) -> None:
-        if self._bus is not None:
-            self.eval_monitor.note(self._bus, n)
+        if self._out is not None:
+            self.eval_monitor.note(self._out, n)
 
     def _collect(self) -> Modes | None:
         pending = self._pending

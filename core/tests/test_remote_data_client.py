@@ -145,7 +145,6 @@ def test_constructing_imports_no_httpx_and_checks_its_inputs():
 def test_from_env_reads_its_block(monkeypatch):
     monkeypatch.setenv("REMOTE_DATA_URL", "http://remote-data:8100/")
     monkeypatch.setenv("REMOTE_DATA_TIMEOUT", "2.5")
-    monkeypatch.setenv("REMOTE_DATA_PRIORITY", "3")
     monkeypatch.setenv(
         "CLIENTS",
         "remote_data:pswamp_core.datagateway.clients.remote_data:RemoteDataClient",
@@ -154,7 +153,7 @@ def test_from_env_reads_its_block(monkeypatch):
     client = gateway.clients["remote_data"]
     assert isinstance(client, RemoteDataClient)
     assert client.url == "http://remote-data:8100"
-    assert client.timeout == timedelta(seconds=2.5) and client.priority == 3
+    assert client.timeout == timedelta(seconds=2.5)
     monkeypatch.delenv("REMOTE_DATA_URL")
     with pytest.raises(MissingSettingError):
         gateway_from_env(variable="CLIENTS")
@@ -216,7 +215,7 @@ async def test_closing_a_stream_early_closes_the_response():
     assert first.timestamp == at(0)
     await stream.aclose()
     assert service.bodies[0].closed  # the connection closing is the cancel
-    assert [m for m, _ in service.calls] == ["GET", "POST"]  # coverage, query; no cancel call
+    assert [m for m, _ in service.calls] == ["POST"]  # the query; no cancel call
     await client.close()
 
 
@@ -333,7 +332,7 @@ async def test_an_unreachable_service_is_a_connection_error_naming_the_url():
         [r async for r in client.consume(PmuFrame, TimeRange(at(0), None))]
     gateway = DataGateway([client])
     assert await gateway.coverage(PmuFrame) is None
-    assert "cannot reach http://remote-data:8100" in gateway.coverage_failures["remote_data"]
+    assert "cannot reach http://remote-data:8100" in gateway.coverage_failure
     await client.close()
 
 

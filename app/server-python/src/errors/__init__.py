@@ -7,11 +7,12 @@ Same public surface as every app package — src/server.py uses nothing else:
   WS_MESSAGE  ErrorNotice, the model pushed down that socket
 
 What makes it different from the other apps: it owns no pipeline. Every app
-that builds a core pipeline appends an ``ErrorForwarderModule`` to its module
-list (imported from ``shared``), which copies each ``ErrorEvent`` on that
-pipeline's bus into ``HUB`` -- tagged with the app's slug -- and ``HUB`` fans
-it out to whatever sockets that client has open here. So a failure in the
-streamer's replay reaches the person while they are looking at any page.
+over a core pipeline runs one ``forward_errors`` (started by
+``shared.serve_family``), which tails the app's error topic across every
+client and hands each ``ErrorEvent`` to ``HUB`` -- tagged with the app's slug
+-- and ``HUB`` fans it out to whatever sockets that client has open here. So a
+failure in the streamer's replay reaches the person while they are looking at
+any page.
 
 ``hub.py`` and ``forwarder.py`` import nothing from ``shared``, on purpose:
 ``shared`` re-exports them, and an app package that both feeds ``shared`` and
@@ -21,10 +22,10 @@ which is what ``shared`` does too.
 """
 
 from .api import router
-from .forwarder import ErrorForwarderModule
+from .forwarder import forward_errors
 from .hub import HUB, ErrorHub
 from .wire import ErrorNotice
 
 WS_MESSAGE = ErrorNotice
 
-__all__ = ["HUB", "WS_MESSAGE", "ErrorForwarderModule", "ErrorHub", "ErrorNotice", "router"]
+__all__ = ["HUB", "WS_MESSAGE", "ErrorHub", "ErrorNotice", "forward_errors", "router"]

@@ -7,11 +7,11 @@ Five things: the sample file parses into the wire shape it should; both
 providers pass the core's conformance suite (the worked examples of providers
 written outside the core proving themselves against the contract -- one with
 history, one that can only tail); the whole pipeline the endpoint builds runs,
-so the frames and the module's results reach the bus and the recorded/live
-switch works end to end; the providers can be swapped by environment alone;
-and the stats module runs as its own service -- the worker's ``ModuleHost``
-beside the pipeline's ``RemoteModule``, over the portless in-memory transport
--- with the same results landing on the same bus.
+inside the app's lifespan (which hosts the stats module in this process, over
+the in-memory transport), so the frames and the module's results reach the
+pipeline and the source switch works end to end; the providers can be swapped
+by environment alone; and the stats module's results keep coming across the
+transport when the replay loops and its timestamps go backwards.
 """
 
 from __future__ import annotations
@@ -21,21 +21,27 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from app_test_support import Watch, fresh_transport
 from fastapi import HTTPException
 
 from pmu_test_streamer import api
 from pmu_test_streamer.live_client import LIVE_STREAM_ID, LiveSyntheticClient
 from pmu_test_streamer.sample_client import EPOCH, STREAM_ID, SampleRecordingClient, load_sample
 from pmu_test_streamer.stats_module import FrameStats, FrameStatsModule, FrameStatsResult
-from pswamp_core.bus import InProcessBus, Overflow
-from pswamp_core.datagateway import Capability, DataGateway, Player, gateway_from_env
+from pmu_test_streamer.family import FAMILY
+from pswamp_core.datagateway import Capability, DataGateway
 from pswamp_core.datagateway.clients import InMemoryClient
 from pswamp_core.datagateway.conformance import DataClientConformance
-from pswamp_core.messages import GoLiveCommand, PauseCommand, PlayCommand, PlayerStatus, PmuFrame, PmuHeader, ReplayCommand
-from pswamp_core.pipeline import Pipeline
-from pswamp_core.remote import ModuleHost, RemoteModule
-from pswamp_core.transport import InMemoryTransport
+from pswamp_core.host import hosts_for, serve_hosts
+from pswamp_core.messages import PauseCommand, PlayCommand, PlayerStatus, PmuFrame, PmuHeader, SwitchSourceCommand
 from pswamp_core.util.time import utcnow
+
+
+@pytest.fixture(autouse=True)
+def _own_transport(monkeypatch):
+    with fresh_transport(monkeypatch) as transport:
+        yield transport
+
 
 # --- the sample file ---------------------------------------------------------------
 
@@ -62,12 +68,10 @@ def test_sample_client_reads_lazily_and_from_env(monkeypatch, tmp_path):
     copy = tmp_path / "other.txt"
     copy.write_text("\n".join(load_sample().path.read_text().splitlines()[:10]))  # 2 instants
     monkeypatch.setenv("MINE_PATH", str(copy))
-    monkeypatch.setenv("MINE_PRIORITY", "3")
 
     client = SampleRecordingClient.from_env("mine")
 
     assert client.name == "mine"
-    assert client.priority == 3
     assert len(client.frames) == 2
     assert client.capabilities == Capability.HISTORY_CONSUME
 
@@ -191,90 +195,92 @@ def test_k8s_example_file_feeds_the_live_client_with_constant_frames(monkeypatch
 # --- the pipeline the endpoint builds ----------------------------------------------
 
 
-async def test_pipeline_streams_frames_and_stats_onto_the_bus(monkeypatch):
+async def test_pipeline_streams_frames_and_its_module_answers(monkeypatch):
     monkeypatch.delenv("PSWAMP_DATA_CLIENTS", raising=False)
-    pipeline = await api.build_pipeline("42")
-    assert list(pipeline.gateway.clients) == ["sample", "live"]
-    await pipeline.start()
-    try:
-        with pipeline.bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames, pipeline.bus.subscribe(
-            FrameStatsResult, overflow=Overflow.GROW
-        ) as results:
-            pipeline.player.paced = False
-            pipeline.dispatch(PlayCommand(client_id="42"))
-            got = [await asyncio.wait_for(frames.get(), 2) for _ in range(3)]
-            stats = await asyncio.wait_for(results.get(), 2)
-        assert [f.timestamp for f in got] == [f.timestamp for f in load_sample().frames[:3]]
-        assert stats.app.name == "frame-stats"
-        assert stats.result.n_stations == 5
+    async with api.lifespan(None):
+        pipeline = api.build_pipeline("42")
+        assert list(pipeline.gateway.clients) == ["sample", "live"]
+        seen = Watch(pipeline)
+        await pipeline.start()
+        try:
+            with seen.subscribe(PmuFrame) as frames, seen.subscribe(FrameStatsResult) as results:
+                pipeline.player.paced = False
+                pipeline.dispatch(PlayCommand(client_id="42"))
+                got = [await asyncio.wait_for(frames.get(), 2) for _ in range(3)]
+                stats = await asyncio.wait_for(results.get(), 2)
+            assert [f.timestamp for f in got] == [f.timestamp for f in load_sample().frames[:3]]
+            assert stats.app.name == "frame-stats"
+            assert stats.result.n_stations == 5
 
-        message = api.state_message(pipeline)
-        assert message.frame is not None and message.frame.header.n_columns == 15
-        assert message.frame_count == 60
-        assert message.frame_index is not None and 0 <= message.frame_index < 60
-        assert message.player.mode == "replay" and message.player.can_seek
-        assert message.player.can_go_live
-    finally:
-        await pipeline.stop()
+            message = api.state_message(pipeline)
+            assert message.frame is not None and message.frame.header.n_columns == 15
+            assert message.frame_count == 60
+            assert message.frame_index is not None and 0 <= message.frame_index < 60
+            assert message.player.mode == "replay" and message.player.can_seek
+            assert message.player.source == "sample" and message.player.sources == ["sample", "live"]
+        finally:
+            await pipeline.stop()
 
 
-async def test_default_pipeline_replays_then_goes_live_then_returns(monkeypatch):
-    """The switch, end to end over the composed default: the replay is the
-    recording at its epoch, live is the same layout stamped now, and replay
-    lands back at the start, paused."""
+async def test_default_pipeline_replays_then_switches_to_live_and_back(monkeypatch):
+    """The switch, end to end over the composed default: the recording replays
+    at its epoch, the live source is the same layout stamped now, and switching
+    back to the recording lands at its start, paused."""
     monkeypatch.delenv("PSWAMP_DATA_CLIENTS", raising=False)
-    pipeline = await api.build_pipeline("43")
-    await pipeline.start()
-    try:
-        header = load_sample().header
-        with pipeline.bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames, pipeline.bus.subscribe(
-            FrameStatsResult, overflow=Overflow.GROW
-        ) as results, pipeline.bus.subscribe(PlayerStatus, overflow=Overflow.GROW) as statuses:
-            pipeline.player.paced = False
-            pipeline.dispatch(PlayCommand(client_id="43"))
-            replayed = [await asyncio.wait_for(frames.get(), 2) for _ in range(3)]
-            assert all(f.mRID == STREAM_ID for f in replayed)
-            assert replayed[0].timestamp == EPOCH + timedelta(seconds=0.05)
+    async with api.lifespan(None):
+        pipeline = api.build_pipeline("43")
+        seen = Watch(pipeline)
+        await pipeline.start()
+        try:
+            header = load_sample().header
+            with seen.subscribe(PmuFrame) as frames, seen.subscribe(
+                FrameStatsResult
+            ) as results, seen.subscribe(PlayerStatus) as statuses:
+                pipeline.player.paced = False
+                pipeline.dispatch(PlayCommand(client_id="43"))
+                replayed = [await asyncio.wait_for(frames.get(), 2) for _ in range(3)]
+                assert all(f.mRID == STREAM_ID for f in replayed)
+                assert replayed[0].timestamp == EPOCH + timedelta(seconds=0.05)
 
-            pipeline.dispatch(GoLiveCommand(client_id="43"))
-            status = await _wait_status(statuses, lambda s: s.mode == "live")
-            assert status.paused is False and status.can_seek is False and status.can_go_live
-            # Drain whatever the replay still had queued, then read live frames.
-            live_frames = []
-            deadline = asyncio.get_running_loop().time() + 3
-            while len(live_frames) < 3 and asyncio.get_running_loop().time() < deadline:
-                frame = await asyncio.wait_for(frames.get(), 2)
-                if frame.mRID == LIVE_STREAM_ID:
-                    live_frames.append(frame)
-            assert len(live_frames) == 3
-            assert all(abs((utcnow() - f.timestamp).total_seconds()) < 2 for f in live_frames)
-            assert all(f.header == header for f in live_frames)
-            while results.get_nowait() is not None:
-                pass
-            stats = await asyncio.wait_for(results.get(), 2)
-            assert stats.result.n_stations == 5  # the module still works on live frames
-            message = api.state_message(pipeline)
-            assert message.player.mode == "live"
-            assert message.frame_index is None and message.frame_count is None
-            assert message.frame is not None and message.frame.mRID == LIVE_STREAM_ID
-            assert message.stats is not None and message.stats.timestamp == message.frame.timestamp
+                pipeline.dispatch(SwitchSourceCommand(client_id="43", source="live"))
+                status = await _wait_status(statuses, lambda s: s.mode == "live")
+                assert status.paused is False and status.can_seek is False and status.source == "live"
+                # Drain whatever the replay still had queued, then read live frames.
+                live_frames = []
+                deadline = asyncio.get_running_loop().time() + 3
+                while len(live_frames) < 3 and asyncio.get_running_loop().time() < deadline:
+                    frame = await asyncio.wait_for(frames.get(), 2)
+                    if frame.mRID == LIVE_STREAM_ID:
+                        live_frames.append(frame)
+                assert len(live_frames) == 3
+                assert all(abs((utcnow() - f.timestamp).total_seconds()) < 2 for f in live_frames)
+                assert all(f.header == header for f in live_frames)
+                while results.get_nowait() is not None:
+                    pass
+                stats = await asyncio.wait_for(results.get(), 2)
+                assert stats.result.n_stations == 5  # the module still works on live frames
+                message = api.state_message(pipeline)
+                assert message.player.mode == "live"
+                assert message.frame_index is None and message.frame_count is None
+                assert message.frame is not None and message.frame.mRID == LIVE_STREAM_ID
+                assert message.stats is not None and message.stats.timestamp == message.frame.timestamp
 
-            pipeline.dispatch(ReplayCommand(client_id="43"))
-            status = await _wait_status(statuses, lambda s: s.mode == "replay")
-            assert status.paused is True and status.can_seek is True
-            assert status.cursor == EPOCH + timedelta(seconds=0.05)
-            index, count = api._position(status, load_sample().frames[0])
-            assert (index, count) == (0, 60)
-            # Nothing has played on the replay yet: the page must not be shown
-            # the live feed's last frame (or its stats) under a "recorded" badge.
-            message = api.state_message(pipeline)
-            assert message.frame is None and message.stats is None
-            await pipeline.player.step()
-            await asyncio.sleep(0.05)
-            message = api.state_message(pipeline)
-            assert message.frame is not None and message.frame.mRID == STREAM_ID
-    finally:
-        await pipeline.stop()
+                pipeline.dispatch(SwitchSourceCommand(client_id="43", source="sample"))
+                status = await _wait_status(statuses, lambda s: s.mode == "replay")
+                assert status.paused is True and status.can_seek is True
+                assert status.cursor == EPOCH + timedelta(seconds=0.05)
+                index, count = api._position(status, load_sample().frames[0])
+                assert (index, count) == (0, 60)
+                # Nothing has played on the replay yet: the page must not be shown
+                # the live feed's last frame (or its stats) under a "recorded" badge.
+                message = api.state_message(pipeline)
+                assert message.frame is None and message.stats is None
+                await pipeline.player.step()
+                await asyncio.sleep(0.05)
+                message = api.state_message(pipeline)
+                assert message.frame is not None and message.frame.mRID == STREAM_ID
+        finally:
+            await pipeline.stop()
     assert not pipeline.gateway.clients["live"].ticking  # type: ignore[attr-defined]
 
 
@@ -290,48 +296,45 @@ async def _wait_status(subscription, predicate, timeout: float = 2.0) -> PlayerS
 
 async def test_dispatch_answers_409_for_a_verb_the_mode_refuses(monkeypatch):
     monkeypatch.delenv("PSWAMP_DATA_CLIENTS", raising=False)
-    api.REGISTRY.bind(asyncio.get_running_loop())
-    pipeline = await api.REGISTRY.acquire("9")
-    try:
-        with pipeline.bus.subscribe(PlayerStatus, overflow=Overflow.GROW) as statuses:
-            ack = await api.live("9")
-            assert ack.applied == "go.live"
-            await _wait_status(statuses, lambda s: s.mode == "live")
-            with pytest.raises(HTTPException) as refused:
-                await api.seek("9", api.SeekBody(offset_s=1.0))
-            assert refused.value.status_code == 409
-            assert "live mode" in refused.value.detail
-            with pytest.raises(HTTPException) as refused:
-                await api.play("9")
-            assert refused.value.status_code == 409
-            ack = await api.replay("9")
-            assert ack.applied == "replay"
-            await _wait_status(statuses, lambda s: s.mode == "replay")
-            assert (await api.play("9")).applied == "play"
-            assert (await api.stop("9")).applied == "pause"
-        with pytest.raises(HTTPException) as missing:
-            await api.play("no-such-client")
-        assert missing.value.status_code == 404
-    finally:
-        api.REGISTRY.release("9")
-        await api.REGISTRY.stop_all()
-        api.REGISTRY.bind(None)
+    async with api.lifespan(None):
+        pipeline = await api.REGISTRY.acquire("9")
+        seen = Watch(pipeline)
+        try:
+            with seen.subscribe(PlayerStatus) as statuses:
+                ack = await api.source("9", api.SourceBody(name="live"))
+                assert ack.applied == "switch.source"
+                await _wait_status(statuses, lambda s: s.mode == "live")
+                with pytest.raises(HTTPException) as refused:
+                    await api.seek("9", api.SeekBody(offset_s=1.0))
+                assert refused.value.status_code == 409
+                assert "live mode" in refused.value.detail
+                with pytest.raises(HTTPException) as refused:
+                    await api.play("9")
+                assert refused.value.status_code == 409
+                ack = await api.source("9", api.SourceBody(name="sample"))
+                assert ack.applied == "switch.source"
+                await _wait_status(statuses, lambda s: s.mode == "replay")
+                assert (await api.play("9")).applied == "play"
+                assert (await api.stop("9")).applied == "pause"
+            with pytest.raises(HTTPException) as missing:
+                await api.play("no-such-client")
+            assert missing.value.status_code == 404
+        finally:
+            api.REGISTRY.release("9")
 
 
-async def test_dispatch_refuses_live_without_a_live_source(monkeypatch):
+async def test_dispatch_refuses_a_source_that_is_not_configured(monkeypatch):
     monkeypatch.setenv("PSWAMP_DATA_CLIENTS", "tiny:test_pmu_test_streamer:TinyClient")
-    api.REGISTRY.bind(asyncio.get_running_loop())
-    pipeline = await api.REGISTRY.acquire("11")
-    try:
-        assert pipeline.player.status().can_go_live is False
-        with pytest.raises(HTTPException) as refused:
-            await api.live("11")
-        assert refused.value.status_code == 409
-        assert "no live source" in refused.value.detail
-    finally:
-        api.REGISTRY.release("11")
-        await api.REGISTRY.stop_all()
-        api.REGISTRY.bind(None)
+    async with api.lifespan(None):
+        pipeline = await api.REGISTRY.acquire("11")
+        try:
+            assert pipeline.player.status().sources == ["tiny"]
+            with pytest.raises(HTTPException) as refused:
+                await api.source("11", api.SourceBody(name="live"))
+            assert refused.value.status_code == 409
+            assert "no source named 'live'" in refused.value.detail
+        finally:
+            api.REGISTRY.release("11")
 
 
 class TinyClient(InMemoryClient):
@@ -348,18 +351,19 @@ class TinyClient(InMemoryClient):
 
 async def test_provider_is_swapped_by_environment_alone(monkeypatch):
     monkeypatch.setenv("PSWAMP_DATA_CLIENTS", "tiny:test_pmu_test_streamer:TinyClient")
-    pipeline = await api.build_pipeline("7")
+    pipeline = api.build_pipeline("7")
     assert list(pipeline.gateway.clients) == ["tiny"]
+    seen = Watch(pipeline)
     await pipeline.start()
     try:
-        with pipeline.bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames:
+        with seen.subscribe(PmuFrame) as frames:
             pipeline.player.paced = False
             pipeline.player.resume()
             got = [await asyncio.wait_for(frames.get(), 2) for _ in range(3)]
         assert [f.values[0] for f in got] == [50.0, 51.0, 52.0]
         status = pipeline.latest.get(PlayerStatus)
         assert status is not None and status.coverage_start == EPOCH
-        assert status.can_go_live is False
+        assert status.sources == ["tiny"]
     finally:
         await pipeline.stop()
 
@@ -379,7 +383,7 @@ def test_state_keeps_stats_for_the_frame_or_the_one_just_before_it():
 
     status = PlayerStatus(
         timestamp=utcnow(), mode="replay", cursor=None, speed=1.0, paused=True, loop=True, ended=False,
-        can_seek=True, can_go_live=True, coverage_start=EPOCH, coverage_end=None, frame_interval_s=0.05,
+        can_seek=True, source="sample", sources=["sample", "live"], coverage_start=EPOCH, coverage_end=None, frame_interval_s=0.05,
     )
     assert api._current(stats_for(frames[3]), frames[3], status)
     assert api._current(stats_for(frames[2]), frames[3], status)  # one frame behind: kept
@@ -410,38 +414,20 @@ async def test_the_module_primes_itself_from_the_frame_and_follows_a_layout_chan
     assert module.parameters == {"header_id": other.header_id, "stations": ["z"]}
 
 
-def test_environment_sends_the_module_to_the_worker(monkeypatch):
-    monkeypatch.setattr(api, "TRANSPORT", None)
-    monkeypatch.delenv(api.MODULE_TRANSPORT_VARIABLE, raising=False)
-    assert isinstance(api.stats_modules("1")[0], FrameStatsModule)
-    monkeypatch.setattr(api, "TRANSPORT", None)
-    monkeypatch.setenv(api.MODULE_TRANSPORT_VARIABLE, "mem:pswamp_core.transport:InMemoryTransport")
-    (module,) = api.stats_modules("1")
-    assert isinstance(module, RemoteModule)
-    assert (module.name, module.key, module.output_model) == ("frame-stats", "1", FrameStatsResult)
-    assert api.stats_modules("2")[0].transport is module.transport  # one per process
-    monkeypatch.setattr(api, "TRANSPORT", None)
-
-
-async def test_stats_module_runs_as_its_own_service_over_the_transport(monkeypatch):
-    """The streamer's pipeline with the module's stand-in, and the worker's
-    host running the real module beside it, over one in-memory transport:
-    the results land on the pipeline's bus as they do in-process -- and keep
-    coming when the replay loops and its timestamps go backwards."""
+async def test_the_stats_module_answers_across_the_transport_through_a_replay_loop(monkeypatch, _own_transport):
+    """The family's module hosted beside the pipeline, as a worker would host
+    it, over the one in-memory transport: every frame goes through JSON to the
+    module and every result back -- and they keep coming when the replay loops
+    and its timestamps go backwards."""
     monkeypatch.delenv("PSWAMP_DATA_CLIENTS", raising=False)
-    broker = InMemoryTransport()
-    host = ModuleHost(FrameStatsModule, broker)
-    host_task = asyncio.create_task(host.serve())
-    gateway = gateway_from_env(api.DEFAULT_DATA_CLIENTS)
-    bus = InProcessBus()
-    player = Player(gateway, bus, model=PmuFrame, loop=True)
-    remote = RemoteModule(FrameStatsModule, broker, "42")
-    pipeline = Pipeline("42", gateway, bus, player, [remote])
+    (host,) = hosts_for(FAMILY, _own_transport)
+    host_task = asyncio.create_task(serve_hosts([host]))
+    await asyncio.sleep(0)
+    pipeline = api.build_pipeline("42")
+    seen = Watch(pipeline)
     await pipeline.start()
     try:
-        with bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames, bus.subscribe(
-            FrameStatsResult, overflow=Overflow.GROW
-        ) as results:
+        with seen.subscribe(PmuFrame) as frames, seen.subscribe(FrameStatsResult) as results:
             pipeline.player.paced = False
             pipeline.dispatch(PlayCommand(client_id="42"))
             played = [await asyncio.wait_for(frames.get(), 2) for _ in range(3)]
@@ -460,7 +446,7 @@ async def test_stats_module_runs_as_its_own_service_over_the_transport(monkeypat
                 wrapped = result.timestamp < previous
                 previous = result.timestamp
             assert wrapped
-            assert remote.published > 60 and remote.dropped == 0 and remote.received > 60
+            assert pipeline.outbox.published > 60 and pipeline.outbox.failed == 0
 
         pipeline.dispatch(PauseCommand(client_id="42"))
         await asyncio.sleep(0.05)
@@ -468,7 +454,8 @@ async def test_stats_module_runs_as_its_own_service_over_the_transport(monkeypat
         assert message.player.mode == "replay" and message.frame is not None
     finally:
         await pipeline.stop()
+        await asyncio.sleep(0.01)
+        assert host.keys() == []  # PipelineClosed dropped the key
         host_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await host_task
-    assert host.keys() == []

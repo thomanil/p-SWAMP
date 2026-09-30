@@ -419,12 +419,11 @@ From there the two families of app part ways.
 **The apps over the shared core** — `pmu_test_streamer/` is the worked example, and
 `frequency_peek/`, `time_series_explorer/`, `islanding_stream/` and `mode_estimation/`
 follow it — keep one core `Pipeline` per client in a `PipelineRegistry` (bound by the
-package's `lifespan`, capped and idle-evicted). The socket subscribes to the
-pipeline's bus and pushes a `state_message()` on each change: `frequency_peek/`
-through the grid monitor's `event_queue` / `serve_updates` loop, the streamer
-and the explorer through their own subscribe-and-coalesce copy
-(`subscribe_updates` / `serve_stream`), and the two load-test pages through an
-inline subscription that also wakes every half second for throughput readings. See `server-data-architecture.md` for the pipeline itself.
+package's `lifespan`, capped and idle-evicted). The socket is
+`shared.connected_pipeline` + `shared.push_changes`: one `state_message()` on
+connect and one per change of the pipeline, coalesced -- the two load-test pages
+with a rate cap and a half-second tick for their throughput readings. See
+`server-data-architecture.md` for the pipeline itself.
 
 A client id may briefly hold several sockets — a reconnect overlapping the dying one
 — which is why it maps to a list. `send_to_client` iterates a snapshot and drops any socket
@@ -635,13 +634,11 @@ POST /api/pmu-test-streamer/playback/seek?client_id=42   {"offset_s": 12.5}
   → SeekCommand(client_id="42", offset_s=12.5)
   → shared.dispatch_command(REGISTRY, command, logger)
       → REGISTRY.peek("42")                   ← 404 if this client has no pipeline
-      → pipeline.dispatch(command)            ← routed by its class to the one
-                                                receiver that declared it;
-                                                receiver.validate() refuses → 409
-                                                (a module in a worker: the
-                                                stand-in accepts; its refusal
-                                                arrives as an ErrorEvent)
-      → published on the client's bus
+      → pipeline.dispatch(command)            ← a player command: player.validate()
+                                                refuses → 409; a module command is
+                                                accepted, and a refusal where the
+                                                module runs arrives as an ErrorEvent
+      → published on its class's topic, under the client's key
   → 200 CommandAck(applied=…)
   → …the effect arrives on the socket, like every other change.
 ```

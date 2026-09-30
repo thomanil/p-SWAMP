@@ -3,10 +3,11 @@
 
 """A Kafka-API broker (Apache Kafka, or anything speaking its protocol) as a :class:`~pswamp_core.transport.Transport`.
 
-One topic per message class -- ``pmu.frame``, ``frame.stats.result`` -- under an
-optional namespace prefix that is configuration and never a message field
-(STEP 3 ADR-005); the pipeline key is the **record key**. So a deployment with
-eight per-client pipelines has three topics, not twenty-four, and a worker
+One topic per message class per app -- ``pmu-test-streamer.pmu.frame``,
+``pmu-test-streamer.frame.stats.result`` -- under an optional deployment-wide
+prefix that is configuration and never a message field (STEP 3 ADR-005); the
+pipeline key is the **record key**. So an app with eight per-client pipelines
+has three topics, not twenty-four, and a worker
 consumes each topic once and tells the pipelines apart by key. Every topic is
 read from its end, so a subscriber sees only what is said after it arrives;
 a frame carries its own layout, so that is all a late worker needs.
@@ -29,6 +30,13 @@ per key, which is all a per-key module needs. No consumer group and no
 committed offsets: a feed is a tail, and a process that restarts wants *now*,
 not its backlog.
 
+**One consumer per process**, however many topics it listens to: the server
+listens to every app's command, result and error topics, and one consumer per
+topic -- some fifty -- starved each other of the broker's attention. The
+consumer is assigned each topic's one partition by hand and is re-assigned
+when a new topic is first subscribed, keeping its position on every topic it
+already held; a new topic is read from its end.
+
 Requires the ``kafka`` extra (``pswamp-core[kafka]``). ``aiokafka`` is imported
 inside the methods that need it, so importing this module -- and naming the
 class in a spec string -- costs nothing without it.
@@ -37,7 +45,7 @@ class in a spec string -- costs nothing without it.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from ..datagateway.config import EnvSetting
@@ -77,9 +85,12 @@ LIVE_TOPIC_CONFIGS: dict[str, str] = {
 #: Kafka's error code for a topic that already exists, in a CreateTopics response.
 _TOPIC_ALREADY_EXISTS = 36
 
-#: How long a feed waits for its topic's partitions to be assigned.
-_ASSIGNMENT_TIMEOUT_S = 15.0
-_ASSIGNMENT_POLL_MS = 200
+#: How long one fetch waits for records: also how soon a new topic is taken on.
+_POLL_MS = 200
+
+#: Backoff for a consumer that died (broker restart, network): first wait, and the cap.
+_RECONNECT_DELAY = 1.0
+_MAX_RECONNECT_DELAY = 30.0
 
 
 class KafkaTransport(Transport):
@@ -88,8 +99,9 @@ class KafkaTransport(Transport):
     Args:
         name: The transport's name; also the ``{NAME}_`` prefix of its settings.
         bootstrap_servers: Broker addresses, as ``aiokafka`` takes them.
-        topic_prefix: Namespace prepended to every topic (``no`` makes
-            ``pmu.frame`` into ``no.pmu.frame``). Configuration, never a field.
+        topic_prefix: A deployment-wide namespace prepended to every topic
+            (``no`` makes ``pmu-test-streamer.pmu.frame`` into
+            ``no.pmu-test-streamer.pmu.frame``). Configuration, never a field.
         replication_factor: For the topics this transport creates.
     """
 
@@ -123,20 +135,25 @@ class KafkaTransport(Transport):
         self._known_topics: set[str] = set()
         self._open_lock = asyncio.Lock()
         self.published = 0
+        #: Every topic this process listens to, and the class each carries.
+        self._models: dict[str, type[DataModel]] = {}
+        #: Topics subscribed but not yet assigned to the consumer.
+        self._unassigned: set[str] = set()
+        self._consumer_task: asyncio.Task | None = None
 
     # --- topics ---------------------------------------------------------------------
 
-    def topic_for(self, model: type[DataModel]) -> str:
-        """The topic carrying ``model``: its descriptor under the prefix, if any."""
-        return f"{self.topic_prefix}.{model.topic}" if self.topic_prefix else model.topic
+    def topic(self, model: type[DataModel], app: str) -> str:
+        """``<app>.<model.topic>``, under the deployment's prefix, if any."""
+        topic = super().topic(model, app)
+        return f"{self.topic_prefix}.{topic}" if self.topic_prefix else topic
 
-    async def ensure_topic(self, model: type[DataModel]) -> str:
-        """Create ``model``'s topic if the broker lacks it; returns its name.
+    async def ensure_topic(self, topic: str) -> str:
+        """Create ``topic`` if the broker lacks it; returns its name.
 
         "Already exists" is fine; any other failure is logged and left to the
         produce or consume that follows.
         """
-        topic = self.topic_for(model)
         if topic in self._known_topics:
             return topic
         from aiokafka.admin import AIOKafkaAdminClient
@@ -168,6 +185,13 @@ class KafkaTransport(Transport):
             logger.info("%s: connected to %s", self.name, self.bootstrap_servers)
 
     async def close(self) -> None:
+        task, self._consumer_task = self._consumer_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await super().close()
         producer, self._producer = self._producer, None
         admin, self._admin = self._admin, None
@@ -178,55 +202,96 @@ class KafkaTransport(Transport):
 
     # --- the contract -------------------------------------------------------------------
 
-    async def publish(self, message: DataModel, key: str) -> None:
+    async def publish(self, message: DataModel, *, app: str, key: str) -> None:
         if self._producer is None:
             await self.open()
-        topic = await self.ensure_topic(type(message))
+        topic = await self.ensure_topic(self.topic(type(message), app))
         await self._producer.send_and_wait(
             topic, value=message.model_dump_json().encode(), key=key.encode()
         )
         self.published += 1
 
-    async def _feed(
-        self, model: type[DataModel], ready: asyncio.Event
-    ) -> AsyncIterator[tuple[str, DataModel]]:
+    def _watch(self, topic: str, model: type[DataModel]) -> None:
+        if topic in self._models:
+            return
+        self._models[topic] = model
+        self._ready[topic] = asyncio.Event()
+        self._unassigned.add(topic)
+        if self._consumer_task is None or self._consumer_task.done():
+            self._consumer_task = asyncio.create_task(self._consume(), name=f"{self.name}.consumer")
+
+    async def _consume(self) -> None:
+        """The process's one consumer: every watched topic, until cancelled,
+        reopened with backoff when it fails."""
         from aiokafka import AIOKafkaConsumer
 
-        topic = await self.ensure_topic(model)
-        consumer = AIOKafkaConsumer(
-            topic,
-            bootstrap_servers=self.bootstrap_servers,
-            group_id=None,
-            enable_auto_commit=False,
-            auto_offset_reset="latest",  # a stream is joined at its end
-        )
-        await consumer.start()
-        try:
-            await self._await_assignment(consumer, topic)
-            ready.set()
-            async for record in consumer:
-                key = record.key.decode() if record.key else ""
-                try:
-                    message = model.model_validate_json(record.value)
-                except Exception as error:
-                    logger.warning("%s: dropping undecodable record on %s: %s", self.name, topic, error)
-                    continue
-                # The record's CreateTime, as the producer stamped it: how long a
-                # message has been in flight is what a lagging consumer reports.
-                if record.timestamp is not None and record.timestamp >= 0:
-                    stamp_sent_at(message, record.timestamp / 1000.0)
-                yield key, message
-        finally:
-            await _stop_consumer(consumer)
+        delay = _RECONNECT_DELAY
+        while True:
+            consumer = AIOKafkaConsumer(
+                bootstrap_servers=self.bootstrap_servers,
+                group_id=None,
+                enable_auto_commit=False,
+                auto_offset_reset="latest",  # a stream is joined at its end
+            )
+            try:
+                await consumer.start()
+                self._unassigned |= set(self._models)  # a fresh consumer holds nothing
+                while True:
+                    if self._unassigned:
+                        await self._assign(consumer)
+                    batches = await consumer.getmany(timeout_ms=_POLL_MS)
+                    for partition, records in batches.items():
+                        self._decode(partition.topic, records)
+                    delay = _RECONNECT_DELAY
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("%s: consumer failed: %s; reopening in %.0fs", self.name, exc, delay)
+            finally:
+                for event in self._ready.values():
+                    event.clear()
+                await _stop_consumer(consumer)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _MAX_RECONNECT_DELAY)
 
-    async def _await_assignment(self, consumer: Any, topic: str) -> None:
-        """Poll until the subscription resolves to partitions, or give up loudly."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _ASSIGNMENT_TIMEOUT_S
-        while not consumer.assignment():
-            if loop.time() >= deadline:
-                raise RuntimeError(f"no partitions assigned for topic {topic} within {_ASSIGNMENT_TIMEOUT_S:.0f}s")
-            await consumer.getmany(timeout_ms=_ASSIGNMENT_POLL_MS)
+    async def _assign(self, consumer: Any) -> None:
+        """Add the unassigned topics to the consumer, keeping where it was on
+        the ones it held; each new one is read from its end, and ready once
+        its position is known."""
+        from aiokafka.structs import TopicPartition
+
+        new = sorted(self._unassigned)
+        self._unassigned.clear()
+        for topic in new:
+            await self.ensure_topic(topic)
+        held = {tp: await consumer.position(tp) for tp in consumer.assignment()}
+        fresh = [TopicPartition(topic, 0) for topic in new if TopicPartition(topic, 0) not in held]
+        consumer.assign([*held, *fresh])
+        for tp, offset in held.items():
+            consumer.seek(tp, offset)
+        if fresh:
+            await consumer.seek_to_end(*fresh)
+            for tp in fresh:
+                await consumer.position(tp)
+        for topic in new:
+            self._ready[topic].set()
+
+    def _decode(self, topic: str, records: Sequence[Any]) -> None:
+        model = self._models.get(topic)
+        if model is None:
+            return
+        for record in records:
+            key = record.key.decode() if record.key else ""
+            try:
+                message = model.model_validate_json(record.value)
+            except Exception as error:
+                logger.warning("%s: dropping undecodable record on %s: %s", self.name, topic, error)
+                continue
+            # The record's CreateTime, as the producer stamped it: how long a
+            # message has been in flight is what a lagging consumer reports.
+            if record.timestamp is not None and record.timestamp >= 0:
+                stamp_sent_at(message, record.timestamp / 1000.0)
+            self._deliver(topic, key, message)
 
 
 async def create_topic(

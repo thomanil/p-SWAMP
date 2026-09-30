@@ -10,24 +10,29 @@ package whose only default dependency is pydantic; two optional extras add
   `PmuFrame`, `ResultEnvelope`, `PlayerStatus`, `ErrorEvent`, …), and the typed
   commands (`Command`, `PlayerCommand` and its subclasses).
 - `pswamp_core.datagateway` — the provider contract (`DataClient` with declared
-  capabilities), the `DataGateway` that stitches providers into one time-addressed
-  stream, the `Player` that paces such a stream and takes the replay commands, the
+  capabilities), the `DataGateway` that holds them as named sources and reads the
+  active one as a time-addressed stream, the `Player` that paces such a stream and takes the replay commands, the
   enrichment hook (`enrich`: the stub CIM reference on each frame), the reference
   `InMemoryClient` and the `RemoteDataClient` over a deployment's remote data
   service, environment-driven configuration, and a conformance suite a provider
   author runs against their own client.
-- `pswamp_core.bus` — the in-process publish/subscribe bus, typed on message
-  classes, with the one thread→loop crossing point.
-- `pswamp_core.command_routing` — typed commands routed by their class to the one
-  receiver (the player or a module) that declared them, checked, then applied.
+- `pswamp_core.subscription` — a consumer's queue and its overflow policy, and
+  the `Sink` a player or a module publishes into.
+- `pswamp_core.keep_up` — falling behind, noticed and reported as an `ErrorEvent`.
+- `pswamp_core.transport` — the one publish/subscribe: one topic per message class
+  per app, the pipeline key on every record; `InMemoryTransport` (one process) and
+  `KafkaTransport` behind the `[kafka]` extra, and the `Outbox` in front of them.
+- `pswamp_core.command_routing` — a command's class is its address; the inbox that
+  checks and applies a receiver's commands in order.
 - `pswamp_core.modules` — the minimal module: consume one message class and publish
   a result, and answer the commands it declares.
-- `pswamp_core.pipeline` — one stream's player, bus and modules bound together,
-  and the registry that builds, caps and evicts them per key.
-- `pswamp_core.transport` — carries topics between processes (`InMemoryTransport`,
-  and `KafkaTransport` behind the `[kafka]` extra).
-- `pswamp_core.remote` — a module as its own service: `RemoteModule` in the
-  pipeline, `ModuleHost` in the worker.
+- `pswamp_core.pipeline` — `PipelineFamily` (what an app's pipelines are made of),
+  `Pipeline` (one stream's gateway, player and topics, per key) and the registry
+  that builds, caps and evicts them.
+- `pswamp_core.host` — `ModuleHost`: one module instance per pipeline key, off the
+  transport, in the server's process or a worker's.
+- `pswamp_core.worker` — `python -m pswamp_core.worker`: a process that hosts the
+  families it is told to.
 
 `doc/server-data-architecture.md` at the repo root explains how the pieces fit
 and how data flows from a source to a browser. The lineage of the gateway half

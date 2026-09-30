@@ -4,17 +4,17 @@
 """The Frequency peek app's backend: the web edge over one core pipeline per client.
 
 A module and the page that shows it, built by the recipe in
-``doc/server-data-architecture.md`` ("Adding things"): the configured PMU
-providers behind the core's gateway → player → bus chain, one
-``FrequencyModule`` reading frames off that bus, and this edge forwarding its
-results down one socket::
+``doc/server-data-architecture.md`` ("Adding things"): the family in
+``family.py`` (the live feed first, the frequency module), one pipeline per
+client from it, and this edge pushing the newest result down one socket::
 
-    providers ── DataGateway ── Player ──▶ bus ──▶ FrequencyModule ──▶ bus ──▶ this socket
+    live feed ── DataGateway ── Player ──▶ topic frequency-peek.pmu.frame ──▶ FrequencyModule
+                                   this socket ◀── latest ◀── topic …frequency.result ◀──┘
 
-The page is **live only**: the pipeline switches its player to the live feed
-as soon as it starts, so the frequencies on screen are stamped now and there
-are no transport controls -- and so no commands. State goes down the socket;
-nothing comes up.
+The page is **live only**: the live feed is the gateway's first-named source,
+so the player tails it from the start, the frequencies on screen are stamped
+now and there are no transport controls -- and so no commands. (A deployment
+naming only a history source gets an autoplaying replay instead.)
 
 Per client: one pipeline, built by ``REGISTRY`` on first connect and keyed by
 the browser's client id, capped and idle-evicted like the streamer's.
@@ -25,31 +25,20 @@ about that prefix.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
-from collections.abc import AsyncIterator
 from typing import Literal
 
 from fastapi import APIRouter, FastAPI, WebSocket
 from pydantic import BaseModel, Field
-from shared import ErrorForwarderModule, event_queue, get_logger, read_client_id, serve_updates
+from shared import connected_pipeline, get_logger, push_changes, serve_family, transport
 
-from pswamp_core.bus import InProcessBus
-from pswamp_core.datagateway import DataGateway, Player, gateway_from_env
-from pswamp_core.messages import PlayerStatus, PmuFrame
-from pswamp_core.pipeline import CapacityError, Pipeline, PipelineRegistry
+from pswamp_core.messages import PlayerStatus
+from pswamp_core.pipeline import Pipeline, PipelineRegistry
 
-from .frequency_module import FrequencyModule, FrequencyResult
+from .family import FAMILY
+from .frequency_module import FrequencyResult
 
 logger = get_logger("frequency-peek")
-
-#: The providers a deployment gets unless FREQUENCY_PEEK_DATA_CLIENTS names
-#: others: the recording as history, and the live feed the page shows.
-DEFAULT_DATA_CLIENTS = (
-    "sample:pmu_test_streamer.sample_client:SampleRecordingClient,"
-    "live:pmu_test_streamer.live_client:LiveSyntheticClient"
-)
-DATA_CLIENTS_VARIABLE = "FREQUENCY_PEEK_DATA_CLIENTS"
 
 MAX_PIPELINES = 8
 IDLE_EVICT_SECONDS = 300.0
@@ -58,46 +47,23 @@ IDLE_EVICT_SECONDS = 300.0
 # --- the pipeline, per client -------------------------------------------------
 
 
-class LivePipeline(Pipeline):
-    """A pipeline whose player goes live as soon as it starts.
-
-    The core's player opens a replay when the gateway has history, and this
-    page has no transport to resume it with -- so switch to the live feed on
-    start, and fall back to an autoplaying replay when no live source is
-    configured, rather than showing dashes for ever.
-    """
-
-    async def start(self) -> None:
-        await super().start()
-        if self.player.can_go_live:
-            await self.player.go_live()
+def build_pipeline(client_id: str) -> Pipeline:
+    """One client's pipeline over the family: a player that plays at once and
+    loops, should the source be a history. Called by the registry, never directly."""
+    return Pipeline(client_id, FAMILY, transport(), autoplay=True, loop=True)
 
 
-async def build_pipeline(client_id: str) -> LivePipeline:
-    """One client's pipeline: the configured providers, a bus, a live player and
-    the frequency module. Called by the registry, never directly."""
-    gateway: DataGateway = gateway_from_env(DEFAULT_DATA_CLIENTS, variable=DATA_CLIENTS_VARIABLE)
-    bus = InProcessBus()
-    player = Player(gateway, bus, model=PmuFrame, autoplay=True, loop=True)
-    modules = [FrequencyModule(), ErrorForwarderModule(client_id, "frequency-peek")]
-    return LivePipeline(client_id, gateway, bus, player, modules)
-
-
-REGISTRY: PipelineRegistry[LivePipeline] = PipelineRegistry(
+REGISTRY: PipelineRegistry[Pipeline] = PipelineRegistry(
     build_pipeline, max_pipelines=MAX_PIPELINES, idle_seconds=IDLE_EVICT_SECONDS
 )
 
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Bind the registry to the loop for as long as the server is up; drain it
-    on shutdown. An idle server runs no pipeline at all."""
-    REGISTRY.bind(asyncio.get_running_loop())
-    try:
+    """The registry bound, errors forwarded, and (in one process) the frequency
+    module hosted, for as long as the server is up."""
+    async with serve_family(FAMILY, REGISTRY):
         yield
-    finally:
-        await REGISTRY.stop_all()
-        REGISTRY.bind(None)
 
 
 # --- the socket message ---------------------------------------------------------
@@ -118,10 +84,9 @@ class FrequencyPeekState(BaseModel):
 
 
 def state_message(pipeline: Pipeline) -> FrequencyPeekState:
-    latest = pipeline.latest
     return FrequencyPeekState(
         player=pipeline.player.status(),
-        frequency=latest.get(FrequencyResult) if latest else None,
+        frequency=pipeline.latest.get(FrequencyResult),
     )
 
 
@@ -130,53 +95,11 @@ def state_message(pipeline: Pipeline) -> FrequencyPeekState:
 router = APIRouter()
 
 
-@contextlib.asynccontextmanager
-async def connected_pipeline(ws: WebSocket) -> AsyncIterator[Pipeline | None]:
-    """Accept one socket and hold its client's pipeline for as long as it lives.
-
-    Yields ``None`` when the connection was refused: no usable client id is
-    closed *before* accepting (1008); at capacity the socket is accepted first
-    and then closed with 1013, because a code only reaches the browser on an
-    established connection, and the web client treats 1013 as terminal.
-
-    (A copy of the streamer's, pointed at this registry -- the handshake is not
-    shared yet; see ``doc/server-data-architecture.md``, "Adding things".)
-    """
-    client_id = read_client_id(ws)
-    if client_id is None:
-        await ws.close(code=1008)  # policy violation
-        yield None
-        return
-
-    await ws.accept()
-    try:
-        pipeline = await REGISTRY.acquire(client_id)
-    except CapacityError:
-        logger.warning("refused client %s: all %s pipelines in use", client_id, REGISTRY.max_pipelines)
-        await ws.close(code=1013)  # try again later
-        yield None
-        return
-    except Exception:
-        logger.exception("failed to start pipeline for client %s", client_id)
-        await ws.close(code=1011)  # unexpected server error
-        yield None
-        return
-
-    try:
-        yield pipeline
-    finally:
-        REGISTRY.release(client_id)
-
-
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    async with connected_pipeline(ws) as pipeline:
+    async with connected_pipeline(ws, REGISTRY) as pipeline:
         if pipeline is None:
             return
         logger.info("client %s: connected (%s live)", pipeline.key, len(REGISTRY.keys()))
-        # Open the queue before the opening message, so a result published in
-        # between is not lost; the builder reads the bus's newest, so it
-        # ignores which event woke it.
-        with event_queue(pipeline.bus, FrequencyResult) as updates:
-            await serve_updates(ws, updates, lambda _event: state_message(pipeline))
+        await push_changes(ws, pipeline, lambda: state_message(pipeline))
         logger.info("client %s: disconnected", pipeline.key)

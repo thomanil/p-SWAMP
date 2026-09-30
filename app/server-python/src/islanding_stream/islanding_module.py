@@ -25,12 +25,12 @@ went over.
 When the gateway stamped a CIM reference on the frames
 (``PmuHeader.cimReferenceId``), each result carries the reference of the
 frames it was computed from (``cim_reference_id``): the id is picked up again
-here, later in the pipeline, off the frame itself. So it works the same in the
-worker, where the reference arrived with the frame over the topic.
+here, later in the pipeline, off the frame itself -- it arrived with the frame
+over the topic, so it needs no configuration wherever the module is hosted.
 
 Imports only ``numpy``, ``pydantic`` and ``pswamp_core`` -- nothing from the web
-stack or the desktop package -- so it is the same code in the server and in
-the worker (``worker.py``).
+stack or the desktop package -- so it is the same code in the server's process
+and in a worker.
 """
 
 from __future__ import annotations
@@ -123,7 +123,7 @@ class Islands(BaseModel):
     frames_in: int = Field(description="Frames processed since the previous result.")
     detect_ms: float = Field(description="Wall-clock milliseconds this evaluation took.")
     input_age_s: float | None = Field(
-        description="How long the last input had been in flight when it was read; null in-process."
+        description="How long the last input had been in flight when it was read."
     )
     input_dropped: int = Field(description="Input dropped by this module's queue so far.")
     cim_reference_id: str | None = Field(

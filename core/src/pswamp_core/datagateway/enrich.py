@@ -9,7 +9,7 @@ An **enricher** is the gateway's hook for that. The gateway opens and closes
 it with its clients, and its ``DataStream`` passes every payload through it
 just before handing it on -- so every reader of the gateway (the player, a
 module querying a range itself) sees the same enriched payload, and no
-provider, module, bus or transport changes.
+provider, module or transport changes.
 
 ``enrich`` is synchronous and must not do I/O: it runs once per frame on the
 event loop. Anything slow happens in ``open``.

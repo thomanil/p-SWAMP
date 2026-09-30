@@ -51,7 +51,6 @@ export function ModeEstimationPage() {
   const playing = player !== undefined && !player.paused
   const result = state?.result?.result
   const flow = state?.throughput
-  const worker = flow?.module_runs === 'worker'
   const behindSpeed =
     playing && flow?.effective_speed != null && player && flow.effective_speed < player.speed * 0.9
 
@@ -61,9 +60,8 @@ export function ModeEstimationPage() {
         <CardTitle className="text-lg">Mode estimation</CardTitle>
         <span className="text-gray-500">
           N4SID over every station&apos;s frequency in a {num(result?.window_s ?? 45)} s window of the
-          N44 line-trip recording, once per second of data —{' '}
-          {worker ? 'running as its own service, over Kafka' : 'running in the server process'}
-          {result ? `, ${result.execution === 'inline' ? 'on the event loop' : `in a ${result.execution} pool`}` : ''}.
+          N44 line-trip recording, once per second of data, read off its topic wherever the module is
+          hosted{result ? `, ${result.execution === 'inline' ? 'on the event loop' : `in a ${result.execution} pool`}` : ''}.
           Raise the speed to load the analysis; falling behind is reported on the error tray.
         </span>
         <CardAction className="self-center">
@@ -156,12 +154,10 @@ export function ModeEstimationPage() {
               </span>
 
               <span className="text-right text-muted-foreground">Input age</span>
-              <span className="tabular-nums">{worker ? num(result?.input_age_s, 3, ' s') : 'in-process'}</span>
+              <span className="tabular-nums">{num(result?.input_age_s, 3, ' s')}</span>
               <span className="text-right text-muted-foreground">Dropped</span>
               <span className="tabular-nums">
-                {worker
-                  ? `server ${flow?.queue_dropped ?? 0} · worker ${result?.input_dropped ?? 0}`
-                  : `${flow?.queue_dropped ?? 0}`}
+                {`server ${flow?.queue_dropped ?? 0} · module ${result?.input_dropped ?? 0}`}
               </span>
             </section>
           </>

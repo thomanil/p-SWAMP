@@ -5,40 +5,39 @@
 Entry point for reading and writing data across heterogeneous backends.
 
 Lifted from the test_pswamp draft (``core/datagateway/data_gateway.py``). The
-gateway owns a set of :class:`~pswamp_core.datagateway.data_client_model.DataClient`
-instances and hides them behind two calls: ``consume``, which returns a single
-stream stitched across whichever clients hold the requested window, and
-``produce``, which fans a payload out to every writable client.
+gateway owns a set of named :class:`~pswamp_core.datagateway.data_client_model.DataClient`
+instances -- its **sources** -- and reads **one of them at a time**: the
+*active* source. ``consume`` streams from it and ``coverage`` asks it what it
+holds; ``switch(name)`` makes another source the active one. Nothing chooses
+between sources on its own: a switch is always explicit (the player's
+``SwitchSourceCommand``), so which provider a stream reads from is never a
+question of coverage, priority or timing.
 
-"Query a chunk" and "jump to a time" are the same call here --
-``gateway.consume(PmuFrame, t0, t1)`` and ``gateway.consume(PmuFrame, t0, None)``
--- which is why STEP 1 A5's seek and range query are *provider* capabilities and
-not bus features.
+A source is either **history** (``HISTORY_CONSUME``: a recording, a store --
+seekable, replayed) or **live** (``LIVE_CONSUME``: a feed, tailed from now);
+``live`` says which the active one is. A client declaring both is refused when
+the gateway is built. ``produce`` fans a payload out to every client that can
+store it, independent of which source is active.
 
-Adapted from the draft: ``coverage()`` (the union of what the clients hold,
-filtered by declared capability -- the player reads the ``HISTORY_CONSUME`` union
-for its seekable range and where a loop restarts) and ``supports()``; ``produce`` raises
+"Query a chunk" and "jump to a time" are the same call:
+``gateway.consume(PmuFrame, t0, t1)`` and ``gateway.consume(PmuFrame, t0, None)``.
+
+Adapted from the draft: its routing of one stream across several clients is gone
+(no shipped app ever read one stream from two providers); ``produce`` raises
 :class:`ProduceError` after fanning out when any client failed, instead of only
-logging -- an archive that silently stops is a history gap discovered weeks
-later (STEP 2 §4); ``typing.Self`` became string annotations; loguru became
-``logging``.
+logging; loguru became ``logging``.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from ..log import get_logger
 from ..util.time import utcnow
-from .data_client_model import Capability, DataClient, can_consume
-from .planner import (
-    DEFAULT_LIVE_HANDOFF_MARGIN,
-    GapPolicy,
-    SegmentPlanner,
-)
+from .data_client_model import Capability, DataClient
 from .stream import DataStream
 from .time_range import Coverage, TimeRange
 
@@ -53,6 +52,9 @@ __all__ = ["DataGateway", "ProduceError"]
 
 logger = get_logger("pswamp_core.datagateway.gateway")
 
+#: The two ways a source can be read; a source declares exactly one.
+_CONSUME = Capability.HISTORY_CONSUME | Capability.LIVE_CONSUME
+
 
 class ProduceError(RuntimeError):
     """One or more clients failed to store a payload. ``failures`` names them."""
@@ -65,79 +67,98 @@ class ProduceError(RuntimeError):
 
 class DataGateway:
     """
-    Routes reads and writes across the registered data clients.
+    A set of named sources, one of them active, and the writers beside them.
 
     Args:
-        data_clients: Clients to register. ``None`` or empty disables the
-            gateway, which then rejects any call.
-        on_gap: How to handle stretches of the requested window that no client
-            covers.
-        live_handoff_margin: How close to ``now`` a replay must get before the
-            gateway switches to a live-capable client.
+        data_clients: Clients to register, in order. ``None`` or empty leaves
+            the gateway without a source; ``consume`` then raises.
+        active: The source read first. ``None`` takes the first client listed
+            that can be read -- so a deployment's ``*_DATA_CLIENTS`` spec order
+            decides the initial source.
         enrichers: Applied to every payload a stream yields, in order
             (:mod:`~pswamp_core.datagateway.enrich`: a ``cimReferenceId`` on
             PMU frames); opened and closed with the clients.
 
     Raises:
-        ValueError: When two clients share the same name.
+        ValueError: Two clients share a name; a client declares both consume
+            capabilities; ``active`` names no source.
     """
 
     def __init__(
         self,
         data_clients: list[DataClient] | None = None,
         *,
-        on_gap: GapPolicy = "skip",
-        live_handoff_margin: timedelta = DEFAULT_LIVE_HANDOFF_MARGIN,
+        active: str | None = None,
         enrichers: Sequence[Enricher] = (),
     ):
         self.clients: dict[str, DataClient] = {}
         self.enrichers: tuple[Enricher, ...] = tuple(enrichers)
-        #: The last failure of each client's ``coverage`` call, by client name,
-        #: cleared when it answers again. ``coverage`` below skips a failing
-        #: client rather than raising, so this is where the *reason* survives
-        #: for whoever has to tell a person (the player's error event).
-        self.coverage_failures: dict[str, str] = {}
-        self._planner: SegmentPlanner | None = None
+        #: The last failure of the active source's ``coverage`` call, cleared
+        #: when it answers again. ``coverage`` returns ``None`` rather than
+        #: raising, so this is where the *reason* survives for whoever has to
+        #: tell a person (the player's error event).
+        self.coverage_failure: str | None = None
+        self._active: DataClient | None = None
 
-        if not data_clients:
-            logger.warning("no data clients were provided; the gateway is disabled")
-            return
-
-        for client in data_clients:
+        for client in data_clients or ():
             if client.name in self.clients:
                 raise ValueError(f"Duplicate data client name {client.name!r}")
-
+            if _CONSUME in client.capabilities:
+                raise ValueError(
+                    f"data client {client.name!r} declares both HISTORY_CONSUME and "
+                    "LIVE_CONSUME; a source is one or the other"
+                )
             self.clients[client.name] = client
 
-        self._planner = SegmentPlanner(
-            list(self.clients.values()),
-            on_gap=on_gap,
-            live_handoff_margin=live_handoff_margin,
-        )
+        if active is not None:
+            if active not in self.sources:
+                raise ValueError(f"no source named {active!r}; the sources are {self.sources}")
+            self._active = self.clients[active]
+        elif self.sources:
+            self._active = self.clients[self.sources[0]]
 
-        logger.info(
-            "gateway initialised with %s client(s): %s",
-            len(self.clients),
-            ", ".join(self.clients),
-        )
+        if not self.clients:
+            logger.warning("no data clients were provided; the gateway has no source")
+        else:
+            logger.info(
+                "gateway over %s; active source: %s", ", ".join(self.clients), self.source
+            )
 
     @property
-    def enabled(self) -> bool:
-        """Whether any client is registered."""
-        return self._planner is not None
+    def sources(self) -> list[str]:
+        """The names of the clients that can be read, in the order registered."""
+        return [
+            name for name, client in self.clients.items() if client.capabilities & _CONSUME
+        ]
 
-    def supports(
-        self,
-        model: type[DataModel],
-        capability: Capability | None = None,
-    ) -> bool:
-        """Whether any client handles ``model``, optionally for ``capability``.
+    @property
+    def active(self) -> DataClient | None:
+        """The source ``consume`` and ``coverage`` read."""
+        return self._active
 
-        A synchronous question about what is *declared*, not what is held
-        right now -- ``coverage`` answers the latter. A player asks this to
-        know whether ``live`` is a control worth offering at all.
+    @property
+    def source(self) -> str | None:
+        """The active source's name."""
+        return None if self._active is None else self._active.name
+
+    @property
+    def live(self) -> bool:
+        """Whether the active source is a live feed (else it is a history)."""
+        return self._active is not None and Capability.LIVE_CONSUME in self._active.capabilities
+
+    def switch(self, name: str) -> DataClient:
+        """Make ``name`` the active source. An open stream is not touched: the
+        caller (the player) closes it and opens a new one.
+
+        Raises:
+            ValueError: When ``name`` is not a source.
         """
-        return any(client.supports(model, capability) for client in self.clients.values())
+        if name not in self.sources:
+            raise ValueError(f"no source named {name!r}; the sources are {self.sources}")
+        self._active = self.clients[name]
+        self.coverage_failure = None
+        logger.info("gateway switched to source %s", name)
+        return self._active
 
     def consume(
         self,
@@ -147,94 +168,54 @@ class DataGateway:
         mRID: MRIDFilter = None,
     ) -> DataStream:
         """
-        Open a stream over ``model`` between ``start`` and ``end``.
+        Open a stream over ``model`` from the active source.
 
         Args:
             model: Model class to stream.
-            start: Inclusive lower bound, or ``None`` to start at the earliest
-                data any client holds.
-            end: Exclusive upper bound. ``None`` tails live forever; a value in
-                the future tails until that instant is reached.
+            start: Inclusive lower bound.
+            end: Exclusive upper bound. ``None`` runs to the end of a history
+                source's data, and tails a live one for ever.
             mRID: Optional identifier filter.
 
         Returns:
             An async iterable stream. Nothing is queried until it is iterated.
 
         Raises:
-            RuntimeError: When the gateway has no clients.
+            RuntimeError: When the gateway has no source, or the active one
+                does not serve ``model``.
         """
-        if self._planner is None:
-            raise RuntimeError("DataGateway is disabled: no data clients registered")
-
-        return DataStream(self._planner, model, TimeRange(start, end), mRID, self.enrichers)
+        client = self._require_active(model)
+        return DataStream(client, model, TimeRange(start, end), mRID, self.enrichers)
 
     async def coverage(
         self,
         model: type[DataModel],
         mRID: MRIDFilter = None,
-        *,
-        capability: Capability | None = None,
     ) -> Coverage | None:
         """
-        The union of what every *consuming* client holds for ``model``, now.
+        What the active source holds for ``model``, asked afresh.
 
-        Earliest start, latest end (``None`` if any client is unbounded that
-        way), and ``live`` if any client can follow live data. This is what a
-        player reads to know where a loop restarts and what can be sought; a
-        stream is still planned segment by segment.
-
-        Args:
-            model: The message class.
-            mRID: Optional identifier filter.
-            capability: Restrict the union to clients declaring this
-                capability -- ``HISTORY_CONSUME`` gives the seekable range,
-                ``LIVE_CONSUME`` the tailable one. ``None`` takes every client
-                that can consume at all; a produce-only client never
-                contributes coverage, since nothing can be read from it.
+        A history's coverage is the seekable range and where a loop restarts;
+        a live feed's starts about now and is open. A source that fails to
+        answer is logged and recorded in ``coverage_failure``, and reads as
+        holding nothing.
 
         Returns:
-            The combined coverage, or ``None`` when no client holds anything.
+            The coverage, or ``None`` when the source holds nothing or failed.
         """
-        candidates = [
-            client
-            for client in self.clients.values()
-            if can_consume(client, model, capability)
-        ]
-        if not candidates:
+        client = self._active
+        if client is None or not client.supports(model):
             return None
-
-        results = await asyncio.gather(
-            *(client.coverage(model, mRID) for client in candidates),
-            return_exceptions=True,
-        )
-
-        found: list[Coverage] = []
-        for client, result in zip(candidates, results, strict=True):
-            if isinstance(result, BaseException):
-                logger.error(
-                    "client %s failed to report coverage for %s: %s",
-                    client.name,
-                    model.__name__,
-                    result,
-                )
-                self.coverage_failures[client.name] = f"{type(result).__name__}: {result}"
-                continue
-            self.coverage_failures.pop(client.name, None)
-            if result is not None:
-                found.append(result)
-
-        if not found:
+        try:
+            coverage = await client.coverage(model, mRID)
+        except Exception as error:
+            logger.error(
+                "source %s failed to report coverage for %s: %s", client.name, model.__name__, error
+            )
+            self.coverage_failure = f"{type(error).__name__}: {error}"
             return None
-
-        starts = [coverage.range.start for coverage in found]
-        ends = [coverage.range.end for coverage in found]
-        return Coverage(
-            range=TimeRange(
-                None if any(start is None for start in starts) else min(starts),
-                None if any(end is None for end in ends) else max(ends),
-            ),
-            live=any(coverage.live for coverage in found),
-        )
+        self.coverage_failure = None
+        return coverage
 
     async def produce(self, data: DataModel) -> None:
         """
@@ -248,8 +229,8 @@ class DataGateway:
             RuntimeError: When the gateway has no clients.
             ProduceError: When any target client failed; the others still wrote.
         """
-        if self._planner is None:
-            raise RuntimeError("DataGateway is disabled: no data clients registered")
+        if not self.clients:
+            raise RuntimeError("DataGateway has no data clients")
 
         if data.timestamp is None:
             data.timestamp = utcnow()
@@ -306,6 +287,13 @@ class DataGateway:
         traceback: TracebackType | None,
     ) -> None:
         await self.close()
+
+    def _require_active(self, model: type[DataModel]) -> DataClient:
+        if self._active is None:
+            raise RuntimeError("DataGateway has no source to read")
+        if not self._active.supports(model):
+            raise RuntimeError(f"source {self._active.name!r} does not serve {model.__name__}")
+        return self._active
 
     async def _lifecycle(self, action: str) -> None:
         """Run a lifecycle hook on all clients, logging individual failures."""

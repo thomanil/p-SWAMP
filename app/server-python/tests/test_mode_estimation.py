@@ -2,7 +2,8 @@
 # Copyright Contributors to the p-SWAMP Project.
 
 """The mode-estimation app: the copied N4SID as a module in each of its three
-execution modes, the same module as its own service, and the pipeline end to end."""
+execution modes, the same module hosted across the in-memory transport, and
+the pipeline end to end."""
 
 from __future__ import annotations
 
@@ -10,14 +11,15 @@ import asyncio
 import contextlib
 
 import pytest
+from app_test_support import fresh_transport
 
 from islanding_stream.n44_client import EPOCH, N44RecordingClient
-from mode_estimation import api
+from mode_estimation import api, family
 from mode_estimation.n4sid_module import ModeEstimationResult, N4SIDModule, WINDOW_SECONDS
-from pswamp_core.bus import InProcessBus, Overflow
 from pswamp_core.datagateway import DataGateway
+from pswamp_core.host import ModuleHost
 from pswamp_core.messages import ErrorEvent
-from pswamp_core.remote import ModuleHost, RemoteModule
+from pswamp_core.subscription import Overflow
 from pswamp_core.transport import InMemoryTransport
 
 
@@ -26,11 +28,26 @@ def recording():
     return N44RecordingClient(measurements=["f"])
 
 
-async def bound(module: N4SIDModule) -> InProcessBus:
-    bus = InProcessBus()
-    bus.bind(asyncio.get_running_loop())
-    await module.setup(DataGateway([]), bus)
-    return bus
+@pytest.fixture(autouse=True)
+def _own_transport(monkeypatch):
+    with fresh_transport(monkeypatch) as transport:
+        yield transport
+
+
+class Out:
+    """What the module publishes outside ``process`` (its skip reports)."""
+
+    def __init__(self) -> None:
+        self.published: list = []
+
+    def publish(self, message) -> None:
+        self.published.append(message)
+
+
+async def bound(module: N4SIDModule) -> Out:
+    out = Out()
+    await module.setup(DataGateway([]), out)
+    return out
 
 
 async def feed(module, recording, until_s, *, pace=0.0):
@@ -65,12 +82,11 @@ async def test_inline_identifies_the_poorly_damped_modes_after_the_trip(recordin
 
 async def test_threaded_skips_what_falls_due_while_busy_and_says_so(recording):
     module = N4SIDModule("thread")
-    bus = await bound(module)
-    with bus.subscribe(ErrorEvent, overflow=Overflow.GROW) as errors:
-        # Unpaced: the whole second half of the recording goes by while the
-        # first identification runs, so every later one falls due while busy.
-        results = await feed(module, recording, 70)
-        (report,) = [errors.get_nowait()]
+    out = await bound(module)
+    # Unpaced: the whole second half of the recording goes by while the first
+    # identification runs, so every later one falls due while busy.
+    results = await feed(module, recording, 70)
+    (report,) = [m for m in out.published if isinstance(m, ErrorEvent)]
     assert module.evaluations == 26 and module.skipped == 25 and results == []
     assert report is not None and report.source == "n4sid"
     assert report.message.startswith("the n4sid analysis cannot identify every 1 s of data")
@@ -113,61 +129,43 @@ def test_the_process_pool_runs_the_identification():
     assert done.compute_ms > 0 and done.compute_cpu_ms > 0 and done.em_idx.any()
 
 
-async def test_the_module_runs_as_its_own_service(recording):
+async def test_the_hosted_module_identifies_across_the_transport(recording):
     broker = InMemoryTransport()
-    remote = RemoteModule(N4SIDModule, broker, "7")
-    host = ModuleHost(lambda: N4SIDModule("inline"), broker)
+    host = ModuleHost(lambda: N4SIDModule("inline"), broker, app=family.APP)
     served = asyncio.create_task(host.serve())
-    bus = InProcessBus()
-    bus.bind(asyncio.get_running_loop())
-    await remote.setup(DataGateway([]), bus)
-    running = asyncio.create_task(remote.run(bus))
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0)
     try:
-        with bus.subscribe(ModeEstimationResult, overflow=Overflow.GROW) as results:
+        with broker.subscribe(ModeEstimationResult, app=family.APP, key="7", overflow=Overflow.GROW) as results:
             for index in range(int((WINDOW_SECONDS + 0.1) * 50)):
-                bus.publish(recording.frame(index))
+                await broker.publish(recording.frame(index), app=family.APP, key="7")
                 if index % 25 == 0:
-                    await asyncio.sleep(0.005)  # a queue of 64: let the worker side drain
-            result = await asyncio.wait_for(results.get(), 30)
+                    await asyncio.sleep(0.005)  # a queue of 64: let the host drain
+            (_, result) = await asyncio.wait_for(results.get(), 30)
     finally:
-        for task in (running, served):
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        served.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await served
     assert result.app.name == "n4sid" and result.result.status in ("OK", "Alert", "Emergency")
-    assert result.result.input_age_s is not None
+    assert result.result.input_age_s is not None  # every input crossed the transport
 
 
 async def test_the_pipeline_state_carries_player_throughput_and_no_result_yet(monkeypatch):
-    monkeypatch.delenv(api.DATA_CLIENTS_VARIABLE, raising=False)
-    monkeypatch.delenv(api.MODULE_TRANSPORT_VARIABLE, raising=False)
+    monkeypatch.delenv(family.DATA_CLIENTS_VARIABLE, raising=False)
     monkeypatch.setenv("MODES_N44_MEASUREMENTS", "f")
-    monkeypatch.setattr(api, "TRANSPORT", None)
-    pipeline = await api.build_pipeline("42")
-    assert isinstance(pipeline.estimator, N4SIDModule)
-    await pipeline.start()
-    try:
-        await asyncio.sleep(0.3)
-        meter = api.RateMeter(pipeline)
-        await asyncio.sleep(0.3)
-        meter.read()
-        message = api.state_message(pipeline, meter)
-    finally:
-        await pipeline.stop()
+    monkeypatch.setenv("MODE_ESTIMATION_EXECUTION", "inline")
+    async with api.lifespan(None):
+        pipeline = api.build_pipeline("42")
+        await pipeline.start()
+        try:
+            await asyncio.sleep(0.3)
+            meter = api.RateMeter(pipeline)
+            await asyncio.sleep(0.3)
+            message = api.state_message(pipeline, meter)
+        finally:
+            await pipeline.stop()
     assert message.result is None  # 45 s of data before the first identification
-    assert message.throughput.module_runs == "in-process" and message.throughput.frames_per_s > 20
+    assert message.throughput.frames_per_s > 20 and message.throughput.published > 20
     assert message.duration_s == pytest.approx(70.02, abs=0.05)
-
-
-def test_the_environment_sends_the_module_to_the_worker(monkeypatch):
-    monkeypatch.setenv(api.MODULE_TRANSPORT_VARIABLE, "mem:pswamp_core.transport:InMemoryTransport")
-    monkeypatch.setattr(api, "TRANSPORT", None)
-    try:
-        pipeline = asyncio.run(api.build_pipeline("9"))
-        assert isinstance(pipeline.estimator, RemoteModule) and pipeline.estimator.name == "n4sid"
-    finally:
-        api.TRANSPORT = None
 
 
 def test_execution_is_checked(monkeypatch):

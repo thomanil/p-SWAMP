@@ -11,13 +11,13 @@ call's streamed response (see its docstring in
 The page is named for what is queried on the other end: a time series, kept in
 whatever store the deployment runs, which this page never sees.
 
-One pipeline per client over the configured providers, and four commands,
-each a ``POST`` here that builds one typed command and dispatches it into the
-client's pipeline, which routes it by its class::
+One pipeline per client over the configured providers (``family.py``), and
+four commands, each a ``POST`` here that builds one typed command and
+dispatches it into the client's pipeline, which publishes it on its class's
+topic::
 
-    providers ── DataGateway ── Player ──▶ bus ──▶ this socket        (a) play a range
-                     ▲                      │
-                     └── RowCountModule ◀───┘                         (b) count a range
+    providers ── DataGateway ── Player ─────────────────────────▶ this socket  (a) play a range
+    providers ── DataGateway ── RowCountModule (hosted) ── topic …row.count.result ──▶ this socket  (b) count a range
     POST /playback/play-range ── ReplayCommand(start, end, play) ──▶ Player
     POST /playback/stop       ── PauseCommand                    ──▶ Player
     POST /refresh             ── RefreshCommand                  ──▶ Player
@@ -40,7 +40,7 @@ Remote Data Client over the stub service, with the ``REMOTE_DATA_*`` block besid
 **Failure reaches the page two ways.** A provider that fails mid-replay ends the
 stream paused with ``PlayerStatus.error`` set; a count that fails carries
 ``error`` in its result. Both are *state*, shown inline. The same failures are
-also ``ErrorEvent``s on the bus, which the layout's error tray shows on every
+also ``ErrorEvent``s, which the layout's error tray shows on every
 page (``src/errors/``). A replay the player cannot start -- no coverage, or a
 start outside it -- is refused with a 409 before anything is published; a count
 is not checked against the coverage, and counts what is there.
@@ -52,9 +52,7 @@ idle-evicted like the streamer's. server.py mounts this ``router`` under
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
-from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Literal
 
@@ -64,38 +62,28 @@ from shared import (
     COMMAND_RESPONSES,
     ClientId,
     CommandAck,
-    ErrorForwarderModule,
+    connected_pipeline,
     dispatch_command,
     get_logger,
-    read_client_id,
-    send_state,
-    wait_for_disconnect,
+    push_changes,
+    serve_family,
+    transport,
 )
 
-from pswamp_core.bus import InProcessBus, Overflow, Subscription
-from pswamp_core.datagateway import DataGateway, Player, gateway_from_env
 from pswamp_core.messages import (
     PauseCommand,
     PlayerStatus,
     PmuFrame,
     RefreshCommand,
     ReplayCommand,
-    StreamChanged,
 )
-from pswamp_core.pipeline import CapacityError, Pipeline, PipelineRegistry
+from pswamp_core.pipeline import Pipeline, PipelineRegistry
 from pswamp_core.util.time import ensure_utc
 
-from .row_count_module import CountRangeCommand, RowCountModule, RowCountResult
+from .family import FAMILY
+from .row_count_module import CountRangeCommand, RowCountResult
 
 logger = get_logger("time-series-explorer")
-
-SLUG = "time-series-explorer"
-
-#: The providers a deployment gets unless TIME_SERIES_EXPLORER_DATA_CLIENTS
-#: names others: the streamer's sample recording, history only. Compose and k8s
-#: replace it with the Remote Data Client over the stub service.
-DEFAULT_DATA_CLIENTS = "sample:pmu_test_streamer.sample_client:SampleRecordingClient"
-DATA_CLIENTS_VARIABLE = "TIME_SERIES_EXPLORER_DATA_CLIENTS"
 
 MAX_PIPELINES = 8
 IDLE_EVICT_SECONDS = 300.0
@@ -104,16 +92,10 @@ IDLE_EVICT_SECONDS = 300.0
 # --- the pipeline, per client -------------------------------------------------
 
 
-async def build_pipeline(client_id: str) -> Pipeline:
-    """One client's pipeline: the configured providers, a bus, a non-looping
-    player, the row-count module, and the error forwarder. Called by the
-    registry, never directly."""
-    gateway: DataGateway = gateway_from_env(DEFAULT_DATA_CLIENTS, variable=DATA_CLIENTS_VARIABLE)
-    bus = InProcessBus()
-    player = Player(gateway, bus, model=PmuFrame, loop=False)
-    modules = [RowCountModule(), ErrorForwarderModule(client_id, SLUG)]
-    logger.info("pipeline %s over %s", client_id, ", ".join(gateway.clients))
-    return Pipeline(client_id, gateway, bus, player, modules)
+def build_pipeline(client_id: str) -> Pipeline:
+    """One client's pipeline over the family, with a non-looping player.
+    Called by the registry, never directly."""
+    return Pipeline(client_id, FAMILY, transport(), loop=False)
 
 
 REGISTRY: PipelineRegistry[Pipeline] = PipelineRegistry(
@@ -123,14 +105,10 @@ REGISTRY: PipelineRegistry[Pipeline] = PipelineRegistry(
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Bind the registry to the loop for as long as the server is up; drain it
-    on shutdown. An idle server runs no pipeline at all."""
-    REGISTRY.bind(asyncio.get_running_loop())
-    try:
+    """The registry bound, errors forwarded, and (in one process) the row-count
+    module hosted, for as long as the server is up."""
+    async with serve_family(FAMILY, REGISTRY):
         yield
-    finally:
-        await REGISTRY.stop_all()
-        REGISTRY.bind(None)
 
 
 # --- the socket message ---------------------------------------------------------
@@ -160,12 +138,11 @@ class TimeSeriesExplorerState(BaseModel):
 
 
 def state_message(pipeline: Pipeline) -> TimeSeriesExplorerState:
-    latest = pipeline.latest
     frame = pipeline.player.last_frame
     return TimeSeriesExplorerState(
         player=pipeline.player.status(),
         frame=frame if isinstance(frame, PmuFrame) else None,
-        count=latest.get(RowCountResult) if latest else None,
+        count=pipeline.latest.get(RowCountResult),
     )
 
 
@@ -214,7 +191,8 @@ async def refresh(client_id: ClientId) -> CommandAck:
 async def count(client_id: ClientId, body: RangeBody) -> CommandAck:
     """Count the frames in ``[start, end)``. The batch case: the row-count module
     asks the provider for the range itself, unpaced, and publishes one result
-    carrying this command's request id."""
+    carrying this command's request id. Accepted as it is: the module checks
+    it where it runs."""
     command = CountRangeCommand(client_id=client_id, start=body.start, end=body.end)
     return dispatch_command(REGISTRY, command, logger)
 
@@ -222,75 +200,11 @@ async def count(client_id: ClientId, body: RangeBody) -> CommandAck:
 # --- websocket endpoint (downstream only) ---------------------------------------
 
 
-@contextlib.asynccontextmanager
-async def connected_pipeline(ws: WebSocket) -> AsyncIterator[Pipeline | None]:
-    """Accept one socket and hold its client's pipeline for as long as it lives.
-    Yields ``None`` when refused: 1008 before accepting for no usable client id,
-    1013 after accepting at capacity, 1011 when the pipeline failed to start.
-    (The streamer's handshake, pointed at this registry.)"""
-    client_id = read_client_id(ws)
-    if client_id is None:
-        await ws.close(code=1008)
-        yield None
-        return
-
-    await ws.accept()
-    try:
-        pipeline = await REGISTRY.acquire(client_id)
-    except CapacityError:
-        logger.warning("refused client %s: all %s pipelines in use", client_id, REGISTRY.max_pipelines)
-        await ws.close(code=1013)
-        yield None
-        return
-    except Exception:
-        logger.exception("failed to start pipeline for client %s", client_id)
-        await ws.close(code=1011)
-        yield None
-        return
-
-    try:
-        yield pipeline
-    finally:
-        REGISTRY.release(client_id)
-
-
-def subscribe_updates(pipeline: Pipeline) -> Subscription:
-    """What this page shows, off the client's bus. Opened *before* the first
-    send, so nothing published in between is lost."""
-    return pipeline.bus.subscribe(
-        PmuFrame, PlayerStatus, RowCountResult, StreamChanged,
-        overflow=Overflow.DROP_OLDEST, maxsize=64,
-    )
-
-
-async def serve_stream(
-    ws: WebSocket, pipeline: Pipeline, updates: Subscription
-) -> None:
-    """Push the state on every change until the client disconnects, coalescing
-    a backlog into one message built from the latest state."""
-
-    async def push() -> None:
-        async for _ in updates:
-            while updates.get_nowait() is not None:
-                pass
-            await send_state(ws, state_message(pipeline))
-
-    pusher = asyncio.create_task(push())
-    try:
-        await wait_for_disconnect(ws)
-    finally:
-        pusher.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await pusher
-
-
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    async with connected_pipeline(ws) as pipeline:
+    async with connected_pipeline(ws, REGISTRY) as pipeline:
         if pipeline is None:
             return
         logger.info("client %s: connected (%s live)", pipeline.key, len(REGISTRY.keys()))
-        with subscribe_updates(pipeline) as updates:
-            await send_state(ws, state_message(pipeline))
-            await serve_stream(ws, pipeline, updates)
+        await push_changes(ws, pipeline, lambda: state_message(pipeline))
         logger.info("client %s: disconnected", pipeline.key)

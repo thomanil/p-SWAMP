@@ -98,8 +98,8 @@ async def test_the_reference_survives_json_and_a_transport_hop():
     assert again.header.cimReferenceId == "ref-1"
     assert again.header.header_id == frame.header.header_id
     broker = InMemoryTransport()
-    with broker.subscribe(PmuFrame) as feed:
-        await broker.publish(frame, "k")
+    with broker.subscribe(PmuFrame, app="t") as feed:
+        await broker.publish(frame, app="t", key="k")
         ((_, received),) = await take(feed, 1)
     assert received.header.cimReferenceId == "ref-1"
 

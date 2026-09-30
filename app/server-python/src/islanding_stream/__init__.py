@@ -1,5 +1,5 @@
 """The Islanding stream app: p-SWAMP's islanding detector as a core module,
-under load -- in-process, or as its own service over a transport.
+under load -- hosted wherever the transport says: in the server, or a worker.
 
 Same public surface as every app package — src/server.py uses nothing else:
 

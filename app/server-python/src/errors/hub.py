@@ -3,9 +3,9 @@
 
 """``ErrorHub``: the process's one fan-out of error notices, per client id.
 
-The core bus is per pipeline, and a client may have several pipelines (one per
-app they have opened). The hub is what sits above them: any pipeline's
-forwarder publishes here with its client id and app slug, and every layout
+A client may have several pipelines (one per app they have opened), and each
+app has its own error topic. The hub is what sits above them: each app's
+forwarder publishes here with the client id and the app slug, and every layout
 socket that client has open receives it. It also keeps the last few notices
 per client, so a socket connecting *after* a failure (a page reload) still
 shows it -- in memory, bounded, nothing persisted.

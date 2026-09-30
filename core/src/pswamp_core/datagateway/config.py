@@ -9,7 +9,7 @@ is namespaced by the client's own name, so several clients of the same type
 coexist without colliding::
 
     ARCHIVE_DIRECTORY=/var/lib/pswamp/archive
-    ARCHIVE_PRIORITY=10
+    ARCHIVE_TIMEOUT=30
     BUS_BOOTSTRAP_SERVERS=kafka-1:9092,kafka-2:9092
     BUS_RETENTION_SECONDS=1200
 
@@ -23,7 +23,8 @@ Adapted from the draft, two additions:
   ``from_env`` per client) -- see :func:`read_setting`.
 * :func:`gateway_from_env` composes a whole gateway from ``PSWAMP_DATA_CLIENTS``,
   so a deployment names *which* clients to run, not only how to configure each.
-  The draft composed the gateway in code.
+  The draft composed the gateway in code. The first client named that can be
+  read is the gateway's initial source.
 """
 
 from __future__ import annotations
@@ -399,7 +400,7 @@ def gateway_from_env(
         default: The spec to use when the variable is unset; the repo's own
             sample provider, typically.
         variable: The environment variable to read.
-        **gateway_options: Passed to ``DataGateway`` (``on_gap``, ...).
+        **gateway_options: Passed to ``DataGateway`` (``active``, ``enrichers``).
 
     Raises:
         MissingSettingError: When neither the variable nor ``default`` names a

@@ -33,7 +33,8 @@ function num(value: number | null | undefined, digits = 0, unit = ''): string {
  * detector as a core module over the N44 line-trip recording, driven hard. It
  * shows what the module found (the separated station groups) and how the
  * pipeline is keeping up with it: what the player emits, how far the replay
- * really advances, what crossed the topic and what was dropped on each side.
+ * really advances, what crossed the topic and what was dropped on each side
+ * of it.
  * When either side falls behind, the core reports it on the layout's error
  * tray; this page only shows the readings.
  */
@@ -44,7 +45,6 @@ export function IslandingStreamPage() {
   const playing = player !== undefined && !player.paused
   const result = state?.result?.result
   const flow = state?.throughput
-  const worker = flow?.module_runs === 'worker'
   // The speed asked for, against the speed achieved: the gap is the first sign
   // of the server itself not keeping up (the player drops time rather than
   // bursting when it is late).
@@ -57,8 +57,8 @@ export function IslandingStreamPage() {
         <CardTitle className="text-lg">Islanding stream</CardTitle>
         <span className="text-gray-500">
           The N44 line-trip recording (44 stations, 700 channels, 50 Hz) replayed through the
-          core into p-SWAMP&apos;s islanding detector — {worker ? 'running as its own service, over Kafka' : 'running in the server process'}.
-          Raise the speed to load it; falling behind is reported on the error tray.
+          core into p-SWAMP&apos;s islanding detector, which reads it off its topic wherever it is
+          hosted. Raise the speed to load it; falling behind is reported on the error tray.
         </span>
         <CardAction className="self-center">
           {!connected ? (
@@ -125,24 +125,16 @@ export function IslandingStreamPage() {
               <span className="tabular-nums">{num(result?.frames_in)}</span>
 
               <span className="text-right text-muted-foreground">Input age</span>
-              <span className="tabular-nums">
-                {worker ? num(result?.input_age_s, 3, ' s') : 'in-process'}
-              </span>
+              <span className="tabular-nums">{num(result?.input_age_s, 3, ' s')}</span>
               <span className="text-right text-muted-foreground">Dropped</span>
               <span className="tabular-nums">
-                {worker
-                  ? `server ${flow?.queue_dropped ?? 0} · worker ${result?.input_dropped ?? 0}`
-                  : `${flow?.queue_dropped ?? 0}`}
+                {`server ${flow?.queue_dropped ?? 0} · module ${result?.input_dropped ?? 0}`}
               </span>
 
-              {worker && (
-                <>
-                  <span className="text-right text-muted-foreground">Published</span>
-                  <span className="tabular-nums">{flow?.published ?? 0}</span>
-                  <span className="text-right text-muted-foreground">Failed</span>
-                  <span className="tabular-nums">{flow?.publish_failed ?? 0}</span>
-                </>
-              )}
+              <span className="text-right text-muted-foreground">Published</span>
+              <span className="tabular-nums">{flow?.published ?? 0}</span>
+              <span className="text-right text-muted-foreground">Failed</span>
+              <span className="tabular-nums">{flow?.publish_failed ?? 0}</span>
             </section>
           </>
         )}

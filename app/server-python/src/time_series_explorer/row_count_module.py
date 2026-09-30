@@ -4,7 +4,7 @@
 """The row-count module: a *batch* module, driven by a command rather than by frames.
 
 The other example modules (the streamer's stats, frequency peek) read every
-``PmuFrame`` the player paces onto the bus. This one reads nothing off the bus
+``PmuFrame`` the player paces onto their topic. This one reads no input
 (``input_model = None``): it answers a ``CountRangeCommand`` -- defined here,
 beside the module, as its result is -- by asking the *gateway* for that range
 itself, unpaced, and counting what comes back. That is the "query a chunk"
@@ -13,14 +13,15 @@ message.
 
 It is the worked example of a module that takes commands, and all of it is
 declaration: ``commands`` names the class, ``handle`` returns the body, and the
-pipeline routes the command here by its class and publishes the answer in a
+command reaches it on its topic and the answer goes back in a
 ``RowCountResult`` stamped now and carrying the command's ``request_id``
-(``Module.command_inbox``). ``reads_gateway`` says it reads the gateway
-itself, which is why it cannot run in a worker.
+(``Module.command_inbox``). The gateway it reads is the one its host built
+from the same configuration as the pipeline's, so it counts the same provider
+whether it runs in the server or in a worker.
 
 **Failure is a result and an error event.** A provider that fails mid-count
 produces a result with ``error`` set (the page shows it beside the count) and
-an ``ErrorEvent`` on the bus (the layout shows it wherever the person is),
+an ``ErrorEvent`` (the layout shows it wherever the person is),
 both carrying the ``request_id``. The module itself stays up.
 
 The count is the whole analysis, on purpose: what is being demonstrated is a
@@ -37,11 +38,11 @@ from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from pswamp_core.bus import Bus
 from pswamp_core.datagateway import DataGateway
 from pswamp_core.log import get_logger
 from pswamp_core.messages import AppStatus, Command, ErrorEvent, PmuFrame, ResultEnvelope
 from pswamp_core.modules import Module
+from pswamp_core.subscription import Sink
 from pswamp_core.util.time import ensure_utc, utcnow
 
 __all__ = ["CountRangeCommand", "RowCount", "RowCountModule", "RowCountResult"]
@@ -88,17 +89,16 @@ class RowCountModule(Module):
     input_model = None
     output_model = RowCountResult
     commands: ClassVar[tuple[type[Command], ...]] = (CountRangeCommand,)
-    reads_gateway = True
 
     def __init__(self) -> None:
         super().__init__()
         self._gateway: DataGateway | None = None
-        self._bus: Bus | None = None
+        self._out: Sink | None = None
 
-    async def setup(self, gateway: DataGateway, bus: Bus) -> None:
-        """Keep the gateway, which the count reads, and the bus, for its errors."""
+    async def setup(self, gateway: DataGateway, out: Sink) -> None:
+        """Keep the gateway, which the count reads, and ``out``, for its errors."""
         self._gateway = gateway
-        self._bus = bus
+        self._out = out
 
     async def handle(self, command: CountRangeCommand) -> RowCount:
         result = await self.count(command.start, command.end)
@@ -110,8 +110,8 @@ class RowCountModule(Module):
             )
         else:
             logger.error("request %s: count failed: %s", command.request_id, result.error)
-            if self._bus is not None:
-                self._bus.publish(
+            if self._out is not None:
+                self._out.publish(
                     ErrorEvent(
                         timestamp=utcnow(),
                         source=self.name,
@@ -137,9 +137,9 @@ class RowCountModule(Module):
         n = 0
         error: str | None = None
         try:
-            # Coverage first: the gateway skips a provider whose coverage call
-            # fails (logging the cause), and a range over no provider would
-            # otherwise count to zero with nothing to say why.
+            # Coverage first: a provider whose coverage call fails reads as
+            # holding nothing (the gateway logs the cause), and a range over it
+            # would otherwise count to zero with nothing to say why.
             if await self._gateway.coverage(PmuFrame) is None:
                 raise RuntimeError("the provider reports no coverage; is it reachable?")
             async for _frame in self._gateway.consume(PmuFrame, start, end):

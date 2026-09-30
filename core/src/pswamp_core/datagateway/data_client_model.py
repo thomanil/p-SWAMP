@@ -21,9 +21,14 @@ one without ``LIVE_CONSUME`` is never asked to tail. This replaces the desktop
 package's nine-method duck type, four of whose ``seek`` implementations were
 ``pass``.
 
+A client is **one source**: it declares ``HISTORY_CONSUME`` (a recording, a
+store: seekable, replayed) or ``LIVE_CONSUME`` (a feed, tailed from now), never
+both -- the gateway refuses a client declaring both -- plus ``PRODUCE`` if it can
+store. Which source a stream reads is chosen explicitly, never by this contract.
+
 Adapted from the draft: ``from_env`` is hoisted here from the individual clients
-and driven by the ``kind`` of each declared ``EnvSetting``; ``can_consume`` is the
-one question the gateway and the planner both ask of a client's declaration.
+and driven by the ``kind`` of each declared ``EnvSetting``; ``priority`` went with
+the draft's routing across clients.
 """
 
 from __future__ import annotations
@@ -44,7 +49,6 @@ __all__ = [
     "DataClient",
     "MRIDFilter",
     "ModelSelector",
-    "can_consume",
     "normalise_models",
     "normalise_mrid_filter",
 ]
@@ -110,8 +114,6 @@ class DataClient(ABC):
         capabilities: Operations the client supports.
         supported_models: Model classes the client can store or stream. A parent
             class stands for its whole subclass family.
-        priority: Preference when several clients cover the same instant.
-            Higher wins.
 
     Class Attributes:
         env_settings: Environment variables ``from_env`` reads, each parsed per
@@ -122,7 +124,6 @@ class DataClient(ABC):
     name: str
     capabilities: Capability
     supported_models: set[type[DataModel]]
-    priority: int = 0
 
     env_settings: ClassVar[tuple[EnvSetting, ...]] = ()
 
@@ -198,8 +199,9 @@ class DataClient(ABC):
         """
         Time window this client currently holds for ``model``.
 
-        Implementations must recompute this on every call rather than caching,
-        because the gateway uses it to decide when to hand over between sources.
+        Implementations must recompute this on every call rather than caching:
+        most backends hold a now-relative window, and the player re-reads it on
+        every stream it opens (where a replay starts, loops and may seek).
 
         Args:
             model: Model class being queried.
@@ -245,20 +247,3 @@ class DataClient(ABC):
             data: Payload to store. Its ``timestamp`` is already set.
         """
 
-
-def can_consume(
-    client: DataClient, model: type[DataModel], capability: Capability | None = None
-) -> bool:
-    """
-    Whether ``client`` can be *read* for ``model``.
-
-    With ``capability`` given, exactly that one; with ``None``, either consume
-    capability. A ``PRODUCE``-only client is never a source. The gateway's
-    ``coverage`` and the planner's offers both go through this, so the two can
-    never disagree about which clients count as sources.
-    """
-    if capability is not None:
-        return client.supports(model, capability)
-    return client.supports(model, Capability.HISTORY_CONSUME) or client.supports(
-        model, Capability.LIVE_CONSUME
-    )

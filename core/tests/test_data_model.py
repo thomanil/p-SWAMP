@@ -14,7 +14,6 @@ from support import Measurement, NumberResult, at
 
 from pswamp_core.messages import (
     DataModel,
-    GoLiveCommand,
     PlayCommand,
     PlayerStatus,
     PmuFrame,
@@ -22,6 +21,7 @@ from pswamp_core.messages import (
     ReplayCommand,
     SeekCommand,
     SpeedCommand,
+    SwitchSourceCommand,
 )
 from pswamp_core.messages.data_model import topic_from_name
 from pswamp_core.messages.pmu import header_id_of
@@ -143,9 +143,9 @@ def test_header_column_lookup():
 def test_command_gets_a_request_id_and_a_name_from_its_class():
     a, b = PlayCommand(), PlayCommand()
     assert a.request_id and a.request_id != b.request_id
-    assert a.target is None
     assert PlayCommand.name == a.name == "play"
-    assert GoLiveCommand.name == "go.live" and GoLiveCommand.topic == "go.live.command"
+    assert SwitchSourceCommand.name == "switch.source"
+    assert SwitchSourceCommand.topic == "switch.source.command"
 
 
 def test_a_command_s_arguments_are_its_validated_fields():

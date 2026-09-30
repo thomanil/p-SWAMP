@@ -28,7 +28,6 @@ speaks: ``RemoteDataQuery`` (a range query going up over REST) and
 
 from .commands import (
     Command,
-    GoLiveCommand,
     PauseCommand,
     PlayCommand,
     PlayerCommand,
@@ -37,8 +36,9 @@ from .commands import (
     SeekCommand,
     SpeedCommand,
     StepCommand,
+    SwitchSourceCommand,
 )
-from .control import PlayerStatus, StreamChanged
+from .control import PipelineClosed, PlayerStatus, StreamChanged
 from .data_model import DataModel, sent_at, stamp_sent_at, topic_from_name
 from .errors import ErrorEvent
 from .pmu import PmuFrame, PmuHeader
@@ -52,10 +52,10 @@ __all__ = [
     "Command",
     "DataModel",
     "ErrorEvent",
-    "GoLiveCommand",
     "PauseCommand",
     "PlayCommand",
     "PlayerCommand",
+    "PipelineClosed",
     "PlayerStatus",
     "PmuFrame",
     "PmuHeader",
@@ -67,6 +67,7 @@ __all__ = [
     "SeekCommand",
     "SpeedCommand",
     "StepCommand",
+    "SwitchSourceCommand",
     "StreamChanged",
     "sent_at",
     "stamp_sent_at",

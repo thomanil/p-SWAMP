@@ -35,6 +35,7 @@ import api_contract
 import pmu_test_streamer
 import pswamp_web
 import reference_subapp
+import shared
 import frequency_peek
 import time_series_explorer
 import errors
@@ -54,12 +55,15 @@ from api_contract import AppEntry
 # before any app package handles a request. Entered before everything in APPS and
 # exited after it, so a websocket handler can assume its dependencies are up.
 #
-# pswamp_web is the one: it owns the registry of per-client PMU pipelines that
-# its page packages all draw theirs from. Its lifespan starts no pipeline — those
-# are built on a client's first connect and evicted when idle — it only binds the
+# pswamp_web owns the registry of per-client PMU pipelines that its page
+# packages all draw theirs from. Its lifespan starts no pipeline — those are
+# built on a client's first connect and evicted when idle — it only binds the
 # registry to this event loop and drains it on shutdown.
+#
+# shared owns the process's transport (PSWAMP_TRANSPORT), which every app over
+# a core pipeline publishes on; exited last, it closes it once they are done.
 
-SERVICES = [pswamp_web]
+SERVICES = [shared, pswamp_web]
 
 # --- the app registry -------------------------------------------------------
 #
@@ -142,12 +146,12 @@ APPS = [
     AppEntry(
         "islanding-stream",
         islanding_stream,
-        "p-SWAMP's islanding detector as a module over the N44 recording, under load; in-process or as a worker.",
+        "p-SWAMP's islanding detector as a module over the N44 recording, under load.",
     ),
     AppEntry(
         "mode-estimation",
         mode_estimation,
-        "p-SWAMP's N4SID mode estimation as a module over the N44 recording, under load; in-process or as a worker.",
+        "p-SWAMP's N4SID mode estimation as a module over the N44 recording, under load.",
     ),
 ]
 

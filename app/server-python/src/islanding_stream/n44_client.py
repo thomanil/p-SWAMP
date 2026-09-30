@@ -88,7 +88,6 @@ class N44RecordingClient(DataClient):
     Args:
         name: The client's name in the gateway; also its environment prefix.
         measurements: Keep only these measurement columns (``["f"]``); all by default.
-        priority: Preference against other clients covering the same instant.
     """
 
     env_settings = (
@@ -97,22 +96,18 @@ class N44RecordingClient(DataClient):
             "Comma-separated measurement names to keep (f, Df, v_Magnitude, ...); all 700 columns if unset",
             kind="list",
         ),
-        EnvSetting("PRIORITY", "Preference against other clients", default="0", kind="int"),
     )
 
     def __init__(
         self,
         name: str = "n44",
         measurements: list[str] | tuple[str, ...] | str | None = None,
-        *,
-        priority: int = 0,
     ) -> None:
         if isinstance(measurements, str):
             measurements = [m.strip() for m in measurements.split(",") if m.strip()]
         self.name = name
         self.capabilities = Capability.HISTORY_CONSUME
         self.supported_models = {PmuFrame}
-        self.priority = priority
         recording = _recording()
         self._columns, self.header = _selection(tuple(measurements) if measurements else None)
         self._data = recording.data

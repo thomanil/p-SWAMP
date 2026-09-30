@@ -14,8 +14,8 @@ export type RowCountResult = Wire['RowCountResult']
 
 /**
  * The Timeseries Db Explorer: state arrives on the socket, and three commands go
- * up as POSTs to /api/time-series-explorer, each becoming a `Command` on this
- * client's bus — two for the player (play a range, stop) and one for the
+ * up as POSTs to /api/time-series-explorer, each becoming a `Command` on its
+ * topic, keyed by this client — two for the player (play a range, stop) and one for the
  * row-count module (count a range). The reply is only an acknowledgement; the
  * effect comes back as the next state message.
  *

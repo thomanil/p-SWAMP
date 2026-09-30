@@ -60,7 +60,6 @@ class LiveSyntheticClient(DataClient):
     Args:
         name: The client's name in the gateway; also its environment prefix.
         path: The recording whose rows are cycled. ``{NAME}_PATH`` from the env.
-        priority: Preference against other clients covering the same instant.
 
     The ticker starts in ``open()`` -- which the gateway calls from
     ``Pipeline.start`` -- and stops in ``close()``. Nothing runs before a
@@ -74,14 +73,12 @@ class LiveSyntheticClient(DataClient):
             default=str(DEFAULT_PATH),
             kind="path",
         ),
-        EnvSetting("PRIORITY", "Preference against other clients", default="0", kind="int"),
     )
 
-    def __init__(self, name: str = "live", path: Path | str = DEFAULT_PATH, *, priority: int = 0):
+    def __init__(self, name: str = "live", path: Path | str = DEFAULT_PATH):
         self.name = name
         self.capabilities = Capability.LIVE_CONSUME
         self.supported_models = {PmuFrame}
-        self.priority = priority
         self.recording = load_sample(Path(path))
         self._tails: list[asyncio.Queue[PmuFrame]] = []
         self._task: asyncio.Task | None = None

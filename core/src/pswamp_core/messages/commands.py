@@ -15,9 +15,8 @@ The player's commands are defined here, because the player is core. A module's
 own commands live beside the module, exactly as its ``ResultEnvelope`` subclass
 does (the time series explorer's ``CountRangeCommand`` is the worked example).
 
-``target`` is optional and rarely needed: only when two receivers in one
-pipeline handle the same class does it name which (a receiver's ``name``).
-``request_id`` is generated when the command is built, logged with it, and
+A command class has exactly one receiver in a pipeline, so the class alone is
+the address. ``request_id`` is generated when the command is built, logged with it, and
 carried on whatever is produced in answer -- a module's result, an
 ``ErrorEvent`` when the command was refused.
 
@@ -39,7 +38,6 @@ from .data_model import DataModel, topic_from_name
 
 __all__ = [
     "Command",
-    "GoLiveCommand",
     "PauseCommand",
     "PlayCommand",
     "PlayerCommand",
@@ -48,6 +46,7 @@ __all__ = [
     "SeekCommand",
     "SpeedCommand",
     "StepCommand",
+    "SwitchSourceCommand",
 ]
 
 
@@ -61,7 +60,7 @@ def _utc_or_none(value: datetime | None) -> datetime | None:
 
 class _CommandName:
     """``Command.name``: the class name minus ``Command``, dotted like a topic --
-    ``SeekCommand`` is ``seek``, ``GoLiveCommand`` is ``go.live``. What logs
+    ``SeekCommand`` is ``seek``, ``SwitchSourceCommand`` is ``switch.source``. What logs
     and the POST's acknowledgement call the command."""
 
     def __get__(self, instance: object, owner: type[Command]) -> str:
@@ -74,13 +73,6 @@ class Command(DataModel):
     version: Literal["v1"] = "v1"
     request_id: str = Field(default_factory=_new_request_id)
     client_id: str | None = Field(default=None, description="The issuing client, at the edge.")
-    target: str | None = Field(
-        default=None,
-        description=(
-            "The receiver's name, only when two receivers in one pipeline handle "
-            "this class; null routes by class alone."
-        ),
-    )
 
     #: The command's short name (``seek``, ``count.range``); derived, not a field.
     name: ClassVar[_CommandName] = _CommandName()
@@ -133,12 +125,19 @@ class SpeedCommand(PlayerCommand):
     speed: float = Field(gt=0, description="Replay speed multiplier; 1 is real time.")
 
 
-class GoLiveCommand(PlayerCommand):
-    """Switch to the live stream."""
+class SwitchSourceCommand(PlayerCommand):
+    """Make another of the gateway's sources the one the player reads.
+
+    A history source lands paused at its start; a live one plays from now. The
+    field is ``source`` because ``name`` is every command's own (class-derived)
+    name.
+    """
+
+    source: str = Field(description="The source to read: a data client's name in the gateway.")
 
 
 class ReplayCommand(PlayerCommand):
-    """Switch to (or restart) the replay, optionally bounded to a range.
+    """Restart the replay of the active history source, optionally bounded to a range.
 
     With neither ``start`` nor ``offset_s`` it starts at the beginning of the
     history; with ``end`` or ``end_offset_s`` it ends paused there instead of

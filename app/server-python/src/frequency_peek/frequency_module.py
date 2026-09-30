@@ -5,8 +5,8 @@
 
 The smallest module that *reduces* a frame -- it keeps one measurement of the
 seven hundred-odd values in a frame and drops the rest. It reads ``PmuFrame``
-off its pipeline's bus and publishes ``FrequencyResult`` back onto it; the page
-subscribes to that, never to this module. Which columns carry ``f`` it reads
+off its app's frame topic and publishes ``FrequencyResult`` back; the page
+reads that, never this module. Which columns carry ``f`` it reads
 off the frame's own header, re-deriving them when the layout changes; nothing
 else here knows the layout.
 

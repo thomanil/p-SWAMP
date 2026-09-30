@@ -25,7 +25,6 @@ from .data_client_model import (
 )
 from .data_gateway import DataGateway, ProduceError
 from .enrich import CimReferenceEnricher, Enricher
-from .planner import DataGapError, GapPolicy, Segment, SegmentPlanner
 from .player import Player
 from .stream import DataStream
 from .time_range import Coverage, TimeRange
@@ -37,18 +36,14 @@ __all__ = [
     "Capability",
     "Coverage",
     "DataClient",
-    "DataGapError",
     "DataGateway",
     "DataStream",
     "EnvSetting",
-    "GapPolicy",
     "MRIDFilter",
     "MissingSettingError",
     "ModelSelector",
     "Player",
     "ProduceError",
-    "Segment",
-    "SegmentPlanner",
     "TimeRange",
     "env_key",
     "gateway_from_env",

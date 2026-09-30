@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""PipelineRegistry's resource bounds, plus one real Pipeline end to end.
+"""PipelineRegistry's resource bounds. (A real pipeline end to end is in ``test_pipeline.py``.)
 
 The registry cases are ``app/server-python/tests/test_hub_registry.py``
 re-targeted at the core registry: a concurrent burst of distinct keys never
@@ -14,14 +14,8 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from support import HISTORY, Measurement, NumberResult, at, measurements, take
 
-from pswamp_core.bus import InProcessBus, Overflow
-from pswamp_core.datagateway import DataGateway, Player
-from pswamp_core.datagateway.clients import InMemoryClient
-from pswamp_core.messages import PlayerStatus
-from pswamp_core.pipeline import CapacityError, Pipeline, PipelineRegistry
-from test_module import Doubler
+from pswamp_core.pipeline import CapacityError, PipelineRegistry
 
 
 class FakePipeline:
@@ -167,25 +161,3 @@ async def test_async_factory_and_session(make_registry):
         assert reg.keys() == ["c9"]
         assert reg.watchers("c9") == 1
     assert reg.watchers("c9") == 0
-
-
-# --- a real pipeline, end to end ------------------------------------------------
-
-
-async def test_pipeline_runs_player_and_module_on_one_bus():
-    client = InMemoryClient("memory", Measurement, measurements(4), capabilities=HISTORY)
-    gateway = DataGateway([client])
-    bus = InProcessBus()
-    player = Player(gateway, bus, model=Measurement, paced=False, autoplay=True)
-    pipeline = Pipeline("k", gateway, bus, player, [Doubler()])
-
-    with bus.subscribe(NumberResult, overflow=Overflow.GROW) as results:
-        await pipeline.start()
-        got = await take(results, 4)
-    assert [r.result.value for r in got] == [0.0, 2.0, 4.0, 6.0]
-    assert pipeline.latest.get(NumberResult).result.value == 6.0
-    assert pipeline.latest.get(Measurement).mRID == "m3"
-    assert isinstance(pipeline.latest.get(PlayerStatus), PlayerStatus)
-    assert pipeline.latest.get(Measurement).timestamp == at(3)
-    await pipeline.stop()
-    await pipeline.stop()  # idempotent

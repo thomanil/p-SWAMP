@@ -29,25 +29,23 @@ def test_env_key_normalises_the_client_name():
 
 def test_client_from_env(monkeypatch):
     monkeypatch.setenv("ARCHIVE_LABEL", "cold store")
-    monkeypatch.setenv("ARCHIVE_PRIORITY", "10")
     monkeypatch.setenv("ARCHIVE_CAPABILITIES", "history_consume,produce")
     monkeypatch.setenv("ARCHIVE_COUNT", "5")
 
     client = EnvTestClient.from_env("archive")
 
     assert client.label == "cold store"
-    assert client.priority == 10
     assert client.capabilities == Capability.HISTORY_CONSUME | Capability.PRODUCE
     assert len(client.records) == 5
 
 
 def test_overrides_win_over_the_environment(monkeypatch):
     monkeypatch.setenv("ARCHIVE_LABEL", "x")
-    monkeypatch.setenv("ARCHIVE_PRIORITY", "10")
+    monkeypatch.setenv("ARCHIVE_COUNT", "5")
 
-    client = EnvTestClient.from_env("archive", priority=99)
+    client = EnvTestClient.from_env("archive", count=2)
 
-    assert client.priority == 99
+    assert len(client.records) == 2
 
 
 def test_missing_required_setting_is_reported(monkeypatch):
@@ -59,9 +57,9 @@ def test_missing_required_setting_is_reported(monkeypatch):
 
 def test_malformed_setting_is_reported(monkeypatch):
     monkeypatch.setenv("ARCHIVE_LABEL", "x")
-    monkeypatch.setenv("ARCHIVE_PRIORITY", "high")
+    monkeypatch.setenv("ARCHIVE_COUNT", "many")
 
-    with pytest.raises(MissingSettingError, match="ARCHIVE_PRIORITY"):
+    with pytest.raises(MissingSettingError, match="ARCHIVE_COUNT"):
         EnvTestClient.from_env("archive")
 
 
@@ -116,12 +114,12 @@ async def test_gateway_from_env_builds_the_named_clients(monkeypatch):
     monkeypatch.setenv("PSWAMP_DATA_CLIENTS", "one:support:EnvTestClient,two:support:EnvTestClient")
     monkeypatch.setenv("ONE_LABEL", "first")
     monkeypatch.setenv("TWO_LABEL", "second")
-    monkeypatch.setenv("TWO_PRIORITY", "5")
+    monkeypatch.setenv("TWO_COUNT", "5")
 
     gateway = gateway_from_env()
 
-    assert set(gateway.clients) == {"one", "two"}
-    assert gateway.clients["two"].priority == 5
+    assert gateway.sources == ["one", "two"] and gateway.source == "one"
+    assert len(gateway.clients["two"].records) == 5
     assert [m.mRID async for m in gateway.consume(Measurement)] == ["m0", "m1", "m2"]
 
 

@@ -55,7 +55,6 @@ class InMemoryClient(DataClient):
         name: Unique client name.
         supported_models: Model classes this client serves.
         records: Initial stored payloads. Sorted by timestamp on ingest.
-        priority: Preference against other clients covering the same instant.
         capabilities: Operations to expose. Add
             :attr:`~pswamp_core.datagateway.data_client_model.Capability.LIVE_CONSUME`
             to make the client tail published payloads.
@@ -69,13 +68,11 @@ class InMemoryClient(DataClient):
         supported_models: ModelSelector,
         records: Sequence[DataModel] = (),
         *,
-        priority: int = 0,
         capabilities: Capability = Capability.HISTORY_CONSUME | Capability.PRODUCE,
         coverage_fn: Callable[[], Coverage | None] | None = None,
     ):
         self.name = name
         self.supported_models = normalise_models(supported_models)
-        self.priority = priority
         self.capabilities = capabilities
 
         self.records: list[DataModel] = sorted(records, key=_timestamp_key)

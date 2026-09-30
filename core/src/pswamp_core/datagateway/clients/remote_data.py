@@ -81,7 +81,6 @@ class RemoteDataClient(DataClient):
 
         REMOTE_DATA_URL       http://remote-data-stub:8100   (required) base URL of the service
         REMOTE_DATA_TIMEOUT   30                             seconds to wait for a response to start, and for each next line
-        REMOTE_DATA_PRIORITY  0                              preference against other clients
 
     ``show_config("remote_data")`` prints the same table.
 
@@ -171,7 +170,6 @@ class RemoteDataClient(DataClient):
             default="30",
             kind="seconds",
         ),
-        EnvSetting("PRIORITY", "Preference against other clients", default="0", kind="int"),
     )
 
     def __init__(
@@ -180,7 +178,6 @@ class RemoteDataClient(DataClient):
         url: str | None = None,
         *,
         timeout: timedelta = timedelta(seconds=30),
-        priority: int = 0,
         http_client: Any | None = None,
     ) -> None:
         if not url and http_client is None:
@@ -188,7 +185,6 @@ class RemoteDataClient(DataClient):
         self.name = name
         self.capabilities = Capability.HISTORY_CONSUME
         self.supported_models = {PmuFrame}
-        self.priority = priority
         self.url = (url or "").rstrip("/")
         self.timeout = timeout
         self._by_topic: dict[str, type[DataModel]] = {m.topic: m for m in self.supported_models}

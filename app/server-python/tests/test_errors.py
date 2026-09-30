@@ -2,7 +2,7 @@
 # Copyright Contributors to the p-SWAMP Project.
 
 """The error topic's edge: the hub keeps and fans out per client, the forwarder
-carries a pipeline's ErrorEvents into it with the app's slug, and the socket
+carries an app's error topic into it with the app's slug, and the socket
 replays the recent ones then pushes new ones."""
 
 from __future__ import annotations
@@ -12,13 +12,13 @@ import json
 
 from fastapi import WebSocketDisconnect
 
-from errors import HUB, ErrorForwarderModule, ErrorHub
+from errors import HUB, ErrorHub, forward_errors
 from errors.api import ws_endpoint
-from pswamp_core.bus import InProcessBus
-from pswamp_core.datagateway import Capability, DataGateway, Player
+from pswamp_core.datagateway import Capability, DataGateway
 from pswamp_core.datagateway.clients import InMemoryClient
 from pswamp_core.messages import ErrorEvent, PmuFrame, PmuHeader
-from pswamp_core.pipeline import Pipeline
+from pswamp_core.pipeline import Pipeline, PipelineFamily
+from pswamp_core.transport import InMemoryTransport
 from pswamp_core.util.time import utcnow
 
 
@@ -51,14 +51,17 @@ class Dies(InMemoryClient):
             yield record
 
 
-async def test_forwarder_in_a_pipeline_tags_the_notice_with_the_app():
+async def test_the_forwarder_carries_a_pipelines_errors_to_its_client_tagged_with_the_app():
     hub = ErrorHub()
     header = PmuHeader(station=["x"], channel=["f"], measurement=["f"], units=["Hz"], data_rate=1.0)
     frame = PmuFrame(timestamp=utcnow(), mRID="d", header=header, values=[50.0])
     client = Dies("dies", [PmuFrame], [frame], capabilities=Capability.HISTORY_CONSUME)
-    bus = InProcessBus()
-    forwarder = ErrorForwarderModule("client-9", "some-app", hub)
-    pipeline = Pipeline("client-9", DataGateway([client]), bus, Player(DataGateway([client]), bus, model=PmuFrame, paced=False), [forwarder])
+    broker = InMemoryTransport()
+    forwarding = asyncio.create_task(forward_errors(broker, "some-app", hub))
+    await asyncio.sleep(0)
+    pipeline = Pipeline(
+        "client-9", PipelineFamily("some-app", lambda: DataGateway([client])), broker, paced=False
+    )
     await pipeline.start()
     try:
         pipeline.player.resume()
@@ -68,11 +71,12 @@ async def test_forwarder_in_a_pipeline_tags_the_notice_with_the_app():
             await asyncio.sleep(0.02)
     finally:
         await pipeline.stop()
+        forwarding.cancel()
     (notice,) = hub.recent("client-9")
     assert notice.app == "some-app" and notice.source == "player"
     assert notice.detail == "RuntimeError: no such table"
-    assert forwarder.forwarded == 1
     assert pipeline.player.status().error == notice.detail
+    assert hub.recent("someone-else") == []
 
 
 class FakeWebSocket:

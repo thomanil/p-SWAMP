@@ -249,27 +249,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/pmu-test-streamer/playback/live": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Live
-         * @description Switch this client to the live feed: frames from now, as they arrive, no
-         *     transport controls. 409 when no live source is configured.
-         */
-        post: operations["pmu_test_streamer_live"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/pmu-test-streamer/playback/play": {
         parameters: {
             query?: never;
@@ -290,27 +269,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/pmu-test-streamer/playback/replay": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Replay
-         * @description Switch this client back to the recording, paused at its start. 409 when
-         *     no history source is configured.
-         */
-        post: operations["pmu_test_streamer_replay"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/pmu-test-streamer/playback/seek": {
         parameters: {
             query?: never;
@@ -325,6 +283,28 @@ export interface paths {
          * @description Jump the replay to an offset into the recording. 409 while live.
          */
         post: operations["pmu_test_streamer_seek"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/pmu-test-streamer/playback/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Source
+         * @description Switch this client to another source: a recording lands paused at its
+         *     start, a live feed plays from now with no transport controls. 409 when no
+         *     source has that name.
+         */
+        post: operations["pmu_test_streamer_source"];
         delete?: never;
         options?: never;
         head?: never;
@@ -424,7 +404,8 @@ export interface paths {
          * Count
          * @description Count the frames in ``[start, end)``. The batch case: the row-count module
          *     asks the provider for the range itself, unpaced, and publishes one result
-         *     carrying this command's request id.
+         *     carrying this command's request id. Accepted as it is: the module checks
+         *     it where it runs.
          */
         post: operations["time_series_explorer_count"];
         delete?: never;
@@ -1173,7 +1154,7 @@ export interface components {
             frames_in: number;
             /**
              * Input Age S
-             * @description How long the last input had been in flight when it was read; null in-process.
+             * @description How long the last input had been in flight when it was read.
              */
             input_age_s: number | null;
             /**
@@ -1357,7 +1338,7 @@ export interface components {
         };
         /**
          * ModeEstimationThroughput
-         * @description How the pipeline is coping, from this server's side of the hop.
+         * @description How the pipeline is coping, from this server's side of the transport.
          */
         ModeEstimationThroughput: {
             /**
@@ -1371,24 +1352,18 @@ export interface components {
              */
             frames_per_s: number;
             /**
-             * Module Runs
-             * @description Where the N4SID module runs.
-             * @enum {string}
-             */
-            module_runs: "in-process" | "worker";
-            /**
              * Publish Failed
-             * @description Frames the transport refused to publish (broker down, timeout); null in-process.
+             * @description Messages the transport refused (broker down, timeout).
              */
-            publish_failed: number | null;
+            publish_failed: number;
             /**
              * Published
-             * @description Frames published to the module's topic; null in-process.
+             * @description Messages published to the module's topics.
              */
-            published: number | null;
+            published: number;
             /**
              * Queue Dropped
-             * @description Frames this server dropped for falling behind: from the module's queue in-process, from the queue in front of the publisher when the module runs in the worker. The worker's own drops are in the result's input_dropped.
+             * @description Frames this server dropped for falling behind, in the outbox in front of the transport. The module's own drops are in the result's input_dropped.
              */
             queue_dropped: number;
         };
@@ -1430,7 +1405,7 @@ export interface components {
             frames_in: number;
             /**
              * Input Age S
-             * @description How long the last input had been in flight when it was read; null in-process.
+             * @description How long the last input had been in flight when it was read.
              */
             input_age_s: number | null;
             /**
@@ -1529,12 +1504,6 @@ export interface components {
          */
         PlayerStatus: {
             /**
-             * Can Go Live
-             * @description A live source exists; the 'live' command switches to it.
-             * @default false
-             */
-            can_go_live: boolean;
-            /**
              * Can Seek
              * @description Seek, step and speed apply: replay mode over a source with history.
              */
@@ -1579,7 +1548,7 @@ export interface components {
             mRID: string | null;
             /**
              * Mode
-             * @description Which stream is open: 'replay' paces a bounded stream over the history coverage and loops at its end (a replay over an explicit range ends paused instead); 'live' follows the source from now, with no transport controls.
+             * @description What the active source is: 'replay' paces a history source's coverage and loops at its end (a replay over an explicit range ends paused instead); 'live' follows a live source from now, with no transport controls.
              * @enum {string}
              */
             mode: "live" | "replay";
@@ -1591,6 +1560,17 @@ export interface components {
              * @default null
              */
             range_end: string | null;
+            /**
+             * Source
+             * @description The active source's name.
+             * @default null
+             */
+            source: string | null;
+            /**
+             * Sources
+             * @description Every source the player can switch to, in configured order.
+             */
+            sources?: string[];
             /**
              * Speed
              * @description Replay speed multiplier; 1.0 is real time.
@@ -1891,9 +1871,17 @@ export interface components {
              */
             offset_s: number;
         };
+        /** SourceBody */
+        SourceBody: {
+            /**
+             * Name
+             * @description The source to read: one of PlayerStatus.sources.
+             */
+            name: string;
+        };
         /**
          * Throughput
-         * @description How the pipeline is coping, from this server's side of the hop.
+         * @description How the pipeline is coping, from this server's side of the transport.
          */
         Throughput: {
             /**
@@ -1907,24 +1895,18 @@ export interface components {
              */
             frames_per_s: number;
             /**
-             * Module Runs
-             * @description Where the islanding module runs.
-             * @enum {string}
-             */
-            module_runs: "in-process" | "worker";
-            /**
              * Publish Failed
-             * @description Frames the transport refused to publish (broker down, timeout); null in-process.
+             * @description Messages the transport refused (broker down, timeout).
              */
-            publish_failed: number | null;
+            publish_failed: number;
             /**
              * Published
-             * @description Frames published to the module's topic; null in-process.
+             * @description Messages published to the module's topics.
              */
-            published: number | null;
+            published: number;
             /**
              * Queue Dropped
-             * @description Frames this server dropped for falling behind: from the module's queue in-process, from the queue in front of the publisher when the module runs in the worker. The worker's own drops are in the result's input_dropped.
+             * @description Frames this server dropped for falling behind, in the outbox in front of the transport. The module's own drops are in the result's input_dropped.
              */
             queue_dropped: number;
         };
@@ -2550,99 +2532,7 @@ export interface operations {
             };
         };
     };
-    pmu_test_streamer_live: {
-        parameters: {
-            query: {
-                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
-                client_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CommandAck"];
-                };
-            };
-            /** @description The client has no live pipeline: its page is not open. */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description The command does not apply in the pipeline's current state. */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     pmu_test_streamer_play: {
-        parameters: {
-            query: {
-                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
-                client_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CommandAck"];
-                };
-            };
-            /** @description The client has no live pipeline: its page is not open. */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description The command does not apply in the pipeline's current state. */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    pmu_test_streamer_replay: {
         parameters: {
             query: {
                 /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
@@ -2701,6 +2591,56 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["SeekBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pmu_test_streamer_source: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceBody"];
             };
         };
         responses: {

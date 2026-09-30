@@ -46,8 +46,8 @@ function clockTime(iso: string): string {
  * The PMU test streamer page (route `/pmu-test-streamer`) — the thin slice of
  * the data architecture, seen from the browser. A thin renderer over
  * usePmuStreamSocket: it draws the frame at the cursor as a station table, the
- * stats module's result for it, a Recorded | Live switch, and the replay
- * controls — all rendered from the player's own status. In live mode the
+ * stats module's result for it, a switch between the configured sources, and
+ * the replay controls — all rendered from the player's own status. In live mode the
  * transport controls are disabled and a red LIVE badge says why; a control the
  * source cannot honour is disabled rather than dead.
  */
@@ -63,8 +63,7 @@ export function PmuTestStreamerPage() {
     back,
     seek,
     setSpeed,
-    goLive,
-    replay,
+    switchSource,
   } = usePmuStreamSocket()
 
   // The slider's position while it is being dragged; null when it follows the
@@ -98,11 +97,9 @@ export function PmuTestStreamerPage() {
   const offset = secondsBetween(player?.coverage_start, player?.cursor) ?? 0
   const duration = secondsBetween(player?.coverage_start, player?.coverage_end) ?? 0
   const interval = header ? 1 / header.data_rate : (player?.frame_interval_s ?? 0.05)
-  // What the player says applies: seek/step over a source with history, the
-  // switch to live over a source that can tail, and the transport row only
-  // while the recording is what is open.
+  // What the player says applies: seek/step over a source with history, and
+  // the transport row only while a recording is what is open.
   const canSeek = connected && !live && player?.can_seek === true
-  const canGoLive = connected && player?.can_go_live === true
   const transport = connected && !live
   const stats = state?.stats?.result
 
@@ -111,8 +108,8 @@ export function PmuTestStreamerPage() {
       <CardHeader className="border-b">
         <CardTitle className="text-lg">PMU Test Streamer</CardTitle>
         <span className="text-gray-500">
-          The sample recording replayed through the core: provider → gateway → player → bus →
-          this page, with a stats module listening on the same bus.
+          The sample recording replayed through the core: provider → gateway → player → its
+          topic → a stats module, whose result comes back to this page.
         </span>
         <CardAction className="self-center">
           {connected && live ? (
@@ -155,39 +152,35 @@ export function PmuTestStreamerPage() {
       </CardContent>
 
       <CardFooter className="flex-col gap-4 border-t pt-6">
-        {/* The source: the recording, or the live feed. Each button fires only
-            when it would change something — a `replay` in recorded mode would
-            restart the recording, which is not what a click on the already
-            active choice means. There is no toggle-group in ui/; two buttons
-            in a bordered group are what one user needs. */}
+        {/* The sources the gateway was configured with, by name; the active
+            one is pressed (red when it is a live feed). A button fires only
+            when it would change something — switching to the source already
+            open would restart it, which is not what a click on the active
+            choice means. There is no toggle-group in ui/; buttons in a
+            bordered group are what one user needs. */}
         <div
           role="group"
           aria-label="Source"
           className="inline-flex items-center gap-1 rounded-lg border p-1"
         >
-          <Button
-            size="sm"
-            variant={live ? 'ghost' : 'default'}
-            aria-pressed={!live}
-            disabled={!connected}
-            onClick={() => {
-              if (live) replay()
-            }}
-          >
-            Recorded
-          </Button>
-          <Button
-            size="sm"
-            variant={live ? 'default' : 'ghost'}
-            className={live ? 'bg-red-600 text-white hover:bg-red-600/90' : undefined}
-            aria-pressed={live}
-            disabled={!canGoLive}
-            onClick={() => {
-              if (!live) goLive()
-            }}
-          >
-            Live
-          </Button>
+          {(player?.sources ?? []).map((name) => {
+            const active = player?.source === name
+            return (
+              <Button
+                key={name}
+                size="sm"
+                variant={active ? 'default' : 'ghost'}
+                className={active && live ? 'bg-red-600 text-white hover:bg-red-600/90' : undefined}
+                aria-pressed={active}
+                disabled={!connected}
+                onClick={() => {
+                  if (!active) switchSource(name)
+                }}
+              >
+                {name}
+              </Button>
+            )
+          })}
         </div>
 
         {/* Position and the module's result for the frame at the cursor. */}

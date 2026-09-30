@@ -16,12 +16,12 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from pswamp_core.bus import Subscription
 from pswamp_core.command_routing import CommandRefused
 from pswamp_core.datagateway import Capability, EnvSetting
 from pswamp_core.datagateway.clients import InMemoryClient
 from pswamp_core.messages import Command, DataModel, ResultEnvelope
 from pswamp_core.modules import Module
+from pswamp_core.subscription import Overflow, Subscription
 from pswamp_core.util.time import UTC
 
 
@@ -71,7 +71,7 @@ class Halver(Module):
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 HISTORY = Capability.HISTORY_CONSUME | Capability.PRODUCE
-LIVE = Capability.LIVE_CONSUME | Capability.HISTORY_CONSUME
+LIVE = Capability.LIVE_CONSUME
 
 
 def at(offset_seconds: float) -> datetime:
@@ -111,7 +111,6 @@ class EnvTestClient(InMemoryClient):
 
     env_settings = (
         EnvSetting("LABEL", "A label the test asserts on", required=True),
-        EnvSetting("PRIORITY", "Preference against other clients", default="0", kind="int"),
         EnvSetting(
             "CAPABILITIES",
             "Comma-separated capability names",
@@ -126,7 +125,6 @@ class EnvTestClient(InMemoryClient):
         name: str,
         *,
         label: str,
-        priority: int = 0,
         capabilities: Capability = HISTORY,
         count: int = 3,
     ) -> None:
@@ -134,7 +132,33 @@ class EnvTestClient(InMemoryClient):
             name,
             Measurement,
             measurements(count),
-            priority=priority,
             capabilities=capabilities,
         )
         self.label = label
+
+
+class Tap:
+    """A sink for tests: whatever is published into it reaches every
+    subscription whose classes it is an instance of -- so a test can hand it to
+    a player or a module as its ``out`` and watch, by class, what comes out."""
+
+    def __init__(self) -> None:
+        self._subscriptions: list[Subscription] = []
+        self.published: list[DataModel] = []
+
+    def publish(self, message: DataModel) -> None:
+        self.published.append(message)
+        for subscription in list(self._subscriptions):
+            if isinstance(message, subscription.models):
+                subscription.offer(message)
+
+    def subscribe(
+        self, *models: type[DataModel], overflow: Overflow = Overflow.DROP_OLDEST, maxsize: int = 256
+    ) -> Subscription:
+        subscription = Subscription(self, models, overflow, maxsize)
+        self._subscriptions.append(subscription)
+        return subscription
+
+    def _detach(self, subscription: Subscription) -> None:
+        if subscription in self._subscriptions:
+            self._subscriptions.remove(subscription)

@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the p-SWAMP Project.
 
-"""A module consumes one class off the bus and publishes its result envelope."""
+"""A module reads one class off its input queue and publishes its result envelope
+into its ``out`` sink; its commands come through its inbox."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 
-from support import Halver, HalveCommand, Measurement, Number, NumberResult, at, measurement, take
+from support import Halver, HalveCommand, Measurement, Number, NumberResult, Tap, at, measurement, take
 
-from pswamp_core.bus import InProcessBus
-from pswamp_core.messages import AppStatus, ErrorEvent, ResultEnvelope
+from pswamp_core.messages import AppStatus, ErrorEvent
 from pswamp_core.modules import Module
+from pswamp_core.subscription import Overflow
 
 
 class Doubler(Module):
@@ -29,18 +30,19 @@ class Doubler(Module):
 
 
 async def test_module_publishes_an_envelope_per_input():
-    bus = InProcessBus()
+    feed, out = Tap(), Tap()
     module = Doubler()
     assert module.status is AppStatus.INITIALIZING
-    task = asyncio.create_task(module.run(bus))
-    await asyncio.sleep(0)
+    inputs = feed.subscribe(Measurement, overflow=module.overflow, maxsize=module.maxsize)
+    task = asyncio.create_task(module.run(inputs, out))
     try:
-        with bus.subscribe(ResultEnvelope) as results:
-            bus.publish(measurement(3, at(3)))
-            bus.publish(Measurement(value=-1, mRID="skip", timestamp=at(4)))
-            bus.publish(Measurement(value=1000, mRID="boom", timestamp=at(5)))
-            bus.publish(measurement(4, at(6)))
+        with out.subscribe(NumberResult) as results, out.subscribe(ErrorEvent) as errors:
+            feed.publish(measurement(3, at(3)))
+            feed.publish(Measurement(value=-1, mRID="skip", timestamp=at(4)))
+            feed.publish(Measurement(value=1000, mRID="boom", timestamp=at(5)))
+            feed.publish(measurement(4, at(6)))
             first, second = await take(results, 2)
+            (failure,) = await take(errors, 1)
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -51,6 +53,7 @@ async def test_module_publishes_an_envelope_per_input():
     assert first.timestamp == at(3)
     assert first.app.name == "doubler"
     assert second.result.value == 8.0
+    assert failure.source == "doubler" and failure.detail == "ValueError: too big"
     # The failure on "boom" set UNDEFINED; the next success restored OK.
     assert module.status is AppStatus.OK
     assert module.last_result is second
@@ -58,14 +61,14 @@ async def test_module_publishes_an_envelope_per_input():
 
 
 async def test_a_command_is_answered_in_the_output_model_with_its_request_id():
-    bus = InProcessBus()
+    commands, out = Tap(), Tap()
     module = Halver()
-    inbox = module.command_inbox(bus)
+    inbox = module.command_inbox(commands.subscribe(HalveCommand, overflow=Overflow.GROW), out)
     inbox.start()
     try:
-        with bus.subscribe(NumberResult) as results:
+        with out.subscribe(NumberResult) as results:
             command = HalveCommand(value=8)
-            bus.publish(command)
+            commands.publish(command)
             (result,) = await take(results, 1)
     finally:
         await inbox.stop()
@@ -73,19 +76,19 @@ async def test_a_command_is_answered_in_the_output_model_with_its_request_id():
     assert result.request_id == command.request_id
     assert result.app == module.identity
     assert module.status is AppStatus.OK and module.last_result is result
-    await module.run(bus)  # no input_model: nothing to read, returns at once
+    await module.run(Tap().subscribe(Measurement), out)  # no input_model: returns at once
 
 
 async def test_a_refused_or_failing_command_publishes_an_error_event_with_the_request_id():
-    bus = InProcessBus()
+    commands, out = Tap(), Tap()
     module = Halver()
-    inbox = module.command_inbox(bus)
+    inbox = module.command_inbox(commands.subscribe(HalveCommand, overflow=Overflow.GROW), out)
     inbox.start()
     try:
-        with bus.subscribe(ErrorEvent) as errors, bus.subscribe(NumberResult) as results:
+        with out.subscribe(ErrorEvent) as errors, out.subscribe(NumberResult) as results:
             refused, failing = HalveCommand(value=-1), HalveCommand(value=0)
-            bus.publish(refused)
-            bus.publish(failing)
+            commands.publish(refused)
+            commands.publish(failing)
             first, second = await take(errors, 2)
             assert results.get_nowait() is None
     finally:

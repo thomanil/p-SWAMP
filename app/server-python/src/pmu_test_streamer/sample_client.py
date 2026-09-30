@@ -146,7 +146,6 @@ class SampleRecordingClient(DataClient):
     Args:
         name: The client's name in the gateway; also its environment prefix.
         path: The file to serve. ``{NAME}_PATH`` when built ``from_env``.
-        priority: Preference against other clients covering the same instant.
     """
 
     env_settings = (
@@ -156,14 +155,12 @@ class SampleRecordingClient(DataClient):
             default=str(DEFAULT_PATH),
             kind="path",
         ),
-        EnvSetting("PRIORITY", "Preference against other clients", default="0", kind="int"),
     )
 
-    def __init__(self, name: str = "sample", path: Path | str = DEFAULT_PATH, *, priority: int = 0):
+    def __init__(self, name: str = "sample", path: Path | str = DEFAULT_PATH):
         self.name = name
         self.capabilities = Capability.HISTORY_CONSUME
         self.supported_models = {PmuFrame}
-        self.priority = priority
         self.recording = load_sample(Path(path))
 
     @property

@@ -23,14 +23,15 @@ import pytest
 httpx = pytest.importorskip("httpx")
 pytest.importorskip("fastapi")
 
-from pswamp_core.bus import InProcessBus, Overflow  # noqa: E402
 from pswamp_core.datagateway import DataGateway, Player  # noqa: E402
 from pswamp_core.datagateway.clients.remote_data import RemoteDataClient  # noqa: E402
 from pswamp_core.datagateway.conformance import DataClientConformance  # noqa: E402
 from pswamp_core.messages import PlayerStatus, PmuFrame, ReplayCommand  # noqa: E402
+from pswamp_core.subscription import Overflow  # noqa: E402
 from remote_data_stub.app import create_app  # noqa: E402
 from remote_data_stub.recording import TiledRecording, load_frames  # noqa: E402
 from remote_data_stub.service import QueryService  # noqa: E402
+from support import Tap  # noqa: E402
 
 
 class GoesQuiet(QueryService):
@@ -83,8 +84,7 @@ async def test_frames_are_served_through_the_contract_with_their_layout():
 
 async def test_a_bounded_replay_runs_through_the_remote_store():
     client = hermetic_client(repeat=2)
-    bus = InProcessBus()
-    bus.bind(asyncio.get_running_loop())
+    bus = Tap()
     player = Player(DataGateway([client]), bus, model=PmuFrame, paced=False)
     with bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames, bus.subscribe(
         PlayerStatus, overflow=Overflow.GROW
@@ -105,8 +105,7 @@ async def test_a_bounded_replay_runs_through_the_remote_store():
 async def test_a_stub_that_stops_answering_surfaces_as_a_player_error():
     service = GoesQuiet(TiledRecording.load(repeat=1))
     client = hermetic_client(service=service, timeout=timedelta(seconds=0.1))
-    bus = InProcessBus()
-    bus.bind(asyncio.get_running_loop())
+    bus = Tap()
     player = Player(DataGateway([client]), bus, model=PmuFrame, paced=True, speed=2.0)
     with bus.subscribe(PlayerStatus, overflow=Overflow.GROW) as statuses:
         await player.start()

@@ -34,9 +34,9 @@ def test_constructing_needs_no_broker_and_no_aiokafka_import():
     assert transport.name == "k" and ("aiokafka" in sys.modules) == before
 
 
-def test_topic_is_the_model_descriptor_under_an_optional_prefix():
-    assert KafkaTransport("k", "h:1").topic_for(Measurement) == "measurement"
-    assert KafkaTransport("k", "h:1", topic_prefix="no").topic_for(Measurement) == "no.measurement"
+def test_topic_is_the_app_and_the_model_descriptor_under_an_optional_prefix():
+    assert KafkaTransport("k", "h:1").topic(Measurement, "app") == "app.measurement"
+    assert KafkaTransport("k", "h:1", topic_prefix="no").topic(Measurement, "app") == "no.app.measurement"
 
 
 def test_from_env_reads_the_block_and_requires_the_servers(monkeypatch):
@@ -46,7 +46,7 @@ def test_from_env_reads_the_block_and_requires_the_servers(monkeypatch):
     transport = transport_from_env("T")
     assert isinstance(transport, KafkaTransport)
     assert transport.bootstrap_servers == ["a:9092", "b:9092"]
-    assert transport.topic_for(Measurement) == "se.measurement"
+    assert transport.topic(Measurement, "app") == "se.app.measurement"
     monkeypatch.delenv("KAFKA_BOOTSTRAP_SERVERS")
     with pytest.raises(MissingSettingError):
         transport_from_env("T")
@@ -60,10 +60,12 @@ def make_transport() -> KafkaTransport:
 async def test_stream_round_trip_by_key():
     transport = make_transport()
     try:
-        with transport.subscribe(Measurement, "k1") as k1, transport.subscribe(Measurement) as every:
+        with transport.subscribe(Measurement, app="t", key="k1") as k1, transport.subscribe(
+            Measurement, app="t"
+        ) as every:
             await k1.ready(20)
-            await transport.publish(Measurement(mRID="m1", value=1.0, timestamp=utcnow()), "k1")
-            await transport.publish(Measurement(mRID="m2", value=2.0, timestamp=utcnow()), "k2")
+            await transport.publish(Measurement(mRID="m1", value=1.0, timestamp=utcnow()), app="t", key="k1")
+            await transport.publish(Measurement(mRID="m2", value=2.0, timestamp=utcnow()), app="t", key="k2")
             (got,) = await take(k1, 1, timeout=10)
             both = await take(every, 2, timeout=10)
     finally:

@@ -17,11 +17,12 @@ export type FrameStats = Wire['FrameStats']
 
 /**
  * The PMU test streamer: state arrives on the socket, commands go up as POSTs
- * to /api/pmu-test-streamer, where each becomes a `Command` on this client's
- * bus for the player to apply. The reply is only an acknowledgement; the effect
+ * to /api/pmu-test-streamer, where each becomes a `Command` on its topic, keyed
+ * by this client, for the player to apply. The reply is only an acknowledgement; the effect
  * comes back as the next state message. A command the player's current mode
  * cannot apply (a seek while live) is a 409, which `fireCommand` logs; the
- * page never offers one, since it renders its controls from `player.mode`.
+ * page never offers one, since it renders its controls from `player.mode` and
+ * its source switch from `player.sources`.
  */
 export function usePmuStreamSocket() {
   const { message, status, connected } =
@@ -37,7 +38,7 @@ export function usePmuStreamSocket() {
   const seen = message?.frame?.header
   if (seen && seen.header_id !== header?.header_id) setHeader(seen)
 
-  const fire = (action: 'play' | 'stop' | 'forward' | 'back' | 'live' | 'replay') =>
+  const fire = (action: 'play' | 'stop' | 'forward' | 'back') =>
     fireCommand(
       'pmu-test-streamer',
       postCommand(`${PMU_STREAM_API_PATH}/playback/${action}`),
@@ -47,10 +48,16 @@ export function usePmuStreamSocket() {
   const stop = useCallback(() => fire('stop'), [])
   const forward = useCallback(() => fire('forward'), [])
   const back = useCallback(() => fire('back'), [])
-  /** Switch to the live feed: frames from now, no transport controls. */
-  const goLive = useCallback(() => fire('live'), [])
-  /** Switch back to the recording, paused at its start. */
-  const replay = useCallback(() => fire('replay'), [])
+  /** Read another source: a recording lands paused at its start, a live feed
+   *  plays from now with no transport controls. */
+  const switchSource = useCallback(
+    (name: string) =>
+      fireCommand(
+        'pmu-test-streamer',
+        postCommand(`${PMU_STREAM_API_PATH}/playback/source`, { body: { name } }),
+      ),
+    [],
+  )
   const seek = useCallback(
     (offsetS: number) =>
       fireCommand(
@@ -79,7 +86,6 @@ export function usePmuStreamSocket() {
     back,
     seek,
     setSpeed,
-    goLive,
-    replay,
+    switchSource,
   }
 }

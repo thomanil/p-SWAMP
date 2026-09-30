@@ -3,8 +3,8 @@
 
 """Time interval primitives used to describe requested windows and client coverage.
 
-Lifted verbatim from the test_pswamp draft (``core/datagateway/time_range.py``);
-only the import path changed.
+Lifted from the test_pswamp draft (``core/datagateway/time_range.py``), without
+the interval algebra the draft needed to route across clients.
 
 ``TimeRange`` models a half-open interval ``[start, end)``. A ``None`` bound is
 unbounded: ``start=None`` reaches infinitely into the past, ``end=None`` stays
@@ -24,26 +24,6 @@ from datetime import datetime
 from ..util.time import ensure_utc
 
 __all__ = ["Coverage", "TimeRange"]
-
-
-def _latest_start(first: datetime | None, second: datetime | None) -> datetime | None:
-    """Later of two start bounds, where ``None`` means unbounded past."""
-    if first is None:
-        return second
-    if second is None:
-        return first
-
-    return max(first, second)
-
-
-def _earliest_end(first: datetime | None, second: datetime | None) -> datetime | None:
-    """Earlier of two end bounds, where ``None`` means unbounded future."""
-    if first is None:
-        return second
-    if second is None:
-        return first
-
-    return min(first, second)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,16 +57,6 @@ class TimeRange:
                 f"TimeRange end {self.end.isoformat()} precedes start {self.start.isoformat()}"
             )
 
-    @property
-    def is_open(self) -> bool:
-        """Whether the range has no upper bound."""
-        return self.end is None
-
-    @property
-    def is_empty(self) -> bool:
-        """Whether the range cannot contain any moment."""
-        return self.start is not None and self.end is not None and self.start == self.end
-
     def contains(self, moment: datetime | None) -> bool:
         """
         Test whether ``moment`` falls inside the half-open interval.
@@ -107,35 +77,6 @@ class TimeRange:
             return False
 
         return self.end is None or moment < self.end
-
-    def intersect(self, other: TimeRange) -> TimeRange | None:
-        """
-        Overlapping portion of two ranges.
-
-        Args:
-            other: Range to intersect with.
-
-        Returns:
-            The shared interval, or ``None`` when the ranges do not overlap.
-        """
-        start = _latest_start(self.start, other.start)
-        end = _earliest_end(self.end, other.end)
-
-        if start is not None and end is not None and end <= start:
-            return None
-
-        return TimeRange(start, end)
-
-    def overlaps(self, other: TimeRange) -> bool:
-        """Whether the two ranges share at least one instant."""
-        return self.intersect(other) is not None
-
-    def resolve(self, now: datetime) -> TimeRange:
-        """Materialise an open end at ``now``, leaving bounded ranges untouched."""
-        if self.end is not None:
-            return self
-
-        return TimeRange(self.start, ensure_utc(now))
 
 
 @dataclass(frozen=True, slots=True)

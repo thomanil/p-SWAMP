@@ -365,7 +365,6 @@ Current p-SWAMP client settings:
 ```text
 REMOTE_DATA_URL=http://remote-data-service:8100   # required: the service's base URL
 REMOTE_DATA_TIMEOUT=30                            # seconds for a response to start, and for each next line
-REMOTE_DATA_PRIORITY=0                            # preference against other providers in the same gateway
 ```
 
 Current stub settings:
