@@ -74,7 +74,12 @@ DEFAULT_IDLE_SECONDS = 300.0
 
 
 def _check_hostable(module_cls: type[Module]) -> None:
-    """Refuse, with the reason, a module whose commands cannot cross a topic."""
+    """Refuse, with the reason, a module that cannot run in a worker."""
+    if module_cls.reads_gateway:
+        raise ValueError(
+            f"{module_cls.__name__} reads the gateway itself (reads_gateway), and a worker "
+            "has no providers: run it in the pipeline's process"
+        )
     for command in module_cls.commands:
         if command.__subclasses__():
             raise ValueError(

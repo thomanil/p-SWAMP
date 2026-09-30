@@ -67,6 +67,17 @@ export function usePmuStreamSocket() {
       ),
     [],
   )
+  /** A batch query to a module: average the frequencies over one chunk. */
+  const averageRange = useCallback(
+    (startS: number, endS: number) =>
+      fireCommand(
+        'pmu-test-streamer',
+        postCommand(`${PMU_STREAM_API_PATH}/stats/average`, {
+          body: { start_offset_s: startS, end_offset_s: endS },
+        }),
+      ),
+    [],
+  )
   const seek = useCallback(
     (offsetS: number) =>
       fireCommand(
@@ -99,5 +110,6 @@ export function usePmuStreamSocket() {
     replay,
     resetStats,
     playRange,
+    averageRange,
   }
 }

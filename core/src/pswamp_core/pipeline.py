@@ -127,6 +127,7 @@ class Pipeline:
         ]
         await self.gateway.open()
         for module in self.modules:
+            await module.setup(self.gateway, self.bus)
             self._tasks.append(
                 asyncio.create_task(module.run(self.bus), name=f"{self.key}.{module.name}")
             )

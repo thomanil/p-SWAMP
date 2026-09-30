@@ -271,6 +271,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/pmu-test-streamer/stats/average": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Average
+         * @description Average the frequencies over one chunk -- a *batch* query: the module
+         *     reads the range from the gateway itself, unpaced, and answers once. 409 when
+         *     the range is empty.
+         */
+        post: operations["pmu_test_streamer_average"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/pmu-test-streamer/stats/reset": {
         parameters: {
             query?: never;
@@ -1150,6 +1172,8 @@ export interface components {
          *     every frame, as ``frame.header``.
          */
         PmuStreamState: {
+            /** @description The batch average's latest answer. */
+            average: components["schemas"]["RangeAverageResult"] | null;
             /** @description The pipeline's latest operational error, if any. */
             error: components["schemas"]["ErrorEvent"] | null;
             /** @description The frame at the cursor, with its channel layout, once one has played. */
@@ -1174,6 +1198,82 @@ export interface components {
              * @constant
              */
             type: "state";
+        };
+        /**
+         * RangeAverage
+         * @description The average over one chunk, and what it took to get it.
+         */
+        RangeAverage: {
+            /**
+             * Elapsed S
+             * @description Wall-clock seconds the query took.
+             */
+            elapsed_s: number;
+            /** End Offset S */
+            end_offset_s: number;
+            /**
+             * Error
+             * @description Why the read stopped early ('Type: text').
+             * @default null
+             */
+            error: string | null;
+            /**
+             * Frames
+             * @description Frames read; partial when 'error' is set.
+             */
+            frames: number;
+            /**
+             * Mean Frequency Hz
+             * @description Mean over every station's frequency in the chunk.
+             */
+            mean_frequency_hz: number | null;
+            /**
+             * Per Station Hz
+             * @description Mean frequency per station.
+             */
+            per_station_hz: {
+                [key: string]: number | null;
+            };
+            /** Start Offset S */
+            start_offset_s: number;
+        };
+        /**
+         * RangeAverageResult
+         * @description The module's envelope; its class name is its topic: ``range.average.result``.
+         */
+        RangeAverageResult: {
+            app: components["schemas"]["AppIdentity"];
+            /**
+             * Mrid
+             * @default null
+             */
+            mRID: string | null;
+            /**
+             * Parameters
+             * @description The module's settings, for the record.
+             */
+            parameters?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Request Id
+             * @description Set when this result answers a Command.
+             * @default null
+             */
+            request_id: string | null;
+            result: components["schemas"]["RangeAverage"];
+            /**
+             * Timestamp
+             * Format: date-time
+             * @description The instant the result is about.
+             */
+            timestamp: string;
+            /**
+             * Version
+             * @default v1
+             * @constant
+             */
+            version: "v1";
         };
         /** RangeBody */
         RangeBody: {
@@ -1834,6 +1934,56 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pmu_test_streamer_average: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RangeBody"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

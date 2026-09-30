@@ -17,8 +17,9 @@ from pmu_test_streamer import api
 from pmu_test_streamer import pipeline as streamer
 from pmu_test_streamer.live_client import LIVE_STREAM_ID, LiveSyntheticClient
 from pmu_test_streamer.sample_client import EPOCH, STREAM_ID, SampleRecordingClient, load_sample
+from pmu_test_streamer.average_module import AverageRangeCommand, RangeAverageModule, RangeAverageResult
 from pmu_test_streamer.stats_module import FrameStats, FrameStatsModule, FrameStatsResult, ResetStatsCommand
-from pswamp_core.bus import Overflow
+from pswamp_core.bus import InProcessBus, Overflow
 from pswamp_core.command_routing import CommandRefused
 from pswamp_core.datagateway import Capability, DataGateway
 from pswamp_core.datagateway.clients import InMemoryClient
@@ -494,3 +495,55 @@ async def test_a_chunk_plays_exactly_its_range_and_stops_there():
             pipeline.dispatch(ReplayCommand(offset_s=10, end_offset_s=11, play=True))
     finally:
         await pipeline.stop()
+
+
+# --- a batch query: the average over a chunk ----------------------------------------------
+
+
+async def test_the_batch_average_reads_the_chunk_off_the_gateway():
+    pipeline = streamer_pipeline("batch", None)
+    assert [m.name for m in pipeline.modules][-1] == "range-average"
+    await pipeline.start()
+    try:
+        with pipeline.bus.subscribe(RangeAverageResult, overflow=Overflow.GROW) as answers:
+            command = AverageRangeCommand(start_offset_s=0.5, end_offset_s=1.5)
+            pipeline.dispatch(command)
+            answer = await asyncio.wait_for(answers.get(), 2)
+        with pytest.raises(CommandRefused, match="empty"):
+            pipeline.dispatch(AverageRangeCommand(start_offset_s=1.0, end_offset_s=1.0))
+    finally:
+        await pipeline.stop()
+    assert answer.request_id == command.request_id and answer.result.error is None
+    assert answer.result.frames == 20  # 1 s at 20 Hz, unpaced: nothing went through the player
+    assert 49.9 < answer.result.mean_frequency_hz < 50.1
+    assert sorted(answer.result.per_station_hz) == load_sample().header.stations
+    assert pipeline.player.cursor is None  # the player never moved
+
+
+async def test_a_failing_provider_gives_an_error_result_and_an_error_event():
+    class Unreachable(InMemoryClient):
+        async def coverage(self, model, mRID=None):
+            raise ConnectionError("refused")
+
+    module = RangeAverageModule()
+    bus = InProcessBus()
+    await module.setup(DataGateway([Unreachable("gone", PmuFrame)]), bus)
+    with bus.subscribe(ErrorEvent, overflow=Overflow.GROW) as errors:
+        command = AverageRangeCommand(start_offset_s=0, end_offset_s=1)
+        result = await module.handle(command)
+        (event,) = [errors.get_nowait()]
+    assert result.frames == 0 and "no history" in result.error
+    assert (event.source, event.request_id) == ("range-average", command.request_id)
+
+
+async def test_the_range_posts_play_a_chunk_and_ask_for_an_average(registry):
+    await registry.acquire("21")
+    try:
+        body = api.RangeBody(start_offset_s=0.5, end_offset_s=1.0)
+        assert (await api.play_range("21", body)).applied == "replay"
+        assert (await api.average("21", body)).applied == "average.range"
+        with pytest.raises(HTTPException) as refused:
+            await api.average("21", api.RangeBody(start_offset_s=1.0, end_offset_s=0.5))
+        assert refused.value.status_code == 409 and "empty" in refused.value.detail
+    finally:
+        registry.release("21")

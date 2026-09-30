@@ -57,6 +57,7 @@ from pswamp_core.messages import (
 from pswamp_core.pipeline import CapacityError, Pipeline, PipelineRegistry
 
 from .pipeline import IDLE_EVICT_SECONDS, MAX_PIPELINES, build_pipeline, close_module_transport
+from .average_module import AverageRangeCommand, RangeAverageResult
 from .stats_module import FrameStatsResult, ResetStatsCommand
 
 logger = get_logger("pmu")
@@ -114,6 +115,7 @@ class PmuStreamState(BaseModel):
     player: PlayerStatus = Field(description="Where the replay is and which controls apply.")
     stats: FrameStatsResult | None = Field(description="The stats module's latest result.")
     error: ErrorEvent | None = Field(description="The pipeline's latest operational error, if any.")
+    average: RangeAverageResult | None = Field(description="The batch average's latest answer.")
     frame_index: int | None = Field(description="0-based position of the cursor in the recording.")
     frame_count: int | None = Field(description="How many frames the recording holds.")
 
@@ -161,6 +163,7 @@ def state_message(pipeline: Pipeline) -> PmuStreamState:
         player=status,
         stats=stats,
         error=latest.get(ErrorEvent) if latest else None,
+        average=latest.get(RangeAverageResult) if latest else None,
         frame_index=index,
         frame_count=count,
     )
@@ -274,6 +277,18 @@ async def play_range(client_id: ClientId, body: RangeBody) -> CommandAck:
     )
 
 
+@router.post("/stats/average", operation_id="pmu_test_streamer_average", responses=COMMAND_RESPONSES)
+async def average(client_id: ClientId, body: RangeBody) -> CommandAck:
+    """Average the frequencies over one chunk -- a *batch* query: the module
+    reads the range from the gateway itself, unpaced, and answers once. 409 when
+    the range is empty."""
+    return dispatch(
+        AverageRangeCommand(
+            client_id=client_id, start_offset_s=body.start_offset_s, end_offset_s=body.end_offset_s
+        )
+    )
+
+
 @router.post("/stats/reset", operation_id="pmu_test_streamer_reset_stats", responses=COMMAND_RESPONSES)
 async def reset_stats(client_id: ClientId) -> CommandAck:
     """Zero the stats module's running count and peak -- a command to a *module*,
@@ -324,7 +339,7 @@ def subscribe_updates(pipeline: Pipeline) -> Subscription:
     """What this page shows, off the client's bus. Opened *before* the first
     send, so nothing published in between is lost."""
     return pipeline.bus.subscribe(
-        PmuFrame, PlayerStatus, FrameStatsResult, StreamChanged, ErrorEvent,
+        PmuFrame, PlayerStatus, FrameStatsResult, RangeAverageResult, StreamChanged, ErrorEvent,
         overflow=Overflow.DROP_OLDEST, maxsize=64,
     )
 

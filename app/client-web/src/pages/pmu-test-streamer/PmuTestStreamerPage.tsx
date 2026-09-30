@@ -68,6 +68,7 @@ export function PmuTestStreamerPage() {
     replay,
     resetStats,
     playRange,
+    averageRange,
   } = usePmuStreamSocket()
 
   // The chunk the range controls act on, in seconds from the recording's start.
@@ -113,6 +114,7 @@ export function PmuTestStreamerPage() {
   const transport = connected && !live
   const stats = state?.stats?.result
   const error = state?.error
+  const average = state?.average?.result
   // Set while a bounded replay (a chunk) plays: where it stops.
   const rangeEnd = secondsBetween(player?.coverage_start, player?.range_end)
 
@@ -313,7 +315,26 @@ export function PmuTestStreamerPage() {
           >
             Play range
           </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!transport || rangeTo <= rangeFrom}
+            onClick={() => averageRange(rangeFrom, rangeTo)}
+          >
+            Average range
+          </Button>
         </div>
+
+        {/* The batch query's answer: a module read the chunk off the gateway. */}
+        {average && (
+          <p className="w-full text-sm tabular-nums" role="status" aria-label="Average">
+            {average.error
+              ? `Average ${average.start_offset_s}–${average.end_offset_s} s failed: ${average.error}`
+              : `Average ${average.start_offset_s}–${average.end_offset_s} s: ` +
+                `${average.mean_frequency_hz?.toFixed(4) ?? '—'} Hz over ${average.frames} frames` +
+                ` (${(average.elapsed_s * 1000).toFixed(0)} ms)`}
+          </p>
+        )}
 
         {/* Transport controls — disabled until connected, and while live; seek
             and step-back additionally need a source with history. */}

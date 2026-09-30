@@ -229,6 +229,13 @@ as its own service.
 `process` runs on the event loop. A CPU-heavy module must hand its work to a
 thread or process pool, or it stalls every pipeline in its process.
 
+**A batch module.** A module can also answer a command by reading a chunk from
+the gateway itself, unpaced, instead of reading frames off the bus: the
+streamer's `RangeAverageModule` answers `AverageRangeCommand` with the mean
+frequency over that stretch (`POST /stats/average`). It sets `reads_gateway`
+and keeps the gateway the pipeline hands it in `setup`, so it runs in the
+pipeline's process: a worker has no providers and refuses to host it.
+
 *Where.* `core/src/pswamp_core/modules.py`. The example is
 `app/server-python/src/pmu_test_streamer/stats_module.py`.
 
@@ -408,6 +415,7 @@ bus ─▶ that receiver's inbox ─▶ validate again ─▶ await receiver.han
 |---|---|---|
 | the player | `PlayerCommand` (every subclass: play, pause, step, seek, speed, replay, live, refresh) | `core/.../messages/commands.py` |
 | `FrameStatsModule` | `ResetStatsCommand` | beside the module, `stats_module.py` |
+| `RangeAverageModule` | `AverageRangeCommand` (a batch query) | beside the module, `average_module.py` |
 
 A module that takes commands lists them and implements `handle` (and
 `validate` if it can refuse one):

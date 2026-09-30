@@ -1404,6 +1404,17 @@
       "PmuStreamState": {
         "description": "The one message pushed on connect and on every change.\n\nIts parts are core messages carried as they are, so the browser's types for\nthem are generated from these very classes. The channel layout comes with\nevery frame, as ``frame.header``.",
         "properties": {
+          "average": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RangeAverageResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The batch average's latest answer."
+          },
           "error": {
             "anyOf": [
               {
@@ -1477,10 +1488,147 @@
           "player",
           "stats",
           "error",
+          "average",
           "frame_index",
           "frame_count"
         ],
         "title": "PmuStreamState",
+        "type": "object"
+      },
+      "RangeAverage": {
+        "description": "The average over one chunk, and what it took to get it.",
+        "properties": {
+          "elapsed_s": {
+            "description": "Wall-clock seconds the query took.",
+            "minimum": 0,
+            "title": "Elapsed S",
+            "type": "number"
+          },
+          "end_offset_s": {
+            "title": "End Offset S",
+            "type": "number"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Why the read stopped early ('Type: text').",
+            "title": "Error"
+          },
+          "frames": {
+            "description": "Frames read; partial when 'error' is set.",
+            "minimum": 0,
+            "title": "Frames",
+            "type": "integer"
+          },
+          "mean_frequency_hz": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Mean over every station's frequency in the chunk.",
+            "title": "Mean Frequency Hz"
+          },
+          "per_station_hz": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": "Mean frequency per station.",
+            "title": "Per Station Hz",
+            "type": "object"
+          },
+          "start_offset_s": {
+            "title": "Start Offset S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "start_offset_s",
+          "end_offset_s",
+          "frames",
+          "mean_frequency_hz",
+          "per_station_hz",
+          "elapsed_s"
+        ],
+        "title": "RangeAverage",
+        "type": "object"
+      },
+      "RangeAverageResult": {
+        "description": "The module's envelope; its class name is its topic: ``range.average.result``.",
+        "properties": {
+          "app": {
+            "$ref": "#/components/schemas/AppIdentity"
+          },
+          "mRID": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mrid"
+          },
+          "parameters": {
+            "additionalProperties": true,
+            "description": "The module's settings, for the record.",
+            "title": "Parameters",
+            "type": "object"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Set when this result answers a Command.",
+            "title": "Request Id"
+          },
+          "result": {
+            "$ref": "#/components/schemas/RangeAverage"
+          },
+          "timestamp": {
+            "description": "The instant the result is about.",
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "version": {
+            "const": "v1",
+            "default": "v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "app",
+          "result"
+        ],
+        "title": "RangeAverageResult",
         "type": "object"
       },
       "RangeBody": {
@@ -2446,6 +2594,68 @@
           }
         },
         "summary": "Stop",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
+    "/api/pmu-test-streamer/stats/average": {
+      "post": {
+        "description": "Average the frequencies over one chunk -- a *batch* query: the module\nreads the range from the gateway itself, unpaced, and answers once. 409 when\nthe range is empty.",
+        "operationId": "pmu_test_streamer_average",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RangeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
+          "409": {
+            "description": "The command does not apply in the pipeline's current state."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Average",
         "tags": [
           "pmu-test-streamer"
         ]

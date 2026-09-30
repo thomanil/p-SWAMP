@@ -200,3 +200,14 @@ def test_a_module_that_declares_a_base_command_cannot_be_hosted():
     for build in (lambda m: RemoteModule(m, transport, "1"), lambda m: ModuleHost(m, transport)):
         with pytest.raises(ValueError, match="concrete command classes"):
             build(Broad)
+
+
+def test_a_module_that_reads_the_gateway_cannot_be_hosted():
+    class Reader(Halver):
+        name = "reader"
+        reads_gateway = True
+
+    transport = InMemoryTransport()
+    for build in (lambda m: RemoteModule(m, transport, "1"), lambda m: ModuleHost(m, transport)):
+        with pytest.raises(ValueError, match="reads the gateway"):
+            build(Reader)

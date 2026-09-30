@@ -200,6 +200,18 @@ async def stream_flow(base_url: str, ws_url: str) -> None:
         state = await next_state(
             ws, lambda s: (s.get("player") or {}).get("ended") and s.get("frame_index") is not None, STATS_TIMEOUT
         )
+        # A batch query: a module reads [0.5 s, 1.5 s) off the gateway and averages it.
+        status, body = post(
+            base_url, f"{API_PATH}/stats/average", client_id, {"start_offset_s": 0.5, "end_offset_s": 1.5}
+        )
+        check("POST /stats/average -> 200", status == 200 and body.get("applied") == "average.range", f"got {status} {body}")
+        answer = await next_state(ws, lambda s: s.get("average") is not None, STATS_TIMEOUT)
+        result = ((answer.get("average") or {}).get("result")) or {}
+        check(
+            "the batch average answers once: 20 frames, a mean near 50 Hz",
+            result.get("frames") == 20 and 49.9 < (result.get("mean_frequency_hz") or 0) < 50.1,
+            f"got {json.dumps(result)[:300]}",
+        )
         check(
             "the chunk plays to its end and stops there (frames 10-19 of the recording)",
             (state.get("player") or {}).get("paused") is True and 10 <= (state.get("frame_index") or -1) <= 19,

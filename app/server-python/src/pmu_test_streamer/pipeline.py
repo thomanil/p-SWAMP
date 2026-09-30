@@ -27,6 +27,7 @@ from pswamp_core.pipeline import Pipeline
 from pswamp_core.remote import RemoteModule
 from pswamp_core.transport import Transport, transport_from_env
 
+from .average_module import RangeAverageModule
 from .stats_module import FrameStatsModule
 
 __all__ = [
@@ -81,6 +82,12 @@ def stats_modules(key: str) -> list[Module]:
     return [RemoteModule(FrameStatsModule, _TRANSPORT, key)]
 
 
+def recording_modules(key: str) -> list[Module]:
+    """A recording's modules: the stats module (here or in the worker) and the
+    batch average (always here: it reads the gateway)."""
+    return [*stats_modules(key), RangeAverageModule()]
+
+
 async def close_module_transport() -> None:
     """Close the transport to the worker, if one was opened; on shutdown."""
     global _TRANSPORT
@@ -94,4 +101,4 @@ def build_pipeline(key: str, modules: Sequence[Module] | None = None) -> Pipelin
     gateway = gateway_from_env(DEFAULT_DATA_CLIENTS, enrichers=cim_reference_enrichers())
     bus = InProcessBus()
     player = Player(gateway, bus, model=PmuFrame, loop=True)
-    return Pipeline(key, gateway, bus, player, stats_modules(key) if modules is None else modules)
+    return Pipeline(key, gateway, bus, player, recording_modules(key) if modules is None else modules)

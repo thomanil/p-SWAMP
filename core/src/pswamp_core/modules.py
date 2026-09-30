@@ -29,6 +29,11 @@ can be refused); the pipeline routes each to it by class
 (:mod:`pswamp_core.command_routing`). What ``handle`` returns is published in
 the module's ``output_model``, carrying the command's ``request_id``. A module
 that *only* takes commands sets ``input_model = None``.
+
+**A module may read the gateway itself** -- a batch query over a chunk, say,
+answering a command rather than reading frames. It sets ``reads_gateway`` and
+keeps the gateway the pipeline hands it in ``setup``. Such a module runs in the
+pipeline's process only: a worker has no providers, and refuses to host it.
 """
 
 from __future__ import annotations
@@ -49,6 +54,7 @@ from .util.time import utcnow
 
 if TYPE_CHECKING:
     from .bus import Bus
+    from .datagateway.data_gateway import DataGateway
     from .messages.commands import Command
     from .messages.data_model import DataModel
 
@@ -67,6 +73,8 @@ class Module(ABC):
       module that only answers commands.
     * ``output_model`` -- the ``ResultEnvelope`` subclass to publish.
     * ``commands`` -- the ``Command`` subclasses it answers through ``handle``.
+    * ``reads_gateway`` -- ``True`` for a module that reads the gateway itself
+      (kept in ``setup``); such a module cannot run in a worker.
     * ``overflow`` / ``maxsize`` -- what to do when the module falls behind its
       input; ``DROP_OLDEST`` by default, so a module on a live stream analyses
       the newest frame rather than an ever-older backlog.
@@ -76,6 +84,7 @@ class Module(ABC):
     input_model: ClassVar[type[DataModel] | None]
     output_model: ClassVar[type[ResultEnvelope]]
     commands: ClassVar[tuple[type[Command], ...]] = ()
+    reads_gateway: ClassVar[bool] = False
     overflow: ClassVar[Overflow] = Overflow.DROP_OLDEST
     maxsize: ClassVar[int] = 64
 
@@ -84,6 +93,11 @@ class Module(ABC):
         self.status = AppStatus.INITIALIZING
         self.parameters: dict[str, Any] = {}
         self.last_result: ResultEnvelope | None = None
+
+    async def setup(self, gateway: DataGateway, bus: Bus) -> None:
+        """Called by the pipeline before the module runs. A module that reads
+        the gateway keeps it here; the default does nothing."""
+        return
 
     async def process(self, message: DataModel) -> BaseModel | None:
         """Analyse one input message. Return the result body to publish, or
