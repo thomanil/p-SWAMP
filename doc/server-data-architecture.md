@@ -644,3 +644,48 @@ providers, and the switch is always an explicit command.
 *Where.* `pmu_test_streamer/pipeline.py` (`SOURCES["hybrid"]`), the two POSTs
 in `api.py`, and the hybrid tests in
 `app/server-python/tests/test_pmu_test_streamer.py`.
+
+## Running and testing it
+
+| Where | How | What runs |
+|---|---|---|
+| compose | `./scripts/start-local-hotloaded-pswamp-server.sh` | server, `stats-worker`, `kafka`, `remote-data-stub` |
+| minikube | `./scripts/start-pswamp-in-local-minikube-cluster.sh` | the same four as Deployments, plus the live feed's ConfigMap |
+| bare image (CI) | `docker run p-swamp:latest` | the server alone: module in-process; every source but Remote |
+
+| Check | Covers |
+|---|---|
+| `./scripts/run-python-server-tests.sh` | the core (`core/tests/`) and the streamer's pieces, hermetic: in-memory transport, the stub in-process |
+| `KAFKA_TEST_BOOTSTRAP_SERVERS=127.0.0.1:19092 … -k kafka` | the Kafka transport against compose's broker (CI's unit-tests job starts one) |
+| `./scripts/check-remote-data-service.sh [URL]` | a remote data service against its HTTP contract |
+| `./scripts/e2e-smoke-test.sh` (`SMOKETEST_URL=` for minikube) | over the wire: play, the module's result, a module command, the CIM reference, a chunk and its average, speed, seek and a step back, the remote recording, a recording going live and back, the shared live stream, a socket refused without a client id; and Retry, stopping and starting the stub, when the script owns the compose stack |
+| `./scripts/run-playwright-tests.sh` | the same through a browser: the four sources, a chunk and its average, speed and a step back, a recording going live and back, two browsers sharing the live stream; and Retry, when the spec can reach docker |
+
+## Everything here is exercised
+
+Every piece of the core is used by the streamer, except the test tools
+(`InMemoryClient`, `InMemoryTransport`, the `DataClientConformance` suite)
+and `publish_threadsafe` (the seam below). What the streamer did not need
+was left out rather than kept untested: an absolute instant on
+`SeekCommand` (seek is by offset), an explicit command `target` (a class has
+one receiver per pipeline, checked when it is built), `Overflow.LATEST_ONLY`,
+a Kafka topic prefix, writes through the gateway (the provider contract is
+read-only: `coverage` and `consume`), and printing a class's settings
+(`show_config`). So was **stitching several providers into one timeline**:
+a planner choosing a provider per segment by priority, skipping the gaps
+between them, and handing a replay over to live on its own. Here a gateway
+holds one history and one live provider, and the source a person looks at is
+always chosen explicitly. Each can come back once something needs it.
+
+## What is deliberately not here yet
+
+- **Error display.** `ErrorEvent` reaches the edge's log and the page's state,
+  but there is no cross-page error tray, and no reporting when a module falls
+  behind its input (dropped frames, stale input).
+- **Cloud deployment.** Only the local minikube manifest.
+- **A gateway in a worker.** A module that reads the gateway (the batch
+  average) runs in the pipeline's process; a worker refuses to host it.
+- **Several live streams.** The edge runs one (`LIVE_STREAM`). More is a key
+  per stream in the same registry.
+- **Thread-hosted modules.** The desktop package's thread-based applications
+  are not bridged to the bus. `publish_threadsafe` is the seam for that.

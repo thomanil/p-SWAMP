@@ -55,17 +55,28 @@ which exist to keep the "adding a page" path honest:
   architecture** (`core/`, `doc/server-data-architecture.md`): the committed
   sample recording replayed in a pipeline per client — from the image, or, in
   compose and k8s, also from a remote data service behind its REST contract
-  (the Remote recording source) — a synthetic live feed in
-  **one pipeline shared by every viewer**, a player paced by POSTed commands, a
-  stats module on the bus (in-process, or in the `stats-worker` over Kafka), a
-  module command (reset), and the gateway's stub CIM enricher. Copy it for a new module and its page; it is *not* the
+  (the Remote recording source), or with a live feed of its own that the same
+  player switches to (Recording + live) — a synthetic live feed in
+  **one pipeline shared by every viewer**, a player paced by POSTed commands
+  (a chunk, retry, go live), a stats module on the bus (in-process, or in the
+  `stats-worker` over Kafka), a module command (reset), a batch module reading
+  the gateway (the average over a chunk), and the gateway's stub CIM enricher.
+  **Every piece of the core is used by it**, except the test tools
+  (`InMemoryClient`, `InMemoryTransport`, `DataClientConformance`) and
+  `publish_threadsafe`; keep it that way — a core addition comes with its use
+  here, or it waits. Copy it for a new module and its page; it is *not* the
   example of a bare subapp — that stays `/reference-subapp`.
 
 **The client-server stack is stateless on purpose.** There is no database and no
 persistent volume anywhere under `app/` or `k8s/`. Don't reintroduce one without
 an explicit ask. (The Nordic 44 grid model *is* a sqlite file, and the replayed
 PMU stream *is* a committed `.npz` — but both are read-only sample data the
-server opens, not storage it writes to.)
+server opens, not storage it writes to. The Kafka broker in compose runs with no
+volume and in `k8s/` on an `emptyDir`, deliberately: everything on its topics is
+a live hop between the server and a worker. The transport creates every topic
+with about a minute's retention (`LIVE_TOPIC_CONFIGS` in
+`core/src/pswamp_core/transport/kafka.py`) and both brokers check retention every
+10 s; without the two, a fast replay fills the Docker VM's disk. Keep them.)
 
 ## Three Python projects in one repo
 
@@ -78,7 +89,10 @@ either manifest to the other's level.
 
 The third is **`core/` — the shared data architecture, `pswamp-core`, imported
 as `pswamp_core`** (`core/pyproject.toml`, `core/src/pswamp_core/`,
-`core/tests/`). pydantic is its only default dependency. It has no lockfile: it
+`core/tests/`, and `core/examples/` beside them: runnable examples that are not
+library code, today the remote data stub and the contract's black-box check,
+reached through `PYTHONPATH`). pydantic is its only default dependency; the
+`[kafka]` and `[remote-data]` extras add aiokafka and httpx, imported lazily. It has no lockfile: it
 is a library, consumed by the web backend as a second editable path dependency,
 and its tests run in that backend's environment. `doc/server-data-architecture.md`
 describes it. The desktop package is "the desktop package" in this file, never
@@ -143,7 +157,13 @@ Consequences worth knowing before touching anything:
 
 ## Architecture
 
-Two deployables, one wire protocol:
+Two deployables, one wire protocol — plus, for the streamer, a worker container
+from the same image (`stats-worker`) and the Kafka broker it is reached through,
+and a dummy remote data service from the same image (`remote-data-stub`). None is
+a dependency of the server: unset `PMU_TEST_STREAMER_MODULE_TRANSPORT` and the
+module runs in-process, unset `REMOTE_DATA_URL` and the streamer simply does not
+offer its Remote recording source — which is what CI's bare `docker run`
+does.
 
 - **`app/server-python/`** — the authoritative state server. The code lives in
   `src/` (mirroring the web client's layout), with the manifests beside it.
@@ -223,8 +243,9 @@ Two deployables, one wire protocol:
   `src/hooks/useServerSocket.ts` and the app's own hook
   (`useReferenceSubappSocket`) adds only its wire type and its commands.
   `/pmu-test-streamer` (`PmuTestStreamerPage`) is the core's worked example
-  beside it: a frame table, the module's result, a Recorded | Live switch and
-  controls rendered from the player's own status. See
+  beside it: a frame table, the module's result, a four-way source switch
+  (Local | Remote | Recording + live | Live), a Go live / Back to recording
+  switch, and controls rendered from the player's own status. See
   "Adding a p-SWAMP view" and "Adding a page" below.
 
 Key invariants to preserve:
@@ -751,7 +772,8 @@ underlying tech). Start the server first, then the client:
 
 ```
 ./scripts/start-local-hotloaded-pswamp-server.sh      # state server on 127.0.0.1:8000 (docker compose up --watch --build; streams logs, Ctrl-C stops it)
-                                                     # also live-syncs root src/, so desktop-package edits hot-reload too
+                                                     # also live-syncs root src/ and core/, so both hot-reload too
+                                                     # brings up kafka, the server, the stats-worker and the remote-data-stub
 ./scripts/start-local-hotloaded-pswamp-web-client.sh  # Vite/React web client w/ HMR on http://localhost:5173
 ```
 
@@ -888,6 +910,9 @@ automated:
 ```
 ./scripts/e2e-smoke-test.sh                                # start a server, drive the Reference example, stop it
 SMOKETEST_URL=http://host:port ./scripts/e2e-smoke-test.sh # test a server already running; manages no lifecycle
+./scripts/check-remote-data-service.sh [URL]               # a remote data service against its HTTP contract (no URL: the stub)
+./scripts/run-playwright-tests.sh                          # the Playwright specs under e2e/ (brings the compose stack up and down)
+KAFKA_TEST_BOOTSTRAP_SERVERS=127.0.0.1:19092 ./scripts/run-python-server-tests.sh -k kafka   # the Kafka round trip, against compose's broker
 ```
 
 `error_check.sh` never starts the app; this only starts it. Run both. It brings
