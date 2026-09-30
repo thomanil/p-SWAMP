@@ -254,6 +254,26 @@ async def replay(client_id: ClientId) -> CommandAck:
     return dispatch(ReplayCommand(client_id=client_id))
 
 
+class RangeBody(BaseModel):
+    start_offset_s: float = Field(ge=0, description="Where the chunk starts, in seconds from the start of the recording.")
+    end_offset_s: float = Field(gt=0, description="Where it ends (exclusive), in seconds from the start of the recording.")
+
+
+@router.post("/playback/range", operation_id="pmu_test_streamer_play_range", responses=COMMAND_RESPONSES)
+async def play_range(client_id: ClientId, body: RangeBody) -> CommandAck:
+    """Play exactly one chunk of the recording, ``[start, end)``, paced, and stop
+    there: the player's bounded replay. 409 when the chunk is empty or starts
+    outside the recording."""
+    return dispatch(
+        ReplayCommand(
+            client_id=client_id,
+            offset_s=body.start_offset_s,
+            end_offset_s=body.end_offset_s,
+            play=True,
+        )
+    )
+
+
 @router.post("/stats/reset", operation_id="pmu_test_streamer_reset_stats", responses=COMMAND_RESPONSES)
 async def reset_stats(client_id: ClientId) -> CommandAck:
     """Zero the stats module's running count and peak -- a command to a *module*,

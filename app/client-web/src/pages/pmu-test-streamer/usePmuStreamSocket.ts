@@ -56,6 +56,17 @@ export function usePmuStreamSocket() {
     () => fireCommand('pmu-test-streamer', postCommand(`${PMU_STREAM_API_PATH}/stats/reset`)),
     [],
   )
+  /** Play one chunk of the recording, then stop at its end. */
+  const playRange = useCallback(
+    (startS: number, endS: number) =>
+      fireCommand(
+        'pmu-test-streamer',
+        postCommand(`${PMU_STREAM_API_PATH}/playback/range`, {
+          body: { start_offset_s: startS, end_offset_s: endS },
+        }),
+      ),
+    [],
+  )
   const seek = useCallback(
     (offsetS: number) =>
       fireCommand(
@@ -87,5 +98,6 @@ export function usePmuStreamSocket() {
     goLive,
     replay,
     resetStats,
+    playRange,
   }
 }

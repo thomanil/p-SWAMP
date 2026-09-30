@@ -169,6 +169,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/pmu-test-streamer/playback/range": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Play Range
+         * @description Play exactly one chunk of the recording, ``[start, end)``, paced, and stop
+         *     there: the player's bounded replay. 409 when the chunk is empty or starts
+         *     outside the recording.
+         */
+        post: operations["pmu_test_streamer_play_range"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/pmu-test-streamer/playback/replay": {
         parameters: {
             query?: never;
@@ -1153,6 +1175,19 @@ export interface components {
              */
             type: "state";
         };
+        /** RangeBody */
+        RangeBody: {
+            /**
+             * End Offset S
+             * @description Where it ends (exclusive), in seconds from the start of the recording.
+             */
+            end_offset_s: number;
+            /**
+             * Start Offset S
+             * @description Where the chunk starts, in seconds from the start of the recording.
+             */
+            start_offset_s: number;
+        };
         /**
          * ReferenceSubappState
          * @description The single message shape pushed to a client on connect and every change.
@@ -1557,6 +1592,56 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pmu_test_streamer_play_range: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RangeBody"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

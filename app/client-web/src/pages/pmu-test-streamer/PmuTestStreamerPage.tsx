@@ -67,7 +67,12 @@ export function PmuTestStreamerPage() {
     goLive,
     replay,
     resetStats,
+    playRange,
   } = usePmuStreamSocket()
+
+  // The chunk the range controls act on, in seconds from the recording's start.
+  const [rangeFrom, setRangeFrom] = useState(1)
+  const [rangeTo, setRangeTo] = useState(2)
 
   // The slider's position while it is being dragged; null when it follows the
   // cursor. A drag is committed (one seek) on release — and the release is
@@ -108,6 +113,8 @@ export function PmuTestStreamerPage() {
   const transport = connected && !live
   const stats = state?.stats?.result
   const error = state?.error
+  // Set while a bounded replay (a chunk) plays: where it stops.
+  const rangeEnd = secondsBetween(player?.coverage_start, player?.range_end)
 
   return (
     <Card className="w-full max-w-xl gap-0">
@@ -200,7 +207,8 @@ export function PmuTestStreamerPage() {
             {live && player?.cursor
               ? `Live · ${clockTime(player.cursor)}`
               : state?.frame_index !== null && state?.frame_index !== undefined
-                ? `${state.frame_index + 1} of ${state.frame_count ?? '?'} · t = ${offset.toFixed(2)} s`
+                ? `${state.frame_index + 1} of ${state.frame_count ?? '?'} · t = ${offset.toFixed(2)} s` +
+                  (rangeEnd !== null ? ` · chunk to ${rangeEnd.toFixed(2)} s` : '')
                 : '—'}
           </span>
           <span className="text-right text-muted-foreground">Stats</span>
@@ -271,6 +279,40 @@ export function PmuTestStreamerPage() {
             }}
           />
           <span className="whitespace-nowrap tabular-nums">{duration.toFixed(1)} s</span>
+        </div>
+
+        {/* A chunk of the recording: from/to in seconds. Play range is the
+            player's bounded replay: it plays [from, to) and stops there. */}
+        <div className="flex w-full items-center gap-2 text-sm" role="group" aria-label="Range">
+          <span className="text-muted-foreground">Range</span>
+          <input
+            type="number"
+            aria-label="From (s)"
+            className="w-20 rounded border px-2 py-1 tabular-nums"
+            min={0}
+            step={0.05}
+            value={rangeFrom}
+            onChange={(event) => setRangeFrom(Number(event.target.value))}
+          />
+          <span className="text-muted-foreground">to</span>
+          <input
+            type="number"
+            aria-label="To (s)"
+            className="w-20 rounded border px-2 py-1 tabular-nums"
+            min={0}
+            step={0.05}
+            value={rangeTo}
+            onChange={(event) => setRangeTo(Number(event.target.value))}
+          />
+          <span className="text-muted-foreground">s</span>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!transport || rangeTo <= rangeFrom}
+            onClick={() => playRange(rangeFrom, rangeTo)}
+          >
+            Play range
+          </Button>
         </div>
 
         {/* Transport controls — disabled until connected, and while live; seek

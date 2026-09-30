@@ -23,7 +23,7 @@ from pswamp_core.command_routing import CommandRefused
 from pswamp_core.datagateway import Capability, DataGateway
 from pswamp_core.datagateway.clients import InMemoryClient
 from pswamp_core.datagateway.conformance import DataClientConformance
-from pswamp_core.messages import ErrorEvent, PlayCommand, PlayerStatus, PmuFrame, PmuHeader
+from pswamp_core.messages import ErrorEvent, PlayCommand, PlayerStatus, PmuFrame, PmuHeader, ReplayCommand
 from pswamp_core.pipeline import Pipeline
 from pswamp_core.remote import ModuleHost, RemoteModule
 from pswamp_core.transport import InMemoryTransport
@@ -472,3 +472,25 @@ def test_state_keeps_stats_for_the_frame_or_the_one_just_before_it():
     assert not api._current(stats_for(live), frames[3], status)  # another stream: gone
     answer = stats_for(frames[0]).model_copy(update={"request_id": "r1"})
     assert api._current(answer, frames[3], status)  # a command's answer: shown
+
+
+# --- a chunk: the player's bounded replay ------------------------------------------------
+
+
+async def test_a_chunk_plays_exactly_its_range_and_stops_there():
+    pipeline = streamer_pipeline("chunk", [FrameStatsModule()])
+    await pipeline.start()
+    try:
+        with pipeline.bus.subscribe(PmuFrame, overflow=Overflow.GROW) as frames:
+            pipeline.dispatch(ReplayCommand(offset_s=0.5, end_offset_s=1.0, play=True))
+            got = [await asyncio.wait_for(frames.get(), 2) for _ in range(10)]
+            await asyncio.sleep(0.1)
+            assert frames.get_nowait() is None  # nothing past the end
+        start = load_sample().frames[0].timestamp
+        assert [round((f.timestamp - start).total_seconds(), 2) for f in got] == [round(0.5 + i * 0.05, 2) for i in range(10)]
+        status = pipeline.player.status()
+        assert status.paused and status.ended and status.range_end == start + timedelta(seconds=1.0)
+        with pytest.raises(CommandRefused, match="outside the history"):
+            pipeline.dispatch(ReplayCommand(offset_s=10, end_offset_s=11, play=True))
+    finally:
+        await pipeline.stop()

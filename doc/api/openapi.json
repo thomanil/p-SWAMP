@@ -1483,6 +1483,28 @@
         "title": "PmuStreamState",
         "type": "object"
       },
+      "RangeBody": {
+        "properties": {
+          "end_offset_s": {
+            "description": "Where it ends (exclusive), in seconds from the start of the recording.",
+            "exclusiveMinimum": 0.0,
+            "title": "End Offset S",
+            "type": "number"
+          },
+          "start_offset_s": {
+            "description": "Where the chunk starts, in seconds from the start of the recording.",
+            "minimum": 0.0,
+            "title": "Start Offset S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "start_offset_s",
+          "end_offset_s"
+        ],
+        "title": "RangeBody",
+        "type": "object"
+      },
       "ReferenceSubappState": {
         "description": "The single message shape pushed to a client on connect and every change.\n\nKeys are snake_case on the wire, and stay that way: the page reads the\ngenerated type for this model rather than a renamed mirror of it.",
         "properties": {
@@ -2134,6 +2156,68 @@
           }
         },
         "summary": "Play",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
+    "/api/pmu-test-streamer/playback/range": {
+      "post": {
+        "description": "Play exactly one chunk of the recording, ``[start, end)``, paced, and stop\nthere: the player's bounded replay. 409 when the chunk is empty or starts\noutside the recording.",
+        "operationId": "pmu_test_streamer_play_range",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RangeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
+          "409": {
+            "description": "The command does not apply in the pipeline's current state."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Play Range",
         "tags": [
           "pmu-test-streamer"
         ]

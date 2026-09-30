@@ -192,6 +192,20 @@ async def stream_flow(base_url: str, ws_url: str) -> None:
 
         command(base_url, client_id, "stop", "pause")
 
+        # A chunk: the player's bounded replay plays [0.5 s, 1.0 s) and stops there.
+        status, body = post(
+            base_url, f"{API_PATH}/playback/range", client_id, {"start_offset_s": 0.5, "end_offset_s": 1.0}
+        )
+        check("POST /playback/range -> 200", status == 200 and body.get("applied") == "replay", f"got {status} {body}")
+        state = await next_state(
+            ws, lambda s: (s.get("player") or {}).get("ended") and s.get("frame_index") is not None, STATS_TIMEOUT
+        )
+        check(
+            "the chunk plays to its end and stops there (frames 10-19 of the recording)",
+            (state.get("player") or {}).get("paused") is True and 10 <= (state.get("frame_index") or -1) <= 19,
+            f"last state {json.dumps(state)[:300]}",
+        )
+
         # Speed: a command with a body, applied by the player.
         status, body = post(base_url, f"{API_PATH}/playback/speed", client_id, {"speed": 2})
         check("POST /playback/speed {speed: 2} -> 200", status == 200 and body.get("applied") == "speed", f"got {status} {body}")

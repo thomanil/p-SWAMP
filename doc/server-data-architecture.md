@@ -485,6 +485,11 @@ browser ── POST /api/pmu-test-streamer/stats/reset?client_id=42 ──▶ Re
 browser ◀── /api/pmu-test-streamer/ws ◀── PmuStreamState ◀── bus (PmuFrame · PlayerStatus · FrameStatsResult · ErrorEvent)
 ```
 
+**A chunk.** `POST /playback/range {start_offset_s, end_offset_s}` is the
+player's bounded replay (`ReplayCommand` with an end): it plays exactly that
+stretch, paced, and stops there with `PlayerStatus.range_end` set, so the page
+can show where it will stop.
+
 The state message carries the core's own models, so the browser's
 TypeScript types are generated from them (`doc/api/openapi.json`,
 `app/client-web/src/api/schema.ts`). Nothing renames a field on the way. The
