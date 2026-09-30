@@ -59,6 +59,7 @@ from .messages.errors import ErrorEvent
 from .messages.pmu import PmuFrame
 from .subscription import Overflow
 from .transport import Outbox
+from .util.tasks import cancel_and_wait, finish
 from .util.time import utcnow
 
 if TYPE_CHECKING:
@@ -292,15 +293,16 @@ class Pipeline:
         if not self._started:
             return
         self._started = False
+        # To its end even if the caller is cancelled meanwhile (the registry's
+        # shutdown cancels an idle eviction that may be half way through this).
+        await finish(self._teardown(reason))
+
+    async def _teardown(self, reason: str) -> None:
         if self._inbox is not None:
             await self._inbox.stop()
             self._inbox = None
         await self.player.stop()
-        for task in self._tasks:
-            task.cancel()
-        for task in self._tasks:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        await cancel_and_wait(*self._tasks)
         self._tasks = []
         for subscription in self._subscriptions:
             subscription.close()

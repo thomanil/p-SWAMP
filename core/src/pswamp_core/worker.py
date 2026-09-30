@@ -24,7 +24,6 @@ no families are named. Stops cleanly on SIGINT/SIGTERM.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import importlib
 import os
 import signal
@@ -88,8 +87,12 @@ def main() -> int:
             loop.add_signal_handler(sig, task.cancel)
         logger.info("worker hosting %s", ", ".join(f"{h.app}/{h.name}" for h in hosts))
         try:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            # Until a signal's cancel has stopped the hosts. Not a
+            # suppress(CancelledError) around `await task`, which would also
+            # swallow a cancellation of run() itself; a crash still raises.
+            await asyncio.wait([task])
+            if not task.cancelled():
+                task.result()
         finally:
             await transport.close()
         logger.info("worker stopped")

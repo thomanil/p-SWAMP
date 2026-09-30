@@ -136,6 +136,57 @@ async def test_a_hosted_module_reads_a_gateway_of_its_own_built_by_the_factory()
     assert len(built) == 2  # one per key
 
 
+async def winding_down() -> None:
+    """Work that takes a moment to stop when cancelled, as real cleanup does."""
+    try:
+        await asyncio.sleep(10)
+    except asyncio.CancelledError:
+        await asyncio.sleep(0.1)
+        raise
+
+
+class SlowToStopHandler(Module):
+    name = "slow-handler"
+    input_model = None
+    output_model = NumberResult
+    commands = (HalveCommand,)
+
+    async def handle(self, command: HalveCommand) -> None:
+        await winding_down()
+
+
+class SlowToStopProcess(Doubler):
+    name = "slow-process"
+
+    async def process(self, message: Measurement) -> None:
+        await winding_down()
+
+
+@pytest.mark.parametrize(
+    ("module", "message"),
+    [
+        (SlowToStopHandler, lambda: HalveCommand(value=8)),  # waiting on its command inbox
+        (SlowToStopProcess, lambda: measurement(1, at(1))),  # waiting on its run task
+    ],
+)
+async def test_a_host_cancelled_while_it_drops_a_key_still_stops(module, message):
+    """A pipeline closing just before shutdown -- what an app's lifespan does --
+    has the host dropping a key when the cancel arrives. The cancel must stop
+    it; swallowed, the host waits for ever."""
+    broker = InMemoryTransport()
+    host = ModuleHost(module, broker, app="t")
+    task = asyncio.create_task(host.serve())
+    await asyncio.sleep(0)
+    await broker.publish(message(), app="t", key="k")
+    await asyncio.sleep(0.02)  # the instance is busy with it
+    await broker.publish(PipelineClosed(timestamp=utcnow()), app="t", key="k")
+    await asyncio.sleep(0.02)  # the host is dropping "k", waiting for the work to stop
+    task.cancel()
+    done, _ = await asyncio.wait([task], timeout=2)
+    assert done, "the host swallowed its cancellation and never stopped"
+    assert host.keys() == []
+
+
 def test_a_module_declaring_a_base_command_class_cannot_be_hosted():
     class Greedy(Module):
         name = "greedy"

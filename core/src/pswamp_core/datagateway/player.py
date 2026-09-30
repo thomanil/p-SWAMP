@@ -81,6 +81,7 @@ from ..messages.commands import (
 from ..messages.control import PlayerStatus, StreamChanged
 from ..messages.errors import ErrorEvent
 from ..messages.pmu import PmuFrame
+from ..util.tasks import cancel_and_wait
 from ..util.time import ensure_utc, utcnow
 from .time_range import Coverage
 
@@ -618,9 +619,7 @@ class Player:
     async def _cancel_read(self) -> None:
         task, self._read = self._read, None
         if task is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            await cancel_and_wait(task)
 
     async def _reopen_if_closed(self) -> None:
         """A resume after the end: replay from the start of the history, or,

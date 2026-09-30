@@ -77,11 +77,14 @@ async def _serve(ws: WebSocket, push: Callable[[], object]) -> None:
         await wait_for_disconnect(ws)
     finally:
         pusher.cancel()
-        # The task is being cancelled from outside, so its CancelledError is
-        # expected rather than an error; awaiting it is what makes sure it is
-        # finished before the caller releases the pipeline it was reading.
-        with contextlib.suppress(asyncio.CancelledError):
-            await pusher
+        # Wait for it to finish before the caller releases the pipeline it was
+        # reading. Not `suppress(CancelledError)` around `await pusher`: that
+        # would also swallow a cancellation of this handler. (The same as
+        # pswamp_core.util.tasks.cancel_and_wait, written out because this
+        # package imports nothing outside itself and the desktop package.)
+        await asyncio.wait([pusher])
+        if not pusher.cancelled() and pusher.exception() is not None:
+            raise pusher.exception()
 
 
 # --- ticker-driven pages ----------------------------------------------------

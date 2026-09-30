@@ -16,13 +16,14 @@ reading from it too would be an import cycle.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 
 from fastapi import APIRouter, WebSocket
 
 from pswamp_web.log import get_logger
 from pswamp_web.pump import wait_for_disconnect
 from pswamp_web.wire import read_client_id, send_state
+
+from pswamp_core.util.tasks import cancel_and_wait
 
 from .hub import HUB
 
@@ -50,6 +51,4 @@ async def ws_endpoint(ws: WebSocket) -> None:
         try:
             await wait_for_disconnect(ws)
         finally:
-            pusher.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await pusher
+            await cancel_and_wait(pusher)

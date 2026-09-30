@@ -26,7 +26,6 @@ Imports only ``pswamp_core.datagateway``, ``pswamp_core.messages`` and
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -40,6 +39,7 @@ from pswamp_core.datagateway import (
     TimeRange,
 )
 from pswamp_core.messages import DataModel, PmuFrame
+from pswamp_core.util.tasks import cancel_and_wait
 from pswamp_core.util.time import utcnow
 
 from .sample_client import DEFAULT_PATH, load_sample
@@ -96,9 +96,7 @@ class LiveSyntheticClient(DataClient):
     async def close(self) -> None:
         task, self._task = self._task, None
         if task is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            await cancel_and_wait(task)
 
     async def _tick(self) -> None:
         frames = self.recording.frames

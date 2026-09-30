@@ -83,6 +83,7 @@ from ..messages.control import PipelineClosed
 from ..messages.data_model import stamp_sent_at
 from ..messages.errors import ErrorEvent
 from ..subscription import Overflow, Subscription
+from ..util.tasks import cancel_and_wait
 
 if TYPE_CHECKING:
     from ..messages.data_model import DataModel
@@ -358,9 +359,7 @@ class Outbox:
         """Send what is still queued (a ``PipelineClosed``, say), then stop."""
         task, self._task = self._task, None
         if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            await cancel_and_wait(task)
         with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(timeout):
                 while self._queue:

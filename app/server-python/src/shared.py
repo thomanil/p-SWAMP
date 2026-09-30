@@ -78,6 +78,7 @@ from pswamp_core.host import hosts_for, serve_hosts
 from pswamp_core.messages import Command
 from pswamp_core.pipeline import CapacityError, Pipeline, PipelineFamily, PipelineRegistry
 from pswamp_core.transport import Transport, transport_from_env
+from pswamp_core.util.tasks import cancel_and_wait
 
 __all__ = [
     "CLIENT_ID_PATTERN",
@@ -242,11 +243,7 @@ async def serve_family(family: PipelineFamily, registry: PipelineRegistry) -> As
     finally:
         await registry.stop_all()
         registry.bind(None)
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        await cancel_and_wait(*tasks, ignore=(Exception,))
 
 
 # --- a socket over a pipeline ------------------------------------------------------
@@ -322,6 +319,4 @@ async def push_changes(
         try:
             await wait_for_disconnect(ws)
         finally:
-            pusher.cancel()
-            with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
-                await pusher
+            await cancel_and_wait(pusher, ignore=(WebSocketDisconnect,))

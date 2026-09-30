@@ -32,12 +32,12 @@ it).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import AsyncIterable, Callable, Sequence
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from .log import get_logger
 from .messages.errors import ErrorEvent
+from .util.tasks import cancel_and_wait
 from .util.time import utcnow
 
 if TYPE_CHECKING:
@@ -127,9 +127,7 @@ class CommandInbox:
     async def stop(self) -> None:
         task, self._task = self._task, None
         if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            await cancel_and_wait(task)
 
     async def _serve(self) -> None:
         async for command in self._commands:

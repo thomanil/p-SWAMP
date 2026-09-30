@@ -1373,6 +1373,15 @@ mind when editing that script:
   worse than one that fails, so prefer a construct that errors loudly to one that
   degrades — and test a script change against `/bin/bash`, not just the newer
   homebrew bash that `env` may pick up.
+- **Stopping a task: `cancel_and_wait`, never `suppress(CancelledError)`.**
+  `task.cancel()` then `with suppress(CancelledError): await task` also
+  swallows a cancellation of the *caller* that arrives while it waits; a module
+  host shut down that way waited for ever. Use
+  `pswamp_core.util.tasks.cancel_and_wait(*tasks, ignore=...)` (`ignore` names
+  the exceptions a task may expectedly end with), and `finish(...)` for a
+  teardown that must run to its end even if the caller is cancelled.
+  `pswamp_web/pump.py` writes the same wait out, since that package imports
+  nothing outside itself.
 - **Lint is explicitly `--select F`** (pyflakes only — real bugs, not style) in
   `error_check.sh`. This gate checks correctness, not formatting: pycodestyle `E`
   and `ruff format` were deliberately dropped, and ruff's other opinionated

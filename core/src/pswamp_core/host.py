@@ -33,7 +33,6 @@ hosts would be a feed per key that nobody reads.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
@@ -44,6 +43,7 @@ from .log import get_logger
 from .messages.control import PipelineClosed
 from .subscription import Overflow, Subscription
 from .transport import Outbox
+from .util.tasks import cancel_and_wait, finish
 
 if TYPE_CHECKING:
     from .modules import Module
@@ -155,11 +155,7 @@ class ModuleHost:
         try:
             await asyncio.gather(*tasks)
         finally:
-            for task in tasks:
-                task.cancel()
-            for task in tasks:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
+            await cancel_and_wait(*tasks, ignore=(Exception,))
             for key in list(self._slots):
                 await self._evict(key, "shutdown")
 
@@ -218,19 +214,20 @@ class ModuleHost:
         slot = self._slots.pop(key, None)
         if slot is None:
             return
+        # To its end even if this host is cancelled (shut down) meanwhile; the
+        # cancellation moves on once the key is fully dropped.
+        await finish(self._drop(slot, reason))
+
+    async def _drop(self, slot: _Slot, reason: str) -> None:
         if slot.inbox is not None:
             await slot.inbox.stop()
-        for task in slot.tasks:
-            task.cancel()
-        for task in slot.tasks:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        await cancel_and_wait(*slot.tasks, ignore=(Exception,))
         slot.inputs.close()
         slot.commands.close()
         await slot.out.close()
         if slot.gateway is not None:
             await slot.gateway.close()
-        logger.info("%s: module dropped for key %s (%s), %d live", self.name, key, reason, len(self._slots))
+        logger.info("%s: module dropped for key %s (%s), %d live", self.name, slot.key, reason, len(self._slots))
 
 
 def hosts_for(
