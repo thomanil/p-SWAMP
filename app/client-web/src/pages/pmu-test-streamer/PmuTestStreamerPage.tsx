@@ -37,6 +37,7 @@ const SPEEDS = ['0.5', '1', '2', '5']
 const SOURCE_LABELS: Record<Source, string> = {
   local: 'Local recording',
   remote: 'Remote recording',
+  hybrid: 'Recording + live',
   live: 'Live',
 }
 
@@ -77,6 +78,8 @@ export function PmuTestStreamerPage() {
     playRange,
     averageRange,
     retry,
+    goLive,
+    backToRecording,
   } = usePmuStreamSocket()
 
   // The chunk the range controls act on, in seconds from the recording's start.
@@ -108,7 +111,10 @@ export function PmuTestStreamerPage() {
 
   const player = state?.player
   const source = state?.source
-  const live = source === 'live'
+  // The shared live stream, or this browser's own player tailing its live feed
+  // (the hybrid source's): either way no transport control applies.
+  const shared = source === 'live'
+  const live = shared || player?.mode === 'live'
   // "Playing" is a replay notion: live is never paused, but its transport row
   // is disabled, and a filled Stop button there would read as an active one.
   const playing = player !== undefined && !player.paused && !live
@@ -138,7 +144,7 @@ export function PmuTestStreamerPage() {
           {connected && live ? (
             <Badge className="bg-red-600 text-white" aria-label="Live">
               <span className="size-2 rounded-full bg-white animate-pulse" aria-hidden />
-              LIVE · {state?.live_viewers ?? 0} watching
+              LIVE · {shared ? `${state?.live_viewers ?? 0} watching` : 'your own feed'}
             </Badge>
           ) : connected ? (
             <Badge variant={playing ? 'default' : 'secondary'}>
@@ -205,6 +211,19 @@ export function PmuTestStreamerPage() {
             </Button>
           ))}
         </div>
+
+        {/* One player, two streams: a recording whose gateway also holds a
+            live provider can switch to it and back (GoLiveCommand /
+            ReplayCommand). Offered only where the player says it can. */}
+        {connected && !shared && player?.can_go_live && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={player.mode === 'live' ? backToRecording : goLive}
+          >
+            {player.mode === 'live' ? 'Back to recording' : 'Go live'}
+          </Button>
+        )}
 
         {/* Position and the module's result for the frame at the cursor. */}
         <div className="grid w-full grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1 text-sm">

@@ -84,6 +84,8 @@ spec:
               value: "sample:pmu_test_streamer.sample_client:SampleRecordingClient"
             - name: PMU_TEST_STREAMER_REMOTE_CLIENTS
               value: "remote_data:pswamp_core.datagateway.clients.remote_data:RemoteDataClient"
+            - name: PMU_TEST_STREAMER_HYBRID_CLIENTS
+              value: "sample:pmu_test_streamer.sample_client:SampleRecordingClient,live:pmu_test_streamer.live_client:LiveSyntheticClient"
             - name: PMU_TEST_STREAMER_LIVE_CLIENTS
               value: "live:pmu_test_streamer.live_client:LiveSyntheticClient"
             # The Remote Data Client's own block: where the remote data service

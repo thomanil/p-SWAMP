@@ -39,7 +39,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
@@ -295,6 +295,46 @@ async def remote_flow(base_url: str, ws_url: str) -> None:
         )
 
 
+async def hybrid_flow(base_url: str, ws_url: str) -> None:
+    """A recording with a live feed of its own: the same player goes live (its
+    own tail, on the wall clock, with no transport) and back to the recording."""
+    client_id = str(random.randrange(10**9, 10**10))
+    print(f"\n  Recording + live flow (client_id={client_id})")
+    async with connect(f"{ws_url}{WS_PATH}?client_id={client_id}") as ws:
+        first = json.loads(await asyncio.wait_for(ws.recv(), RECV_TIMEOUT))
+        if "hybrid" not in first.get("sources_available", []):
+            check("the hybrid source is switched off here: not offered", True)
+            return
+        choose(base_url, client_id, "hybrid")
+        state = await next_state(ws, lambda s: s.get("source") == "hybrid", STATS_TIMEOUT)
+        check(
+            "a recording whose player can go live",
+            (state.get("player") or {}).get("mode") == "replay" and (state.get("player") or {}).get("can_go_live") is True,
+            f"last state {json.dumps(state)[:300]}",
+        )
+
+        command(base_url, client_id, "live", "go.live")
+        state = await next_state(
+            ws, lambda s: (s.get("player") or {}).get("mode") == "live" and s.get("frame"), STATS_TIMEOUT
+        )
+        behind = (datetime.now(timezone.utc) - _instant((state.get("frame") or {}).get("timestamp"))).total_seconds()
+        check(
+            "the same player goes live: frames from its own feed, on the wall clock",
+            (state.get("player") or {}).get("mode") == "live" and 0 <= behind < 5,
+            f"last state {json.dumps(state)[:300]}",
+        )
+        status, body = post(base_url, f"{API_PATH}/playback/play", client_id)
+        check("POST /playback/play while live -> 409", status == 409, f"got {status} {body}")
+        command(base_url, client_id, "replay", "replay")
+        state = await next_state(ws, lambda s: (s.get("player") or {}).get("mode") == "replay", STATS_TIMEOUT)
+        check(
+            "and back to the recording, at its start, paused",
+            (state.get("player") or {}).get("paused") is True
+            and (state.get("player") or {}).get("cursor") == (state.get("player") or {}).get("coverage_start"),
+            f"last state {json.dumps(state)[:300]}",
+        )
+
+
 async def live_flow(base_url: str, ws_url: str) -> None:
     a, b = (str(random.randrange(10**9, 10**10)) for _ in range(2))
     print(f"\n  Shared live flow (client_ids={a}, {b})")
@@ -389,6 +429,10 @@ async def main(argv: list[str]) -> int:
         await remote_flow(base_url, ws_url)
     except Exception as error:
         bad(f"remote recording flow could not run: {type(error).__name__}: {error}")
+    try:
+        await hybrid_flow(base_url, ws_url)
+    except Exception as error:
+        bad(f"recording + live flow could not run: {type(error).__name__}: {error}")
     try:
         await retry_flow(base_url, ws_url)
     except Exception as error:

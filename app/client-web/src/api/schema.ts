@@ -129,6 +129,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/pmu-test-streamer/playback/live": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Go Live
+         * @description Switch this client's player from its recording to its live feed: the same
+         *     player and pipeline, now tailing. 409 unless the source has a live provider
+         *     (the hybrid source does).
+         */
+        post: operations["pmu_test_streamer_go_live"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/pmu-test-streamer/playback/play": {
         parameters: {
             query?: never;
@@ -187,6 +209,26 @@ export interface paths {
          *     nothing. 409 on the shared live stream.
          */
         post: operations["pmu_test_streamer_refresh"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/pmu-test-streamer/playback/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Replay
+         * @description Back to the recording from the player's live feed: its beginning, paused.
+         */
+        post: operations["pmu_test_streamer_replay"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1208,12 +1250,12 @@ export interface components {
              * @description Which source this client is watching.
              * @enum {string}
              */
-            source: "local" | "remote" | "live";
+            source: "local" | "remote" | "hybrid" | "live";
             /**
              * Sources Available
              * @description The sources configured in this deployment.
              */
-            sources_available: ("local" | "remote" | "live")[];
+            sources_available: ("local" | "remote" | "hybrid" | "live")[];
             /** @description The stats module's latest result. */
             stats: components["schemas"]["FrameStatsResult"] | null;
             /**
@@ -1369,7 +1411,7 @@ export interface components {
              * @description The source to watch.
              * @enum {string}
              */
-            source: "local" | "remote" | "live";
+            source: "local" | "remote" | "hybrid" | "live";
         };
         /** SpeedBody */
         SpeedBody: {
@@ -1668,6 +1710,52 @@ export interface operations {
             };
         };
     };
+    pmu_test_streamer_go_live: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     pmu_test_streamer_play: {
         parameters: {
             query: {
@@ -1765,6 +1853,52 @@ export interface operations {
         };
     };
     pmu_test_streamer_refresh: {
+        parameters: {
+            query: {
+                /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */
+                client_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandAck"];
+                };
+            };
+            /** @description The client has no live pipeline: its page is not open. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The command does not apply in the pipeline's current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pmu_test_streamer_replay: {
         parameters: {
             query: {
                 /** @description The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching. */

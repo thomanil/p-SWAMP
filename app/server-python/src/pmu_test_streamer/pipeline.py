@@ -8,14 +8,20 @@ per key. Defining a pipeline is writing it: everything it builds is built fresh
 for that key. The streamer has one pipeline per **source**, and a source is
 nothing but the providers its variable names:
 
-    source  providers (variable, default)                                keyed by
-    local   PMU_TEST_STREAMER_LOCAL_CLIENTS:  the recording in the image   the client:  "local-<id>"
-    remote  PMU_TEST_STREAMER_REMOTE_CLIENTS: the Remote Data Client       the client:  "remote-<id>"
+    source  providers (variable, default)                                   keyed by
+    local   PMU_TEST_STREAMER_LOCAL_CLIENTS:  the recording in the image     the client:  "local-<id>"
+    remote  PMU_TEST_STREAMER_REMOTE_CLIENTS: the Remote Data Client         the client:  "remote-<id>"
                                               (offered once REMOTE_DATA_URL is set)
-    live    PMU_TEST_STREAMER_LIVE_CLIENTS:   the synthetic live feed      the stream:  "live", shared
+    hybrid  PMU_TEST_STREAMER_HYBRID_CLIENTS: the recording + the live feed  the client:  "hybrid-<id>"
+    live    PMU_TEST_STREAMER_LIVE_CLIENTS:   the synthetic live feed        the stream:  "live", shared
 
 The two recordings are the same page and the same module over two providers:
 one in the image, one behind a remote data service's REST contract.
+
+**The hybrid source is a recording with a live feed of its own**: one gateway
+with a history provider and a live provider, and one player over it. The
+player replays the recording, and goes live and back (``GoLiveCommand``,
+``ReplayCommand``): a private tail, unlike the shared live stream.
 
 Every pipeline gets the stub CIM reference enricher (PMU_TEST_STREAMER_CIM_REFERENCE,
 "none" to switch off) and the stats module -- in-process, or, with
@@ -62,7 +68,7 @@ __all__ = [
     "stats_modules",
 ]
 
-Source = Literal["local", "remote", "live"]
+Source = Literal["local", "remote", "hybrid", "live"]
 
 #: Per source: the variable naming its providers, and what it names when unset.
 #: Set a variable to ``none`` to switch that source off.
@@ -74,6 +80,11 @@ SOURCES: dict[Source, tuple[str, str]] = {
     "remote": (
         "PMU_TEST_STREAMER_REMOTE_CLIENTS",
         "remote_data:pswamp_core.datagateway.clients.remote_data:RemoteDataClient",
+    ),
+    "hybrid": (
+        "PMU_TEST_STREAMER_HYBRID_CLIENTS",
+        "sample:pmu_test_streamer.sample_client:SampleRecordingClient,"
+        "live:pmu_test_streamer.live_client:LiveSyntheticClient",
     ),
     "live": (
         "PMU_TEST_STREAMER_LIVE_CLIENTS",

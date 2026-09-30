@@ -551,7 +551,9 @@ other pipeline's bus. A recording restarts at its beginning, paused, and the
 one left behind pauses. The socket holds a pipeline (a watcher in its
 registry) only while it watches it, and the page shows how many are watching
 live. Set a source's variable to `none` to switch it off; the page disables
-its button.
+its button. A fourth source, **Recording + live**, is a recording like the
+first two (`hybrid-<client id>`) whose player can also go live; see "A
+recording with its own live feed" below.
 
 *Why.* A recorded stream is something a visitor explores: they want their own
 clock. A live stream is the grid now: every operator must see the same
@@ -609,8 +611,9 @@ written in HTTP terms alone, so the service may be built on any stack.
 three-second sample tiled to a minute). Compose (`remote-data-stub`) and
 `k8s/p-swamp-local.yaml` (`p-swamp-remote-data-stub`) run it and set
 `REMOTE_DATA_URL`, so the page offers **Local recording | Remote recording |
-Live**: the same page and module over two history providers, one in the image
-and one behind the REST contract (60 frames against the stub's 1200).
+Recording + live | Live**: the same page and module over two history providers,
+one in the image and one behind the REST contract (60 frames against the
+stub's 1200).
 `./scripts/check-remote-data-service.sh [URL]` checks any running service
 against the contract over plain HTTP, and CI runs it against the stub. Without
 `REMOTE_DATA_URL` (CI's bare `docker run`) the Remote button is disabled.
@@ -618,3 +621,26 @@ against the contract over plain HTTP, and CI runs it against the stub. Without
 *Where.* `core/src/pswamp_core/datagateway/clients/remote_data.py` (the
 `pswamp-core[remote-data]` extra), `messages/remote_data.py`, `core/examples/`,
 `core/tests/test_remote_data_*.py`.
+
+## A recording with its own live feed — Recording + live
+
+*What.* One gateway with a history provider and a live provider, and one
+player over it:
+
+```
+PMU_TEST_STREAMER_HYBRID_CLIENTS="sample:…SampleRecordingClient,live:…LiveSyntheticClient"   # the default
+```
+
+The player replays the recording like any other. **Go live**
+(`POST /playback/live`, a `GoLiveCommand`) switches the same player to the
+gateway's `tail`, an open-ended stream from now with no transport controls;
+**Back to recording** (`POST /playback/replay`, a `ReplayCommand`) returns to
+the start, paused. The live tail is this browser's own, unlike the shared Live
+source. The batch average still reads the recording while the player is live.
+
+*Why.* It is how a player that can do both is built: one pipeline, two
+providers, and the switch is always an explicit command.
+
+*Where.* `pmu_test_streamer/pipeline.py` (`SOURCES["hybrid"]`), the two POSTs
+in `api.py`, and the hybrid tests in
+`app/server-python/tests/test_pmu_test_streamer.py`.

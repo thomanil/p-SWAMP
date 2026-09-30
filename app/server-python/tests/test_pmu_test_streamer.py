@@ -23,8 +23,17 @@ from pswamp_core.bus import InProcessBus, Overflow
 from pswamp_core.command_routing import CommandRefused
 from pswamp_core.datagateway import Capability, DataGateway
 from pswamp_core.datagateway.clients import InMemoryClient
+from pswamp_core.datagateway.clients.remote_data import RemoteDataClient
 from pswamp_core.datagateway.conformance import DataClientConformance
-from pswamp_core.messages import ErrorEvent, PlayCommand, PlayerStatus, PmuFrame, PmuHeader, ReplayCommand
+from pswamp_core.messages import (
+    ErrorEvent,
+    GoLiveCommand,
+    PlayCommand,
+    PlayerStatus,
+    PmuFrame,
+    PmuHeader,
+    ReplayCommand,
+)
 from pswamp_core.pipeline import Pipeline
 from pswamp_core.remote import ModuleHost, RemoteModule
 from pswamp_core.transport import InMemoryTransport
@@ -450,7 +459,7 @@ class TinyClient(InMemoryClient):
 async def test_a_source_is_its_variable_swapped_or_switched_off_by_environment_alone(edge, monkeypatch):
     monkeypatch.setenv("PMU_TEST_STREAMER_LOCAL_CLIENTS", "tiny:test_pmu_test_streamer:TinyClient")
     monkeypatch.setenv("PMU_TEST_STREAMER_LIVE_CLIENTS", "none")
-    assert api.sources_available() == ["local"]
+    assert api.sources_available() == ["local", "hybrid"]  # hybrid names its own providers
     recording = await api.REGISTRIES["local"].acquire("local-11")
     try:
         assert list(recording.gateway.clients) == ["tiny"]
@@ -482,7 +491,7 @@ def test_the_socket_follows_the_client_s_source(monkeypatch):
 
     with TestClient(app) as client, client.websocket_connect("/ws?client_id=77") as ws:
         first = ws.receive_json()
-        assert first["source"] == "local" and first["sources_available"] == ["local", "live"]
+        assert first["source"] == "local" and first["sources_available"] == ["local", "hybrid", "live"]
         assert client.post("/source?client_id=77", json={"source": "live"}).json()["applied"] == "source.live"
         live = until(ws, lambda m: m["source"] == "live" and m["frame"] is not None)
         assert live["frame"]["mRID"] == LIVE_STREAM_ID and live["player"]["mode"] == "live"
@@ -613,16 +622,14 @@ async def test_the_range_posts_play_a_chunk_and_ask_for_an_average(edge):
 
 def test_the_remote_recording_is_offered_once_a_service_url_is_configured(monkeypatch):
     """The same page and module over a provider outside the process: the Remote
-    Data Client, named by default and switched on by its own URL. Built, not
-    started: no socket."""
-    from pswamp_core.datagateway.clients.remote_data import RemoteDataClient
-
+    Data Client, named by default and switched on by its own URL -- which the
+    stitched recording needs too. Built, not started: no socket."""
     for variable, _ in streamer.SOURCES.values():
         monkeypatch.delenv(variable, raising=False)
     monkeypatch.delenv("REMOTE_DATA_URL", raising=False)
-    assert api.sources_available() == ["local", "live"]
+    assert api.sources_available() == ["local", "hybrid", "live"]
     monkeypatch.setenv("REMOTE_DATA_URL", "http://remote-data-stub:8100")
-    assert api.sources_available() == ["local", "remote", "live"]
+    assert api.sources_available() == ["local", "remote", "hybrid", "live"]
     pipeline = streamer.build_pipeline(streamer.pipeline_key("remote", "5"), "remote", [])
     assert pipeline.key == "remote-5"
     (client,) = pipeline.gateway.clients.values()
@@ -665,3 +672,48 @@ async def test_retry_clears_a_provider_failure_once_the_source_is_back(edge, mon
             assert refused.value.status_code == 409
     finally:
         api.REGISTRIES["local"].release("local-31")
+
+
+# --- the hybrid source: a recording with a live feed of its own ----------------------------
+
+
+@pytest.fixture
+async def hybrid(edge):
+    """Client 41 watching the hybrid source: the image's recording and the live
+    feed in one gateway, one player over both."""
+    with socket_open("41"):
+        await api.choose_source("41", api.SourceBody(source="hybrid"))
+    pipeline = await api.REGISTRIES["hybrid"].acquire("hybrid-41")
+    try:
+        yield pipeline
+    finally:
+        api.REGISTRIES["hybrid"].release("hybrid-41")
+
+
+async def test_the_hybrid_player_goes_live_and_back(hybrid):
+    pipeline = hybrid
+    status = pipeline.player.status()
+    assert status.mode == "replay" and status.can_seek and status.can_go_live
+
+    assert (await api.go_live("41")).applied == GoLiveCommand.name
+    await eventually(lambda: pipeline.player.mode == "live" and pipeline.player.last_frame is not None, timeout=3)
+    assert pipeline.player.last_frame.mRID == LIVE_STREAM_ID  # the live feed's own frames
+    assert api.REGISTRIES["live"].live == 0  # its own feed, not the shared stream
+    with pytest.raises(HTTPException) as refused:
+        await api.play("41")
+    assert refused.value.status_code == 409  # no transport while live
+
+    await api.replay("41")
+    await eventually(lambda: pipeline.player.mode == "replay")
+    status = pipeline.player.status()
+    assert status.paused and status.cursor == status.coverage_start
+
+
+async def test_the_average_reads_the_recording_while_the_player_is_live(hybrid):
+    pipeline = hybrid
+    await api.go_live("41")
+    await eventually(lambda: pipeline.player.mode == "live")
+    await api.average("41", api.RangeBody(start_offset_s=0.5, end_offset_s=1.5))
+    await eventually(lambda: pipeline.latest.get(RangeAverageResult) is not None)
+    answer = pipeline.latest.get(RangeAverageResult).result
+    assert answer.error is None and answer.frames == 20

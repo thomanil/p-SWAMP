@@ -9,16 +9,19 @@ themselves are defined in ``pipeline.py``, one registry per source::
     source  registry key                          what it is
     local   "local-<client id>"                   each visitor's own replay of the image's recording
     remote  "remote-<client id>"                  the same, from a remote data service over REST
+    hybrid  "hybrid-<client id>"                  the recording, plus a live feed its player can switch to
     live    "live" (the stream name)              one pipeline for every viewer; its modules run once
 
 What is per client is the **source**: which pipeline the client watches.
 ``POST /source`` switches it and the client's sockets follow; switching to a
 recording restarts it at the beginning, paused. The edge otherwise::
 
-    POST /playback/{play,stop,forward,back,seek,speed} ── typed PlayerCommand ─┐
-    POST /stats/reset                                  ── ResetStatsCommand ──┤  to the client's recording;
-                                                shared.dispatch_command ◀─────┘  409 on the shared live stream
-    bus ── PmuFrame · PlayerStatus · FrameStatsResult · ErrorEvent ──▶ one PmuStreamState ──▶ /ws
+    POST /playback/{play,stop,forward,back,seek,speed,
+                    range,refresh,live,replay}         ── typed PlayerCommand ─┐
+    POST /stats/{reset,average}                        ── a module's command ──┤  to the client's recording;
+                                                shared.dispatch_command ◀──────┘  409 on the shared live stream
+    bus ── PmuFrame · PlayerStatus · FrameStatsResult · RangeAverageResult · ErrorEvent
+        ──▶ one PmuStreamState ──▶ /ws
 
 Commands go up over REST and state comes down over the socket, as everywhere
 in this backend (doc/the-client-server-api.md). A command's reply is only an
@@ -51,6 +54,7 @@ from pswamp_core.bus import Overflow, Subscription
 from pswamp_core.messages import (
     Command,
     ErrorEvent,
+    GoLiveCommand,
     PauseCommand,
     PlayCommand,
     PlayerStatus,
@@ -362,6 +366,20 @@ async def refresh(client_id: ClientId) -> CommandAck:
     If the source is back, the error clears and the controls come back; plays
     nothing. 409 on the shared live stream."""
     return dispatch(RefreshCommand(client_id=client_id))
+
+
+@router.post("/playback/live", operation_id="pmu_test_streamer_go_live", responses=COMMAND_RESPONSES)
+async def go_live(client_id: ClientId) -> CommandAck:
+    """Switch this client's player from its recording to its live feed: the same
+    player and pipeline, now tailing. 409 unless the source has a live provider
+    (the hybrid source does)."""
+    return dispatch(GoLiveCommand(client_id=client_id))
+
+
+@router.post("/playback/replay", operation_id="pmu_test_streamer_replay", responses=COMMAND_RESPONSES)
+async def replay(client_id: ClientId) -> CommandAck:
+    """Back to the recording from the player's live feed: its beginning, paused."""
+    return dispatch(ReplayCommand(client_id=client_id))
 
 
 class SourceBody(BaseModel):
