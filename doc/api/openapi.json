@@ -2369,6 +2369,58 @@
         ]
       }
     },
+    "/api/pmu-test-streamer/playback/refresh": {
+      "post": {
+        "description": "Retry a failed provider: the player asks the gateway again what it holds.\nIf the source is back, the error clears and the controls come back; plays\nnothing. 409 on the shared live stream.",
+        "operationId": "pmu_test_streamer_refresh",
+        "parameters": [
+          {
+            "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "description": "The browser's client id -- the same value its WebSockets send, which is what makes a command apply to the pipeline the page is watching.",
+              "pattern": "^\\d{1,20}$",
+              "title": "Client Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "The client has no live pipeline: its page is not open."
+          },
+          "409": {
+            "description": "The command does not apply in the pipeline's current state."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refresh",
+        "tags": [
+          "pmu-test-streamer"
+        ]
+      }
+    },
     "/api/pmu-test-streamer/playback/seek": {
       "post": {
         "description": "Jump the replay to an offset into the recording. 409 while live.",

@@ -205,6 +205,12 @@ uv run --project app/server-python \
 
 # --- 7: the streamer, and its module wherever it runs -------------------------
 section "PMU test streamer (the stats module's result reaches the socket)"
+# The retry flow stops and starts the remote data stub, so it is handed the
+# commands only when this script owns the compose stack.
+if [ "$STARTED_STACK" -eq 1 ]; then
+  export SMOKETEST_REMOTE_STOP="docker compose stop remote-data-stub"
+  export SMOKETEST_REMOTE_START="docker compose up -d --wait remote-data-stub"
+fi
 uv run --project app/server-python \
   python app/server-python/tools/smoketest_pmu_test_streamer.py "$BASE_URL" \
   || FAILURES+=("streamer flow")

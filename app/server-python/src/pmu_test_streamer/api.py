@@ -55,6 +55,7 @@ from pswamp_core.messages import (
     PlayCommand,
     PlayerStatus,
     PmuFrame,
+    RefreshCommand,
     ReplayCommand,
     SeekCommand,
     SpeedCommand,
@@ -212,6 +213,11 @@ def state_message(
     if frame is None or not _current(stats, frame, status):
         stats = None
     index, count = _position(status, frame)
+    error = latest.get(ErrorEvent) if latest else None
+    if error is not None and status.error is None and (
+        error.source == pipeline.player.name or error.source in pipeline.gateway.clients
+    ):
+        error = None  # a provider failure the player has since recovered from (a Retry)
     return PmuStreamState(
         source=source,
         sources_available=[source] if sources_available is None else sources_available,
@@ -219,7 +225,7 @@ def state_message(
         frame=frame,
         player=status,
         stats=stats,
-        error=latest.get(ErrorEvent) if latest else None,
+        error=error,
         average=latest.get(RangeAverageResult) if latest else None,
         frame_index=index,
         frame_count=count,
@@ -348,6 +354,14 @@ async def reset_stats(client_id: ClientId) -> CommandAck:
     routed by its class like the player's. 409 when there is nothing to reset
     (in-process; a module in a worker refuses there, as an ErrorEvent)."""
     return dispatch(ResetStatsCommand(client_id=client_id))
+
+
+@router.post("/playback/refresh", operation_id="pmu_test_streamer_refresh", responses=COMMAND_RESPONSES)
+async def refresh(client_id: ClientId) -> CommandAck:
+    """Retry a failed provider: the player asks the gateway again what it holds.
+    If the source is back, the error clears and the controls come back; plays
+    nothing. 409 on the shared live stream."""
+    return dispatch(RefreshCommand(client_id=client_id))
 
 
 class SourceBody(BaseModel):

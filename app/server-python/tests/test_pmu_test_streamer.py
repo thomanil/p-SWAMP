@@ -627,3 +627,41 @@ def test_the_remote_recording_is_offered_once_a_service_url_is_configured(monkey
     assert pipeline.key == "remote-5"
     (client,) = pipeline.gateway.clients.values()
     assert isinstance(client, RemoteDataClient) and client.capabilities == Capability.HISTORY_CONSUME
+
+
+# --- retry: a provider that fails, then answers ------------------------------------------
+
+
+class FlakyClient(SampleRecordingClient):
+    """The recording, behind a switch: while ``down``, its coverage call fails."""
+
+    down = False
+
+    async def coverage(self, model, mRID=None):
+        if FlakyClient.down:
+            raise ConnectionError("the store is down")
+        return await super().coverage(model, mRID)
+
+
+async def test_retry_clears_a_provider_failure_once_the_source_is_back(edge, monkeypatch):
+    monkeypatch.setenv("PMU_TEST_STREAMER_LOCAL_CLIENTS", "flaky:test_pmu_test_streamer:FlakyClient")
+    monkeypatch.setattr(FlakyClient, "down", True)
+    pipeline = await api.REGISTRIES["local"].acquire("local-31")
+    try:
+        message = api.state_message(pipeline)
+        assert "the store is down" in message.player.error and message.error is not None
+
+        monkeypatch.setattr(FlakyClient, "down", False)
+        assert (await api.refresh("31")).applied == "refresh"
+        await eventually(lambda: pipeline.player.status().error is None)
+        message = api.state_message(pipeline)
+        assert message.player.coverage_start is not None
+        assert message.error is None  # the page no longer shows a failure it recovered from
+
+        with socket_open("31"):
+            await api.choose_source("31", api.SourceBody(source="live"))
+            with pytest.raises(HTTPException) as refused:
+                await api.refresh("31")
+            assert refused.value.status_code == 409
+    finally:
+        api.REGISTRIES["local"].release("local-31")

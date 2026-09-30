@@ -33,7 +33,9 @@ the server's own environment, urllib for the POSTs, every step reported.
 
 import asyncio
 import json
+import os
 import random
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -332,6 +334,47 @@ async def live_flow(base_url: str, ws_url: str) -> None:
         choose(base_url, a, "local")
 
 
+async def retry_flow(base_url: str, ws_url: str) -> None:
+    """The remote service goes away and comes back: the page's Retry. Runs only
+    when the caller hands over how to stop and start the stub (e2e-smoke-test.sh
+    does, when it owns the compose stack)."""
+    stop, start = os.environ.get("SMOKETEST_REMOTE_STOP"), os.environ.get("SMOKETEST_REMOTE_START")
+    if not (stop and start):
+        print("\n  Retry flow skipped: no SMOKETEST_REMOTE_STOP/START (the stack is not ours)")
+        return
+    client_id = str(random.randrange(10**9, 10**10))
+    print(f"\n  Retry flow (client_id={client_id})")
+    subprocess.run(stop, shell=True, check=True, capture_output=True)
+    try:
+        async with connect(f"{ws_url}{WS_PATH}?client_id={client_id}") as ws:
+            await asyncio.wait_for(ws.recv(), RECV_TIMEOUT)
+            choose(base_url, client_id, "remote")
+            down = await next_state(
+                ws, lambda s: s.get("source") == "remote" and (s.get("player") or {}).get("error"), STATS_TIMEOUT
+            )
+            check(
+                "with the remote service down, the recording stops with the provider's error",
+                bool((down.get("player") or {}).get("error")),
+                f"last state {json.dumps(down)[:300]}",
+            )
+            subprocess.run(start, shell=True, check=True, capture_output=True)
+            status, body = post(base_url, f"{API_PATH}/playback/refresh", client_id)
+            check("POST /playback/refresh -> 200", status == 200 and body.get("applied") == "refresh", f"got {status} {body}")
+            back = await next_state(
+                ws,
+                lambda s: not (s.get("player") or {}).get("error") and (s.get("player") or {}).get("coverage_start"),
+                STATS_TIMEOUT,
+            )
+            check(
+                "after Retry, the error clears and the recording's coverage is back",
+                not (back.get("player") or {}).get("error") and back.get("error") is None,
+                f"last state {json.dumps(back)[:300]}",
+            )
+            choose(base_url, client_id, "local")
+    finally:
+        subprocess.run(start, shell=True, capture_output=True)
+
+
 async def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print(f"usage: {argv[0]} <base-url>", file=sys.stderr)
@@ -346,6 +389,10 @@ async def main(argv: list[str]) -> int:
         await remote_flow(base_url, ws_url)
     except Exception as error:
         bad(f"remote recording flow could not run: {type(error).__name__}: {error}")
+    try:
+        await retry_flow(base_url, ws_url)
+    except Exception as error:
+        bad(f"retry flow could not run: {type(error).__name__}: {error}")
     try:
         await live_flow(base_url, ws_url)
     except Exception as error:

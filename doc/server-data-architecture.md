@@ -361,6 +361,7 @@ await player.step(-1)           # one frame back
 await player.seek(t)            # a NEW stream from t, announced as StreamChanged
 await player.replay(t0, t1)     # a bounded chunk: ends paused at t1
 await player.go_live()          # an open-ended stream from now, no transport controls
+await player.refresh()          # after a provider failed: ask the gateway again, clear the error
 player.status()                 # PlayerStatus: mode, cursor, can_seek, can_go_live, error, ...
 ```
 
@@ -492,6 +493,11 @@ browser. It is the only piece that knows about HTTP, and it has three parts:
 browser ── POST /api/pmu-test-streamer/stats/reset?client_id=42 ──▶ ResetStatsCommand ──▶ pipeline.dispatch
 browser ◀── /api/pmu-test-streamer/ws ◀── PmuStreamState ◀── bus (PmuFrame · PlayerStatus · FrameStatsResult · ErrorEvent)
 ```
+
+**Retry.** When a provider fails (the remote service is down, say), the
+player stops with `PlayerStatus.error` set and the page offers **Retry**:
+`POST /playback/refresh` sends a `RefreshCommand`, the player asks the gateway
+again, and once the source answers the error clears and the controls come back.
 
 **A chunk.** `POST /playback/range {start_offset_s, end_offset_s}` is the
 player's bounded replay (`ReplayCommand` with an end): it plays exactly that

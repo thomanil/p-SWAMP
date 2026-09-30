@@ -38,7 +38,7 @@ export function usePmuStreamSocket() {
   const seen = message?.frame?.header
   if (seen && seen.header_id !== header?.header_id) setHeader(seen)
 
-  const fire = (action: 'play' | 'stop' | 'forward' | 'back') =>
+  const fire = (action: 'play' | 'stop' | 'forward' | 'back' | 'refresh') =>
     fireCommand(
       'pmu-test-streamer',
       postCommand(`${PMU_STREAM_API_PATH}/playback/${action}`),
@@ -48,6 +48,8 @@ export function usePmuStreamSocket() {
   const stop = useCallback(() => fire('stop'), [])
   const forward = useCallback(() => fire('forward'), [])
   const back = useCallback(() => fire('back'), [])
+  /** Retry a failed provider: ask the gateway again what it holds. */
+  const retry = useCallback(() => fire('refresh'), [])
   /** Watch another source: a recording (this browser's own, restarted from its
    *  beginning) or the live stream every viewer shares. */
   const chooseSource = useCallback(
@@ -117,5 +119,6 @@ export function usePmuStreamSocket() {
     resetStats,
     playRange,
     averageRange,
+    retry,
   }
 }

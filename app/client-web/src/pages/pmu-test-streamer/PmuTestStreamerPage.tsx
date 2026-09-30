@@ -76,6 +76,7 @@ export function PmuTestStreamerPage() {
     resetStats,
     playRange,
     averageRange,
+    retry,
   } = usePmuStreamSocket()
 
   // The chunk the range controls act on, in seconds from the recording's start.
@@ -247,11 +248,23 @@ export function PmuTestStreamerPage() {
           <span className="font-mono text-xs">{stats?.cim_reference_id ?? '—'}</span>
         </div>
 
-        {error && (
-          <p className="w-full text-xs text-destructive" role="status">
-            {error.source}: {error.message}
-            {error.detail ? ` — ${error.detail}` : ''}
+        {/* The stream stopped because its provider failed: say why, and offer
+            to ask the gateway again (RefreshCommand), which clears it once the
+            source is back. */}
+        {player?.error ? (
+          <p className="flex w-full items-center gap-2 text-xs text-destructive" role="status">
+            <span>The source stopped: {player.error}</span>
+            <Button size="sm" variant="outline" disabled={!connected} onClick={retry}>
+              Retry
+            </Button>
           </p>
+        ) : (
+          error && (
+            <p className="w-full text-xs text-destructive" role="status">
+              {error.source}: {error.message}
+              {error.detail ? ` — ${error.detail}` : ''}
+            </p>
+          )
         )}
 
         {/* Seek: a scrub bar over the recording, enabled only when the player

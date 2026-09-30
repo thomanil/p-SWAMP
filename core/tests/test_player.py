@@ -324,3 +324,35 @@ async def test_a_provider_failure_ends_the_stream_with_the_error_and_the_player_
             assert player.status().error is not None or player.cursor is not None
         finally:
             await player.stop()  # does not re-raise the stored failure
+
+
+async def test_a_player_over_an_unreachable_source_starts_stopped_and_a_refresh_recovers(history_client):
+    """The source cannot be reached when the pipeline starts: the player starts
+    anyway, stopped, with the client's own error named; refresh() asks again and,
+    once the source answers, clears it without playing anything."""
+    bus = InProcessBus()
+    bus.bind(asyncio.get_running_loop())
+    answers = history_client.coverage
+
+    async def refused(model, mRID=None):
+        raise ConnectionError("refused")
+
+    history_client.coverage = refused  # type: ignore[method-assign]
+    player = Player(DataGateway([history_client]), bus, model=Measurement, paced=False)
+    try:
+        with bus.subscribe(ErrorEvent, overflow=Overflow.GROW) as errors:
+            await player.start()
+            (event,) = await take(errors, 1)
+        status = player.status()
+        assert status.paused and status.coverage_start is None
+        assert status.error == "history: ConnectionError: refused" and event.source == "history"
+
+        await player.refresh()  # still down: the error stands
+        assert player.status().error is not None
+
+        history_client.coverage = answers  # type: ignore[method-assign]
+        await player.refresh()  # back: the error clears, nothing plays
+        status = player.status()
+        assert status.error is None and status.coverage_start == at(0) and status.paused
+    finally:
+        await player.stop()
