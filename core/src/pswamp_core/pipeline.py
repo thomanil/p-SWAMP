@@ -29,6 +29,14 @@ run once however many people watch. A client's run switched to a live source
 opens no stream: it *follows* the live run, taking that key's frames and
 results off the transport into its own ``latest``.
 
+**A recording's results can be kept and shown again.** A run given a
+``ResultCache`` puts the results of the modules that allow it
+(``Module.cache_results``) there, under the recording they were computed
+from, and reads them back at its cursor. So a client seeking back over a part
+already played, by it or by anyone on that recording, sees the result at once
+where the module's window would otherwise have to fill again. The app's runs
+share one cache; live sources never use it.
+
 A **``PipelineRegistry``** keeps one run per key: it builds a run on first
 ``acquire``, keeps it through a reload, evicts it when idle or, at the cap,
 the least recently used one nobody is watching.
@@ -50,6 +58,7 @@ from .log import get_logger
 from .messages.commands import Command
 from .messages.control import PipelineClosed, PlayerStatus
 from .messages.errors import ErrorEvent
+from .modules import Module
 from .player import PLAYER_COMMANDS, Player
 from .subscription import Overflow
 from .transport import Outbox
@@ -60,7 +69,7 @@ if TYPE_CHECKING:
     from .datagateway import DataGateway
     from .messages.data_model import DataModel
     from .messages.results import ResultEnvelope
-    from .modules import Module
+    from .result_cache import ResultCache
     from .transport import Transport, TransportSubscription
 
 __all__ = [
@@ -78,6 +87,10 @@ logger = get_logger("pswamp_core.pipeline")
 #: How long a run waits at start for its topics to be received.
 _READY_TIMEOUT_S = 20.0
 
+#: How many of its recording streams a run remembers the source of. A result
+#: can come back after its stream ended (a seek); never this many seeks later.
+_STREAMS_NOTED = 64
+
 M = TypeVar("M", bound="DataModel")
 
 
@@ -93,7 +106,9 @@ class Pipeline:
     Raises ``ValueError`` when two receivers (the player, a module) take the
     same command class: a command class is an address. Also when two classes
     of the pipeline have the same topic, as two of the same name do: a topic
-    carries one class.
+    carries one class. Also for a module that sets ``cache_results`` where
+    its results could not be trusted to be the same for everyone
+    (``_cannot_cache``).
     """
 
     app: str
@@ -115,6 +130,29 @@ class Pipeline:
                     f"{self.app}: {other.__module__}.{other.__qualname__} and {model.__module__}.{model.__qualname__} "
                     f"are both on topic {model.topic}; rename one, or give it a topic of its own (topic: ClassVar[str])"
                 )
+        for module in self.modules:
+            reason = self._cannot_cache(module) if module.cache_results else None
+            if reason is not None:
+                raise ValueError(f"{self.app}: {module.__name__} sets cache_results, but {reason}")
+
+    def _cannot_cache(self, module: type[Module]) -> str | None:
+        """Why ``module``'s results cannot be kept and shown again, if they
+        cannot. These are the cases the pipeline can see; whether the
+        analysis is deterministic it cannot, and takes the author's word."""
+        if module.commands:
+            return (
+                "it takes commands: a command could change what it computes, "
+                "and cached results are not kept per setting"
+            )
+        reads = getattr(module, "input_model", None)
+        if reads is None or "seq" not in reads.model_fields:
+            return "it does not read frames: without a frame's number, a lost input cannot be told from an unbroken run"
+        if module.warm_up_s > 0 and module.reset is Module.reset:
+            return "it has a warm-up and no reset(): its window would keep what it held before a seek"
+        sharing = [m.__name__ for m in self.modules if m is not module and m.output_model is module.output_model]
+        if sharing:
+            return f"{', '.join(sharing)} publishes {module.output_model.__name__} too: a cached result could be either's"
+        return None
 
     @property
     def inputs(self) -> frozenset[type[DataModel]]:
@@ -204,10 +242,20 @@ class PipelineRun:
         loop: The player starts a recording over at its end.
         live_source: Make this the shared run of that live source, instead of
             a client's run.
+        cache: Where to keep the results of modules with ``cache_results``
+            and read them back at the cursor; the app's runs share one.
+            ``None``, or a shared live run: nothing is kept.
     """
 
     def __init__(
-        self, key: str, pipeline: Pipeline, transport: Transport, *, loop: bool = True, live_source: str | None = None
+        self,
+        key: str,
+        pipeline: Pipeline,
+        transport: Transport,
+        *,
+        loop: bool = True,
+        live_source: str | None = None,
+        cache: ResultCache | None = None,
     ) -> None:
         self.key = key
         self.pipeline = pipeline
@@ -230,6 +278,13 @@ class PipelineRun:
         self._subscriptions: list[TransportSubscription] = []
         self._tasks: list[asyncio.Task] = []
         self._started = False
+        self.cache = None if self.shared else cache
+        #: The result classes kept: those of the modules that allow it.
+        self._kept: tuple[type[ResultEnvelope], ...] = (
+            () if self.cache is None else tuple(m.output_model for m in pipeline.modules if m.cache_results)
+        )
+        #: The source of each recording stream this run's player read.
+        self._recorded: dict[str, str] = {}
 
     # -- the player's sink, and the view ----------------------------------------------
 
@@ -240,6 +295,9 @@ class PipelineRun:
             self._follow(message)
         elif message is self.player.last_frame:
             self.frame = message
+            if self._kept:
+                self._note_stream(message)
+                self._show_kept()
         self._remember(message)
         frame = self.shared and message is self.player.last_frame
         if frame or type(message) in self.pipeline.inputs or isinstance(message, ErrorEvent):
@@ -256,6 +314,9 @@ class PipelineRun:
 
     def _remember(self, message: DataModel) -> None:
         self.latest.remember(message)
+        self._wake()
+
+    def _wake(self) -> None:
         for event in self._waiters:
             event.set()
 
@@ -271,6 +332,8 @@ class PipelineRun:
         # live run's) are not about what comes next.
         self.latest.forget(*self.pipeline.results)
         if key is None:
+            # Back on a recording, whose first frame is already at the cursor.
+            self._show_kept()
             return
         model = self.gateway.active.model
         self.frame = None
@@ -281,6 +344,76 @@ class PipelineRun:
         if self._following is not None:
             self._following.close()  # ends its _receive task
             self._following = None
+
+    # -- kept results -----------------------------------------------------------------
+
+    def from_cache(self, result: ResultEnvelope | None) -> bool:
+        """Whether ``result``, as shown now, was read from the cache: computed
+        in another stream than the one at the cursor."""
+        return result is not None and self.cache is not None and result.stream != getattr(self.frame, "stream", None)
+
+    def _note_stream(self, frame: DataModel) -> None:
+        """Remember which recording ``frame``'s stream reads: a result is kept
+        under the source of the stream it was computed in. Only a recording's
+        frames come here: a client's player reads no live stream itself, it
+        follows the shared run's, so nothing of a live source is ever kept."""
+        stream = getattr(frame, "stream", None)
+        if stream is None or stream in self._recorded:
+            return
+        self._recorded[stream] = self.gateway.source
+        while len(self._recorded) > _STREAMS_NOTED:
+            del self._recorded[next(iter(self._recorded))]
+
+    def _show_kept(self) -> bool:
+        """For each kept class with no result of the cursor's stream showing:
+        show the cache's result for the cursor, or none. ``True`` when what
+        shows changed. Nothing unless the cursor is in a recording stream of
+        this run, so nothing while following a live source."""
+        try:
+            stream = getattr(self.frame, "stream", None)
+            source = None if stream is None else self._recorded.get(stream)
+            if source is None:
+                return False
+            changed = False
+            for cls in self._kept:
+                shown = self.latest.get(cls)
+                if shown is not None and shown.stream == stream:
+                    continue  # the module's own, from this stream
+                kept = self.cache.at(source, cls, self.frame.timestamp)
+                if kept is shown:
+                    continue
+                if kept is None:
+                    self.latest.forget(cls)
+                else:
+                    self.latest.remember(kept)
+                changed = True
+            return changed
+        except Exception:
+            self._drop_cache("reading")
+            return False
+
+    def _take_kept(self, result: ResultEnvelope) -> None:
+        """A result of a kept class: keep it if it was computed from a
+        recording, and show it if it is about the stream at the cursor."""
+        try:
+            source = None if result.stream is None else self._recorded.get(result.stream)
+            if source is not None and result.request_id is None:
+                self.cache.put(source, result)
+            if result.stream == getattr(self.frame, "stream", None):
+                self._remember(result)
+            elif self._show_kept():
+                # From an earlier stream, and the result for the cursor all
+                # the same: a step back to where that stream had just been.
+                self._wake()
+        except Exception:
+            self._drop_cache("keeping")
+            self._remember(result)
+
+    def _drop_cache(self, doing: str) -> None:
+        """Carry on without the cache: its failure must not stop the player's
+        task or the delivery of results."""
+        logger.exception("%s: %s cached results failed; this run goes on without the cache", self.key, doing)
+        self.cache, self._kept = None, ()
 
     # -- commands -------------------------------------------------------------------
 
@@ -342,7 +475,10 @@ class PipelineRun:
 
     async def _receive(self, results: TransportSubscription) -> None:
         async for _, result in results:
-            self._remember(result)
+            if type(result) in self._kept:
+                self._take_kept(result)
+            else:
+                self._remember(result)
 
     async def _receive_followed(self, messages: TransportSubscription, frames: type[DataModel]) -> None:
         async for _, message in messages:
