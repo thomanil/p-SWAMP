@@ -1759,7 +1759,7 @@ mind when editing that command (`tools/src/pswamp_tools/commands/deploy.py`):
   the server, Kafka and both workers), **`windows-checks`**, which runs
   `uv run pswamp check` and `uv run pswamp test server` on `windows-latest`, so
   that the CLI's Windows promise is enforced rather than hoped for, and
-  **`load-test`**, which runs `uv run pswamp test load --clients 4` on the
+  **`load-test`**, which runs `uv run pswamp test load --clients 2` on the
   compose stack once every other job has finished, whatever their result
   (`needs` all six, `if: !cancelled()`). None is
   yet a required check. Every job drives the repo through the `pswamp` CLI. The
